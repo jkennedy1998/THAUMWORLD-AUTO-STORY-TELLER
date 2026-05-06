@@ -1,6 +1,7 @@
 import type { Canvas, Module, PointerEvent, Rect } from "../types.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_color_by_name } from "../colors.js";
+import { get_standard_ux_chrome_colors } from "../module_borders.js";
 
 export type ActorClaimEntry = {
   actor_ref: string;
@@ -52,7 +53,7 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
     return `${text.slice(0, width - 1)}~`;
   }
 
-  function draw_line(c: Canvas, x: number, y: number, text: string, rgb = get_color_by_name("off_white").rgb, weight_index = 2): void {
+  function draw_line(c: Canvas, x: number, y: number, text: string, rgb = get_standard_ux_chrome_colors().text_rgb, weight_index = 2): void {
     for (let i = 0; i < text.length; i += 1) {
       c.set(x + i, y, { char: text[i]!, rgb, weight_index, render_index: 6, style: "regular" });
     }
@@ -111,11 +112,7 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
     rect: opts.rect,
     title: opts.get_title,
     is_visible: opts.get_is_visible,
-    background: { rgb: get_color_by_name("off_black").rgb },
-    border: {
-      border_rgb: get_color_by_name("vivid_cyan").rgb,
-      text_rgb: get_color_by_name("vivid_cyan").rgb,
-    },
+    
     resize: { min_width: 32, min_height: 12, max_width: 54, max_height: 30 },
     gizmos: {
       enabled: ["move", "close", "seamless"],
@@ -130,6 +127,7 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
       sync_cursor();
       row_hits = [];
       button_hits = [];
+      const { accent_rgb, muted_rgb, text_rgb } = get_standard_ux_chrome_colors();
       const entries = get_entries();
       const current_ref = opts.get_current_actor_ref();
       const selected = get_selected_entry();
@@ -151,7 +149,7 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
       const current_summary = current_ref ? `Current: ${current_ref}` : "Current: none";
       draw_line(c, rect.x0 + 1, rect.y1 - 2, trim_to_width(current_summary, inner_width), current_ref ? get_color_by_name("vivid_green").rgb : get_color_by_name("pale_orange").rgb, 4);
       if (guest_label) {
-        draw_line(c, rect.x0 + 1, rect.y1 - 3, trim_to_width(guest_label, inner_width), get_color_by_name("medium_gray").rgb, 3);
+        draw_line(c, rect.x0 + 1, rect.y1 - 3, trim_to_width(guest_label, inner_width), muted_rgb, 3);
       }
 
       for (let row = 0; row < list_height; row += 1) {
@@ -176,8 +174,8 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
             : entry.blocked_by_current_claim
               ? get_color_by_name("pale_orange").rgb
             : is_cursor
-              ? get_color_by_name("vivid_yellow").rgb
-              : get_color_by_name("off_white").rgb;
+              ? accent_rgb
+              : text_rgb;
         draw_line(c, rect.x0 + 1, y, line, rgb, is_cursor ? 6 : 4);
         row_hits.push({ y, actor_ref: entry.actor_ref });
       }
@@ -193,7 +191,10 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
       let x = rect.x0 + 1;
       for (const button of button_specs) {
         const text = button.enabled ? button.label : button.label.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
-        draw_line(c, x, button_y, trim_to_width(text, Math.max(1, rect.x1 - x)), button.enabled ? get_color_by_name("vivid_blue").rgb : get_color_by_name("dark_gray").rgb, 4);
+        const button_rgb = button.enabled
+          ? (button.action === 'delete' ? get_color_by_name('vivid_red').rgb : (button.action === 'claim' ? accent_rgb : text_rgb))
+          : muted_rgb;
+        draw_line(c, x, button_y, trim_to_width(text, Math.max(1, rect.x1 - x)), button_rgb, 4);
         button_hits.push({ x0: x, x1: x + text.length - 1, y: button_y, action: button.action });
         x += text.length + 1;
       }
@@ -207,9 +208,9 @@ export function make_actor_claim_module(opts: ActorClaimModuleConfig): Module {
               ? `${selected.actor_ref} - release current actor first`
             : `${selected.actor_ref} - available`
         : (entries.length > 0 ? "select an actor" : "no claimable actors");
-      draw_line(c, rect.x0 + 1, footer_y, trim_to_width(footer, inner_width), get_color_by_name("medium_gray").rgb, 3);
+      draw_line(c, rect.x0 + 1, footer_y, trim_to_width(footer, inner_width), muted_rgb, 3);
       for (let i = 0; i < status_lines.length && footer_y - 1 - i > rect.y0; i += 1) {
-        draw_line(c, rect.x0 + 1, footer_y - 1 - i, trim_to_width(status_lines[i] ?? "", inner_width), get_color_by_name("medium_gray").rgb, 3);
+        draw_line(c, rect.x0 + 1, footer_y - 1 - i, trim_to_width(status_lines[i] ?? "", inner_width), muted_rgb, 3);
       }
     },
     on_pointer_down_content(e: PointerEvent): void {

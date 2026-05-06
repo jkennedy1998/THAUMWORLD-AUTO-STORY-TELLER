@@ -3,6 +3,7 @@ import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_color_by_name } from "../colors.js";
 import { tag_key } from "../../tag_system/tag_key.js";
 import type { TagInstance } from "../../tag_system/registry.js";
+import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 
 export type EntityEditorField = {
   key: string;
@@ -76,11 +77,7 @@ export function make_entity_editor_module(opts: EntityEditorModuleConfig): Modul
     rect: opts.rect,
     title: opts.get_title,
     is_visible: opts.get_is_visible,
-    background: { rgb: get_color_by_name("off_black").rgb },
-    border: {
-      border_rgb: get_color_by_name("pale_orange").rgb,
-      text_rgb: get_color_by_name("pale_orange").rgb,
-    },
+    background: { rgb: get_ui_semantic_rgb('background') },
     resize: { min_width: 28, min_height: 12, max_width: 56, max_height: 28 },
     gizmos: {
       enabled: ["close", "move", "resize", "seamless"],
@@ -114,7 +111,7 @@ export function make_entity_editor_module(opts: EntityEditorModuleConfig): Modul
         const prefix = is_active ? ">" : " ";
         const edit_mark = field.editable === false ? "-" : ":";
         const line = trim_to_width(`${prefix}${field.label}${edit_mark} ${field.value}`, inner_width);
-        draw_line(c, rect.x0 + 1, y, line, is_active ? get_color_by_name("vivid_yellow").rgb : get_color_by_name("off_white").rgb, is_active ? 6 : 4);
+        draw_line(c, rect.x0 + 1, y, line, is_active ? get_ui_semantic_rgb('vivid') : get_ui_semantic_rgb('bright'), is_active ? 3 : 2);
         row_hits.push({ y, hit: { kind: "field", key: field.key } });
         y -= 1;
       }
@@ -129,7 +126,7 @@ export function make_entity_editor_module(opts: EntityEditorModuleConfig): Modul
           const selected = tag_key(tag) === selected_tag_key;
           const prefix = selected ? ">" : " ";
           const line = trim_to_width(`${prefix}${tag.name} ${Math.floor(Number(tag.mag ?? 0) || 0)}`, inner_width);
-          draw_line(c, rect.x0 + 1, y, line, selected ? get_color_by_name("vivid_yellow").rgb : get_color_by_name("off_white").rgb, selected ? 6 : 4);
+          draw_line(c, rect.x0 + 1, y, line, selected ? get_ui_semantic_rgb('vivid') : get_ui_semantic_rgb('bright'), selected ? 3 : 2);
           row_hits.push({ y, hit: { kind: "tag", index: i } });
           y -= 1;
         }

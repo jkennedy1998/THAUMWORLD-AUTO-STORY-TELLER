@@ -2,6 +2,7 @@ import type { Canvas, Module, PointerEvent, Rect, Rgb, WheelEvent } from "../typ
 import { calculate_grid_dimensions } from "../../types/container.js";
 import { get_color_by_name } from "../colors.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
+import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 import { make_item_payload, make_slot_payload } from "../../render_shaders/payload_builders.js";
 import { ctx_character_slot, ctx_container_ui } from "../../render_shaders/context_builders.js";
 import { draw_render_queue, type RenderRequest } from "../../render_shaders/render_queue.js";
@@ -53,13 +54,13 @@ function get_surface_slot_rgb(surface: StorageSurface): Rgb {
   if (surface.surface_kind === "garb") return { r: 60, g: 180, b: 100 };
   if (surface.surface_kind === "container") return { r: 186, g: 164, b: 108 };
   if (surface.surface_kind === "grow") return { r: 119, g: 184, b: 84 };
-  return { r: 120, g: 120, b: 120 };
+  return get_ui_semantic_rgb('medium');
 }
 
 function get_group_rgb(region: string): Rgb {
-  if (region === "body") return get_color_by_name("pale_gray").rgb;
-  if (region === "attached_storage") return get_color_by_name("pale_orange").rgb;
-  return get_color_by_name("light_gray").rgb;
+  if (region === "body") return get_ui_semantic_rgb('bright');
+  if (region === "attached_storage") return get_ui_semantic_rgb('vivid');
+  return get_ui_semantic_rgb('medium');
 }
 
 function hex_to_rgb(hex: string): Rgb | null {
@@ -153,11 +154,7 @@ export function make_owner_inventory_module(opts: OwnerInventoryModuleConfig): M
       return `${name.slice(0, 10)} INV`;
     },
     is_visible: opts.get_is_visible,
-    background: { rgb: get_color_by_name("off_black").rgb },
-    border: {
-      border_rgb: get_color_by_name("light_gray").rgb,
-      text_rgb: get_color_by_name("light_gray").rgb,
-    },
+    background: { rgb: get_ui_semantic_rgb('background') },
     gizmos: {
       enabled: ["close", "move", "resize", "seamless"],
       can_close: true,
@@ -223,7 +220,7 @@ export function make_owner_inventory_module(opts: OwnerInventoryModuleConfig): M
       const content_bottom = current_rect.y0 + 1;
 
       if (!view) {
-        draw_text(c, inner_left, content_top, "NO INVENTORY", get_color_by_name("medium_gray").rgb, 3);
+        draw_text(c, inner_left, content_top, "NO INVENTORY", get_ui_semantic_rgb('medium'), 2);
         return;
       }
 
@@ -232,7 +229,7 @@ export function make_owner_inventory_module(opts: OwnerInventoryModuleConfig): M
       for (const group of view.groups) {
         const group_y = content_top - (logical_y - scroll_rows);
         if (group_y >= content_bottom && group_y <= content_top) {
-          draw_text(c, inner_left, group_y, `[${group.contributor.name.toUpperCase()}]`, get_group_rgb(group.surfaces[0]?.display_region ?? "main"), 4);
+          draw_text(c, inner_left, group_y, `[${group.contributor.name.toUpperCase()}]`, get_group_rgb(group.surfaces[0]?.display_region ?? "main"), 3);
         }
         logical_y += 1;
 

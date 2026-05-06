@@ -17,6 +17,10 @@ import type { PainterLaunchIntent } from './painter_launch_types.js';
 import { diag_log } from '../shared/diagnostics.js';
 import type { EngineJoinSelection } from '../engine_multiplayer/connection_types.js';
 import type { ToolAssistedInputsJoinSnapshot } from '../mono_ui/runtime/automation_interfaces.js';
+import { load_ui_customization_state } from '../mono_ui/runtime/ui_customization_store.js';
+import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
+import { loadToolProperties } from '../ascii_painter/save_system.js';
+import { get_color_by_name } from '../mono_ui/colors.js';
 
 // Detect if we're in painter mode (set by preload script before page loads)
 const IS_PAINTER_MODE = (window as any).electronAPI?.appMode === 'ascii_painter';
@@ -58,6 +62,16 @@ const refresh_painter_shell_modules = () => {
 
 if (IS_PAINTER_MODE) {
     console.log('🎨 Initializing ASCII Painter Launch...');
+    try {
+        const painter_profile_scope = await resolve_profile_scope(PAINTER_CONFIG.selected_data_slot, 'thaum_painter');
+        const saved_tool_props = loadToolProperties();
+        await load_ui_customization_state(PAINTER_CONFIG.selected_data_slot, {
+            profile_scope: painter_profile_scope,
+            vivid_seed_rgb: saved_tool_props.user_selection_color_rgb ?? get_color_by_name('pumpkin').rgb,
+        });
+    } catch {
+        // Keep default semantic colors if painter profile customization preload fails.
+    }
     const get_launch_resume_file_path = (): string | null => {
         const candidate = launch_controller?.get_state().resume_candidate;
         return candidate?.source.kind === 'file' ? String(candidate.source.path ?? '').trim() || null : null;

@@ -7,12 +7,14 @@
 import type { Rect } from '../mono_ui/types.js';
 import { get_module_layout_state, load_module_layouts, rect_to_layout_data, reset_module_layouts, save_module_layouts, type ModulePositions, type ModuleVisibility } from '../mono_ui/runtime/module_layout_store.js';
 import type { CameraSettingsAppId } from '../mono_ui/runtime/camera_limits.js';
+import type { ProfileScope } from '../user_profiles/profile_scope.js';
 
 const STORAGE_KEY = 'painter_module_positions_cache';
 const VISIBILITY_STORAGE_KEY = 'painter_module_visibility_cache';
 
 let current_slot = 1;
 let current_app: CameraSettingsAppId = 'thaum_painter';
+let current_profile_scope: ProfileScope | null = null;
 let positions_cache: ModulePositions = {};
 let visibility_cache: ModuleVisibility = {};
 
@@ -40,14 +42,22 @@ function sync_local_storage_from_cache(): void {
   }
 }
 
-export function initModuleLayoutPersistence(slot: number, app: CameraSettingsAppId): void {
+export function initModuleLayoutPersistence(slot: number, app: CameraSettingsAppId, opts?: { get_profile_scope?: () => ProfileScope | null; profile_scope_ready?: Promise<ProfileScope> | null }): void {
   current_slot = slot;
   current_app = app;
+  current_profile_scope = opts?.get_profile_scope?.() ?? null;
   sync_cache_from_local_storage();
-  void load_module_layouts(slot, app).then((state) => {
-    positions_cache = state.positions;
-    visibility_cache = state.visibility;
-    sync_local_storage_from_cache();
+  const sync_from_store = (profile_scope?: ProfileScope | null): void => {
+    if (profile_scope) current_profile_scope = profile_scope;
+    void load_module_layouts(slot, app, profile_scope ?? current_profile_scope).then((state) => {
+      positions_cache = state.positions;
+      visibility_cache = state.visibility;
+      sync_local_storage_from_cache();
+    }).catch(() => null);
+  };
+  sync_from_store(current_profile_scope);
+  void opts?.profile_scope_ready?.then((profile_scope) => {
+    sync_from_store(profile_scope);
   }).catch(() => null);
 }
 
@@ -56,7 +66,7 @@ function persist_layout_state(): void {
   void save_module_layouts(current_slot, current_app, {
     positions: positions_cache,
     visibility: visibility_cache,
-  }).catch(() => null);
+  }, current_profile_scope).catch(() => null);
 }
 
 /**
@@ -110,7 +120,7 @@ export function clearModulePositions(): void {
   } catch {
     // ignore cache clear failures
   }
-  void reset_module_layouts(current_slot, current_app).catch(() => null);
+  void reset_module_layouts(current_slot, current_app, current_profile_scope).catch(() => null);
 }
 
 export function saveModuleVisibilityState(visibility: ModuleVisibility): void {

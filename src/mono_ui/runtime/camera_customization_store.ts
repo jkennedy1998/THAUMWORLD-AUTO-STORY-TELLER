@@ -1,6 +1,7 @@
 import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
-import { read_slot_json_file, write_slot_json_file } from '../../engine_persistence/slot_json_store.js';
+import { read_slot_json_file, write_slot_json_file, write_slot_relative_json_file } from '../../engine_persistence/slot_json_store.js';
 import { get_camera_limit_profile, sanitize_camera_config_for_app, type CameraSettingsAppId } from './camera_limits.js';
+import type { ProfileScope } from '../../user_profiles/profile_scope.js';
 
 export type CameraSettingsFile = {
   version: 1;
@@ -31,13 +32,17 @@ export function get_camera_settings_for_app(app_id: CameraSettingsAppId): Partia
   return clone_partial_camera_config(current_camera_settings.apps[app_id]);
 }
 
-export async function load_camera_settings(slot: number, app_id: CameraSettingsAppId): Promise<Partial<CameraConfig>> {
-  const response = await read_slot_json_file<CameraSettingsFile>(slot, CAMERA_SETTINGS_FILE_NAME);
+export async function load_camera_settings(slot: number, app_id: CameraSettingsAppId, profile_scope?: ProfileScope | null): Promise<Partial<CameraConfig>> {
+  const scoped_response = profile_scope ? await read_slot_json_file<CameraSettingsFile>(slot, profile_scope.files.camera_settings) : null;
+  const response = scoped_response?.data ? scoped_response : await read_slot_json_file<CameraSettingsFile>(slot, CAMERA_SETTINGS_FILE_NAME);
   current_camera_settings = response.data ? sanitize_camera_settings_file(response.data) : { version: 1, apps: {} };
+  if (profile_scope && !scoped_response?.data && response.data) {
+    await write_slot_relative_json_file(slot, profile_scope.files.camera_settings, current_camera_settings).catch(() => null);
+  }
   return get_camera_settings_for_app(app_id);
 }
 
-export async function save_camera_settings(slot: number, app_id: CameraSettingsAppId, partial: Partial<CameraConfig>): Promise<Partial<CameraConfig>> {
+export async function save_camera_settings(slot: number, app_id: CameraSettingsAppId, partial: Partial<CameraConfig>, profile_scope?: ProfileScope | null): Promise<Partial<CameraConfig>> {
   const next = sanitize_camera_config_for_app(app_id, {
     ...current_camera_settings.apps[app_id],
     ...partial,
@@ -49,11 +54,11 @@ export async function save_camera_settings(slot: number, app_id: CameraSettingsA
       [app_id]: next,
     },
   };
-  await write_slot_json_file(slot, CAMERA_SETTINGS_FILE_NAME, current_camera_settings);
+  await write_slot_json_file(slot, profile_scope?.files.camera_settings ?? CAMERA_SETTINGS_FILE_NAME, current_camera_settings);
   return clone_partial_camera_config(next);
 }
 
-export async function reset_camera_settings(slot: number, app_id: CameraSettingsAppId): Promise<void> {
+export async function reset_camera_settings(slot: number, app_id: CameraSettingsAppId, profile_scope?: ProfileScope | null): Promise<void> {
   current_camera_settings = {
     version: 1,
     apps: {
@@ -61,7 +66,7 @@ export async function reset_camera_settings(slot: number, app_id: CameraSettings
       [app_id]: {},
     },
   };
-  await write_slot_json_file(slot, CAMERA_SETTINGS_FILE_NAME, current_camera_settings);
+  await write_slot_json_file(slot, profile_scope?.files.camera_settings ?? CAMERA_SETTINGS_FILE_NAME, current_camera_settings);
 }
 
 export function get_camera_slider_specs_for_app(app_id: CameraSettingsAppId): ReturnType<typeof get_camera_limit_profile> {

@@ -5,7 +5,8 @@ export type ModuleRegistryChangeType =
   | "added"
   | "removed"
   | "position_changed"
-  | "visibility_changed";
+  | "visibility_changed"
+  | "z_order_changed";
 
 export type ModuleRegistryChange = {
   type: ModuleRegistryChangeType;
@@ -26,6 +27,9 @@ export interface ModuleRegistry {
   // Position management - returns new module since rect is immutable
   update_position(module_id: string, new_rect: Rect): Module | undefined;
   get_position(module_id: string): Rect | undefined;
+
+  // Z-order
+  bring_to_front(module_id: string): boolean;
 
   // Visibility
   set_visibility(module_id: string, visible: boolean): boolean;
@@ -120,6 +124,16 @@ export function create_module_registry(): ModuleRegistry {
 
     get_position(module_id: string): Rect | undefined {
       return positions.get(module_id);
+    },
+
+    bring_to_front(module_id: string): boolean {
+      const module = modules.get(module_id);
+      if (!module) return false;
+      modules.delete(module_id);
+      modules.set(module_id, module);
+      debug_log(`[ModuleRegistry] Brought module to front: ${module_id}`);
+      notify({ type: "z_order_changed", module_id, module });
+      return true;
     },
 
     set_visibility(module_id: string, visible: boolean): boolean {

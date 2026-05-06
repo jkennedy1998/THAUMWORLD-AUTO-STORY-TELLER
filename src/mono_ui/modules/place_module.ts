@@ -2,6 +2,7 @@ import type { Canvas, Module, Rect, Rgb, PointerEvent, WheelEvent, DragEvent, Ce
 import { rect_width, rect_height } from "../types.js";
 import { draw_module_border, PANEL_BORDER_PRESETS } from "../module_borders.js";
 import { get_color_by_name } from "../colors.js";
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import type { Place, PlaceNPC, PlaceActor, PlaceConnector, TilePosition, PlaceTile } from "../../types/place.js";
 import { type TagChangeEvent } from "../../shared/event_emitter.js";
 import { initWebSocketClient, type WebSocketClient } from "../websocket_client.js";
@@ -74,6 +75,12 @@ import {
   record_place_breath_tick,
 } from "../../shared/movement_debug_state.js";
 import { build_api_url } from '../../shared/multiplayer_transport.js';
+import {
+  draw_canvas_nav_cluster,
+  get_canvas_nav_hit,
+  type CanvasNavButtonId,
+  type CanvasNavViewAction,
+} from './canvas_nav_cluster.js';
 
 /**
  * Convert hex color string to RGB object
@@ -418,6 +425,8 @@ export type PlaceModuleConfig = {
   get_view_transition_euler?: () => { x: number; y: number; z: number };
   get_view_transition_kind?: () => 'swing' | 'roll' | null;
   get_use_focus_layer_opacity?: () => boolean;
+  on_step_view_action?: (action: CanvasNavViewAction) => void;
+  on_step_depth?: (dir: -1 | 1) => void;
 
   // Mouse parallax normalized (-1..+1), centered on place viewport.
   get_mouse_parallax?: () => { x: number; y: number };
@@ -624,11 +633,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   // eslint-disable-next-line no-console
   console.log('[MOVE_VEL_TEST] renderer place module version ' + JSON.stringify({ version: PLACE_MODULE_TIMING_VERSION }));
   let rect = config.rect;
-  const border_rgb = config.border_rgb ?? get_color_by_name("light_gray").rgb;
-  const bg_rgb = config.bg_rgb ?? get_color_by_name("off_black").rgb;
-  const npc_rgb = config.npc_rgb ?? get_color_by_name("pale_yellow").rgb;
-  const actor_rgb = config.actor_rgb ?? get_color_by_name("vivid_green").rgb;
-  const grid_rgb = config.grid_rgb ?? get_color_by_name("medium_gray").rgb;
+  const border_rgb = () => config.border_rgb ?? get_ui_semantic_rgb('dimmest');
+  const bg_rgb = () => config.bg_rgb ?? get_ui_semantic_rgb('background');
+  const npc_rgb = () => config.npc_rgb ?? get_ui_semantic_rgb('bright');
+  const actor_rgb = () => config.actor_rgb ?? get_ui_semantic_rgb('vivid');
+  const grid_rgb = () => config.grid_rgb ?? get_ui_semantic_rgb('medium');
 
   // View state
   const camera = create_place_camera_controller({ initial_scale: config.initial_scale ?? 1, padding_tiles: PADDING_TILES });
@@ -640,6 +649,9 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     can_save_position: false,
   };
   const gizmo_state: GizmoState = create_gizmo_state();
+  let show_canvas_nav_cluster = false;
+  let hovered_canvas_nav_button: CanvasNavButtonId | null = null;
+  let pressed_canvas_nav_button: CanvasNavButtonId | null = null;
 
   let hovered: HoveredTile = null;
   let targeted: TargetedEntity = null; // Track selected target for communication (follows entity)
@@ -656,6 +668,29 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
   // Inspection cycling state - tracks right-click inspect cycles per tile
   const inspect_cycle_state = new Map<string, number>();  // "x,y" -> current index
+
+  function getCanvasTopLeftGizmoCount(): number {
+    let count = 0;
+    if (gizmo_config.enabled.includes('move') && gizmo_config.can_move) count++;
+    if (gizmo_config.enabled.includes('close') && gizmo_config.can_close) count++;
+    if (gizmo_config.enabled.includes('save_position') && gizmo_config.can_save_position) count++;
+    if (gizmo_config.enabled.includes('resize')) count++;
+    if (gizmo_config.enabled.includes('seamless')) count++;
+    return count;
+  }
+
+  function getCanvasNavHit(x: number, y: number): CanvasNavButtonId | null {
+    return get_canvas_nav_hit(rect, show_canvas_nav_cluster, getCanvasTopLeftGizmoCount(), x, y);
+  }
+
+  function updateCanvasNavHover(x: number, y: number): void {
+    hovered_canvas_nav_button = getCanvasNavHit(x, y);
+  }
+
+  function clearCanvasNavInteraction(): void {
+    hovered_canvas_nav_button = null;
+    pressed_canvas_nav_button = null;
+  }
 
   function get_connector_at_tile(selected_place: Place, place: Place, tile_x: number, tile_y: number, world_z?: number): {
     connector: PlaceConnector;
@@ -2942,7 +2977,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       // When DOM world layers are mounted, leave the place interior transparent on
       // mono_canvas so the layered world render can show through.
       if (!dom_layers.get_is_mounted()) {
-        canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
+        canvas.fill_rect(inner, { char: " ", rgb: bg_rgb() });
       }
 
       // Spawn/update particles based on movement (used by later particle render pass).
@@ -3542,7 +3577,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const name = typeof (entity as any)?.name === 'string' && String((entity as any).name).trim().length > 0
           ? String((entity as any).name).trim()
           : (is_npc ? "Unknown NPC" : "Unknown Actor");
-        const defaultRgb = is_npc ? npc_rgb : actor_rgb;
+        const defaultRgb = is_npc ? npc_rgb() : actor_rgb();
         const cachedTags = entityTagCache.get(entityRef) ?? [];
 
         const def = get_body_model_def((entity as any)?.body_model_id);
@@ -5316,7 +5351,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         draw_module_border(canvas, {
           rect,
           style: PANEL_BORDER_PRESETS.default_double.style,
-          border_rgb,
+          border_rgb: border_rgb(),
           weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
           markers,
           header: {
@@ -5335,7 +5370,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
         // No place loaded - show placeholder
         const inner = inner_rect();
-        canvas.fill_rect(inner, { char: " ", rgb: bg_rgb });
+        canvas.fill_rect(inner, { char: " ", rgb: bg_rgb() });
         const msg = "No place loaded";
         const msg_x =
           inner.x0 + Math.floor((rect_width(inner) - msg.length) / 2);
@@ -5446,6 +5481,15 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         pending_place_draw_wrapper_ms = null;
         current_draw_transition_frame = null;
       }
+
+      draw_canvas_nav_cluster(canvas, {
+        rect,
+        show_cluster: show_canvas_nav_cluster,
+        top_left_gizmo_count: getCanvasTopLeftGizmoCount(),
+        hovered_button: hovered_canvas_nav_button,
+        pressed_button: pressed_canvas_nav_button,
+        render_index: 1003,
+      });
     },
 
     OnGlobalPointerDown(e: PointerEvent): void {
@@ -5454,8 +5498,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
     OnPointerMove(e: PointerEvent): void {
       update_gizmo_hover_state(e.x, e.y, rect, gizmo_config, gizmo_state);
+      updateCanvasNavHover(e.x, e.y);
       const place = config.get_place();
       if (!place) return;
+      if (getCanvasNavHit(e.x, e.y)) {
+        hovered = null;
+        config.on_hover_ground_item?.(-1, -1, null);
+        last_pointer_x = e.x;
+        last_pointer_y = e.y;
+        return;
+      }
       const painter_tool = config.get_place_painter_tool?.() ?? 'paint';
       const painter_preview = config.get_place_painter_preview?.() ?? null;
       const is_connector_paint = painter_tool === 'paint' && painter_preview?.kind === 'tile' && painter_preview?.id === 'place_connector';
@@ -5600,6 +5652,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnPointerUp(e: PointerEvent): void {
+      updateCanvasNavHover(e.x, e.y);
+      pressed_canvas_nav_button = null;
       if (painter_shape_drag_active) {
         const place = config.get_place();
         if (place) {
@@ -5844,6 +5898,23 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnPointerDown(e: PointerEvent): void {
+      updateCanvasNavHover(e.x, e.y);
+      const nav_hit = getCanvasNavHit(e.x, e.y);
+      if (nav_hit) {
+        pressed_canvas_nav_button = nav_hit;
+        if (nav_hit === 'nav_toggle') {
+          show_canvas_nav_cluster = !show_canvas_nav_cluster;
+          hovered_canvas_nav_button = getCanvasNavHit(e.x, e.y);
+        } else if (nav_hit === 'depth_prev') {
+          config.on_step_depth?.(-1);
+        } else if (nav_hit === 'depth_next') {
+          config.on_step_depth?.(1);
+        } else if (nav_hit !== 'pan_placeholder') {
+          config.on_step_view_action?.(nav_hit);
+        }
+        return;
+      }
+
       update_gizmo_hover_state(e.x, e.y, rect, gizmo_config, gizmo_state);
       if (is_in_gizmo_area(e.x, e.y, rect, gizmo_config)) {
         const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmo_config, gizmo_state);
@@ -5993,6 +6064,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     OnClick(e: PointerEvent): void {
       const place = config.get_place();
       if (!place) return;
+      if (getCanvasNavHit(e.x, e.y)) return;
 
       const painter_active = !!config.is_place_painter_active?.();
       if (painter_active) {
@@ -6518,6 +6590,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // Release held-movement if focus leaves the place.
     OnBlur(): void {
       try {
+        clearCanvasNavInteraction();
         const place = config.get_place();
         input_state.held_keys.clear();
         input_state.held_order = [];

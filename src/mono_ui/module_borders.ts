@@ -1,4 +1,5 @@
 import type { Canvas, Rect, Rgb } from "./types.js";
+import { get_ui_semantic_rgb } from './runtime/ui_customization_store.js';
 
 /**
  * Border style configuration
@@ -81,10 +82,43 @@ export const PANEL_BORDER_PRESETS = {
     style: BORDER_STYLES.thick,
     weight_index: 2,
   },
+  standard_ux: {
+    style: BORDER_STYLES.thick,
+    weight_index: 2,
+  },
 } as const;
 
 export const MODULE_BORDER_RENDER_INDEX = 6;
 export const MODULE_CHROME_RENDER_INDEX = 7;
+
+export type StandardUxChromeColors = {
+  background_rgb: Rgb;
+  border_rgb: Rgb;
+  title_rgb: Rgb;
+  text_rgb: Rgb;
+  accent_rgb: Rgb;
+  muted_rgb: Rgb;
+};
+
+export function get_standard_ux_chrome_colors(): StandardUxChromeColors {
+  return {
+    background_rgb: get_ui_semantic_rgb('background'),
+    border_rgb: get_ui_semantic_rgb('dimmest'),
+    title_rgb: get_ui_semantic_rgb('medium'),
+    text_rgb: get_ui_semantic_rgb('bright'),
+    accent_rgb: get_ui_semantic_rgb('vivid'),
+    muted_rgb: get_ui_semantic_rgb('medium'),
+  };
+}
+
+export function draw_standard_ux_border(c: Canvas, rect: Rect, overrides?: { border_rgb?: Rgb; weight_index?: number }): void {
+  draw_module_border(c, {
+    rect,
+    style: PANEL_BORDER_PRESETS.standard_ux.style,
+    border_rgb: overrides?.border_rgb ?? get_standard_ux_chrome_colors().border_rgb,
+    weight_index: overrides?.weight_index ?? PANEL_BORDER_PRESETS.standard_ux.weight_index,
+  });
+}
 
 /**
  * Configuration for drawing a module border

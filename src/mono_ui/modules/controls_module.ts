@@ -1,6 +1,7 @@
 import type { Canvas, Module, PointerEvent, Rect, WheelEvent } from '../types.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 import { get_color_by_name } from '../colors.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import type { ControlActionDefinition, ControlBinding } from '../runtime/controls_registry.js';
 import { make_keyboard_binding_from_event, make_pointer_button_binding, make_wheel_binding } from '../runtime/controls_binding_matcher.js';
 
@@ -66,11 +67,7 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
     rect: opts.rect,
     title: opts.get_title ?? (() => 'CONTROLS'),
     is_visible: opts.get_is_visible,
-    background: { rgb: get_color_by_name('off_black').rgb },
-    border: {
-      border_rgb: get_color_by_name('vivid_blue').rgb,
-      text_rgb: get_color_by_name('vivid_blue').rgb,
-    },
+    background: { rgb: get_ui_semantic_rgb('background') },
     resize: { min_width: 36, min_height: 12, max_width: 72, max_height: 40 },
     gizmos: {
       enabled: ['close', 'move', 'seamless'],
@@ -86,6 +83,9 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
       const rows = get_rows();
       const inner_width = Math.max(1, rect.x1 - rect.x0 - 2);
       const list_height = Math.max(1, rect.y1 - rect.y0 - 5);
+      const medium = get_ui_semantic_rgb('medium');
+      const bright = get_ui_semantic_rgb('bright');
+      const vivid = get_ui_semantic_rgb('vivid');
       if (cursor < visible_start) visible_start = cursor;
       if (cursor >= visible_start + list_height) visible_start = cursor - list_height + 1;
       visible_start = Math.max(0, Math.min(visible_start, Math.max(0, rows.length - list_height)));
@@ -96,7 +96,7 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
         if (row.type === 'category') {
           const text = `[${row.label}]`;
           for (let i = 0; i < text.length && rect.x0 + 1 + i < rect.x1; i += 1) {
-            c.set(rect.x0 + 1 + i, y, { char: text[i]!, rgb: get_color_by_name('vivid_blue').rgb, weight_index: 5, style: 'regular' });
+            c.set(rect.x0 + 1 + i, y, { char: text[i]!, rgb: vivid, weight_index: 3, style: 'regular' });
           }
           continue;
         }
@@ -104,18 +104,18 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
         const waiting = waiting_action_id === row.id;
         const left = `${is_cursor ? '>' : ' '} ${row.label}`.slice(0, Math.max(0, inner_width - 18));
         const right = waiting ? 'PRESS INPUT...' : row.binding;
-        const color = waiting ? get_color_by_name('vivid_yellow').rgb : row.conflicts.length > 0 ? get_color_by_name('vivid_red').rgb : is_cursor ? get_color_by_name('off_white').rgb : get_color_by_name('medium_gray').rgb;
+        const color = waiting ? vivid : row.conflicts.length > 0 ? get_color_by_name('vivid_red').rgb : is_cursor ? bright : medium;
         for (let i = 0; i < left.length && rect.x0 + 1 + i < rect.x1; i += 1) {
-          c.set(rect.x0 + 1 + i, y, { char: left[i]!, rgb: color, weight_index: is_cursor ? 5 : 3, style: 'regular' });
+          c.set(rect.x0 + 1 + i, y, { char: left[i]!, rgb: color, weight_index: is_cursor ? 3 : 2, style: 'regular' });
         }
         const right_x = Math.max(rect.x0 + 1, rect.x1 - right.length - 1);
         for (let i = 0; i < right.length && right_x + i < rect.x1; i += 1) {
-          c.set(right_x + i, y, { char: right[i]!, rgb: color, weight_index: waiting ? 6 : 4, style: 'regular' });
+          c.set(right_x + i, y, { char: right[i]!, rgb: color, weight_index: waiting ? 3 : 2, style: 'regular' });
         }
       }
       const footer = waiting_action_id ? 'Enter new key/click/wheel. Backspace clears. Esc cancels.' : 'Click a binding to remap.';
       for (let i = 0; i < footer.length && rect.x0 + 1 + i < rect.x1; i += 1) {
-        c.set(rect.x0 + 1 + i, rect.y0 + 1, { char: footer[i]!, rgb: get_color_by_name('medium_gray').rgb, weight_index: 3, style: 'regular' });
+        c.set(rect.x0 + 1 + i, rect.y0 + 1, { char: footer[i]!, rgb: medium, weight_index: 1, style: 'regular' });
       }
     },
     on_pointer_down_content(e: PointerEvent, rect: Rect): void {

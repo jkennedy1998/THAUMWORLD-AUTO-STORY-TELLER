@@ -1,6 +1,7 @@
 import type { Rect } from '../types.js';
-import { read_slot_json_file, write_slot_json_file } from '../../engine_persistence/slot_json_store.js';
+import { read_slot_json_file, write_slot_json_file, write_slot_relative_json_file } from '../../engine_persistence/slot_json_store.js';
 import type { CameraSettingsAppId } from './camera_limits.js';
+import type { ProfileScope } from '../../user_profiles/profile_scope.js';
 
 export type ModulePositionData = {
   x0: number;
@@ -74,22 +75,26 @@ export function get_module_layout_state(app_id: CameraSettingsAppId): { position
   };
 }
 
-export async function load_module_layouts(slot: number, app_id: CameraSettingsAppId): Promise<{ positions: ModulePositions; visibility: ModuleVisibility }> {
-  const response = await read_slot_json_file<ModuleLayoutFile>(slot, MODULE_LAYOUT_FILE_NAME);
+export async function load_module_layouts(slot: number, app_id: CameraSettingsAppId, profile_scope?: ProfileScope | null): Promise<{ positions: ModulePositions; visibility: ModuleVisibility }> {
+  const scoped_response = profile_scope ? await read_slot_json_file<ModuleLayoutFile>(slot, profile_scope.files.module_layouts) : null;
+  const response = scoped_response?.data ? scoped_response : await read_slot_json_file<ModuleLayoutFile>(slot, MODULE_LAYOUT_FILE_NAME);
   current_module_layouts = response.data ? sanitize_module_layout_file(response.data) : { version: 1, apps: {} };
+  if (profile_scope && !scoped_response?.data && response.data) {
+    await write_slot_relative_json_file(slot, profile_scope.files.module_layouts, current_module_layouts).catch(() => null);
+  }
   return get_module_layout_state(app_id);
 }
 
-export async function save_module_layouts(slot: number, app_id: CameraSettingsAppId, next: { positions: ModulePositions; visibility: ModuleVisibility }): Promise<void> {
+export async function save_module_layouts(slot: number, app_id: CameraSettingsAppId, next: { positions: ModulePositions; visibility: ModuleVisibility }, profile_scope?: ProfileScope | null): Promise<void> {
   const app = ensure_app_layout(app_id);
   app.positions = Object.fromEntries(Object.entries(next.positions).map(([key, rect]) => [key, clone_rect_data(rect)]));
   app.visibility = { ...next.visibility };
-  await write_slot_json_file(slot, MODULE_LAYOUT_FILE_NAME, current_module_layouts);
+  await write_slot_json_file(slot, profile_scope?.files.module_layouts ?? MODULE_LAYOUT_FILE_NAME, current_module_layouts);
 }
 
-export async function reset_module_layouts(slot: number, app_id: CameraSettingsAppId): Promise<void> {
+export async function reset_module_layouts(slot: number, app_id: CameraSettingsAppId, profile_scope?: ProfileScope | null): Promise<void> {
   current_module_layouts.apps[app_id] = { positions: {}, visibility: {} };
-  await write_slot_json_file(slot, MODULE_LAYOUT_FILE_NAME, current_module_layouts);
+  await write_slot_json_file(slot, profile_scope?.files.module_layouts ?? MODULE_LAYOUT_FILE_NAME, current_module_layouts);
 }
 
 export function rect_to_layout_data(rect: Rect): ModulePositionData {

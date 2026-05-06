@@ -1,6 +1,6 @@
 import type { Canvas, Module, PointerEvent, Rect } from '../types.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
-import { get_color_by_name } from '../colors.js';
+import { get_standard_ux_chrome_colors } from '../module_borders.js';
 import type { LaunchActionId, LaunchMenuState } from '../../engine_launch/types.js';
 
 type LaunchModuleOptions = {
@@ -22,12 +22,8 @@ const LABELS: Record<LaunchActionId, string> = {
 };
 
 export function make_launch_module(opts: LaunchModuleOptions): Module {
-  const text = get_color_by_name('off_white').rgb;
-  const muted = get_color_by_name('medium_gray').rgb;
-  const accent = get_color_by_name('vivid_yellow').rgb;
-  const good = get_color_by_name('pale_green').rgb;
-  const panel = get_color_by_name('off_black').rgb;
-  const border = get_color_by_name('pale_yellow').rgb;
+  const { text_rgb: text, muted_rgb: muted, accent_rgb: accent } = get_standard_ux_chrome_colors();
+  const good = accent;
   let hits: Array<{ action: LaunchActionId; x0: number; x1: number; y: number }> = [];
   let join_hits: Array<{ entry_id: string; x0: number; x1: number; y: number }> = [];
 
@@ -46,8 +42,7 @@ export function make_launch_module(opts: LaunchModuleOptions): Module {
     id: opts.id,
     rect: opts.rect,
     title: opts.title,
-    background: { rgb: panel },
-    border: { border_rgb: border, text_rgb: border },
+    
     resize: { min_width: 28, min_height: 12, max_width: 64, max_height: 28 },
     gizmos: {
       enabled: ['seamless'],

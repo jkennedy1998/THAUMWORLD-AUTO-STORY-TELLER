@@ -1,6 +1,7 @@
 import { get_color_by_name, nearest_indexed_color, type ColorName } from '../colors.js';
-import { read_slot_json_file, write_slot_json_file } from '../../engine_persistence/slot_json_store.js';
+import { read_slot_json_file, write_slot_json_file, write_slot_relative_json_file } from '../../engine_persistence/slot_json_store.js';
 import type { Rgb } from '../types.js';
+import type { ProfileScope } from '../../user_profiles/profile_scope.js';
 
 export type UiSemanticColorRole =
   | 'background'
@@ -99,27 +100,31 @@ export function set_ui_customization_role_color(role: UiSemanticColorRole, rgb: 
   return set_ui_customization_state(next);
 }
 
-export async function load_ui_customization_state(slot: number, opts?: { vivid_seed_rgb?: Rgb | null }): Promise<UiCustomizationState> {
+export async function load_ui_customization_state(slot: number, opts?: { vivid_seed_rgb?: Rgb | null; profile_scope?: ProfileScope | null }): Promise<UiCustomizationState> {
   const defaults = build_default_ui_customization(opts);
-  const response = await read_slot_json_file<UiCustomizationFile>(slot, UI_CUSTOMIZATION_FILE_NAME);
+  const scoped_response = opts?.profile_scope ? await read_slot_json_file<UiCustomizationFile>(slot, opts.profile_scope.files.ui_customization) : null;
+  const response = scoped_response?.data ? scoped_response : await read_slot_json_file<UiCustomizationFile>(slot, UI_CUSTOMIZATION_FILE_NAME);
   if (!response.data) {
     current_ui_customization = defaults;
-    await write_slot_json_file(slot, UI_CUSTOMIZATION_FILE_NAME, current_ui_customization).catch(() => null);
+    await write_slot_json_file(slot, opts?.profile_scope?.files.ui_customization ?? UI_CUSTOMIZATION_FILE_NAME, current_ui_customization).catch(() => null);
     return get_ui_customization_state();
   }
   current_ui_customization = sanitize_ui_customization_file(response.data, defaults);
+  if (opts?.profile_scope && !scoped_response?.data) {
+    await write_slot_relative_json_file(slot, opts.profile_scope.files.ui_customization, current_ui_customization).catch(() => null);
+  }
   return get_ui_customization_state();
 }
 
-export async function save_ui_customization_state(slot: number, next: UiCustomizationState): Promise<UiCustomizationState> {
+export async function save_ui_customization_state(slot: number, next: UiCustomizationState, profile_scope?: ProfileScope | null): Promise<UiCustomizationState> {
   const sanitized = set_ui_customization_state(next);
-  await write_slot_json_file(slot, UI_CUSTOMIZATION_FILE_NAME, sanitized);
+  await write_slot_json_file(slot, profile_scope?.files.ui_customization ?? UI_CUSTOMIZATION_FILE_NAME, sanitized);
   return sanitized;
 }
 
-export async function save_ui_customization_role_color(slot: number, role: UiSemanticColorRole, rgb: Rgb): Promise<UiCustomizationState> {
+export async function save_ui_customization_role_color(slot: number, role: UiSemanticColorRole, rgb: Rgb, profile_scope?: ProfileScope | null): Promise<UiCustomizationState> {
   const next = set_ui_customization_role_color(role, rgb);
-  await write_slot_json_file(slot, UI_CUSTOMIZATION_FILE_NAME, next);
+  await write_slot_json_file(slot, profile_scope?.files.ui_customization ?? UI_CUSTOMIZATION_FILE_NAME, next);
   return next;
 }
 

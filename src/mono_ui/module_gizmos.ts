@@ -4,6 +4,8 @@ import { MODULE_CHROME_RENDER_INDEX } from "./module_borders.js";
 import { debug_log } from "../shared/debug.js";
 import { resolve_cell } from "../render_shaders/resolver.js";
 import { make_widget_payload } from "../render_shaders/payload_builders.js";
+import { get_ui_semantic_rgb } from "./runtime/ui_customization_store.js";
+import { get_color_by_name } from "./colors.js";
 
 // NOTE: Date.now() used here to match other UI draw paths.
 
@@ -84,16 +86,25 @@ export function handle_global_pointer_down_for_gizmos(e: PointerEvent, rect: Rec
   cancel_gizmo_modes(rect, config, gizmo_state);
 }
 
-// Default gizmo colors
-const GIZMO_COLORS = {
-  move: { r: 255, g: 255, b: 0 } as Rgb,      // Yellow
-  close: { r: 255, g: 50, b: 50 } as Rgb,     // Red
-  save: { r: 50, g: 255, b: 50 } as Rgb,      // Green
-  resize: { r: 255, g: 150, b: 0 } as Rgb,    // Orange
-  seamless: { r: 150, g: 255, b: 255 } as Rgb, // Cyan
-  hover: { r: 255, g: 255, b: 255 } as Rgb,   // White
-  active: { r: 200, g: 200, b: 200 } as Rgb,  // Gray
-};
+function get_gizmo_colors(): {
+  move: Rgb;
+  close: Rgb;
+  save: Rgb;
+  resize: Rgb;
+  seamless: Rgb;
+  hover: Rgb;
+  active: Rgb;
+} {
+  return {
+    move: get_ui_semantic_rgb('medium'),
+    close: get_color_by_name('vivid_red').rgb,
+    save: get_ui_semantic_rgb('bright'),
+    resize: get_ui_semantic_rgb('medium'),
+    seamless: get_ui_semantic_rgb('dimmest'),
+    hover: get_ui_semantic_rgb('bright'),
+    active: get_ui_semantic_rgb('vivid'),
+  };
+}
 
 const GIZMO_ORDER: GizmoType[] = ['move', 'close', 'save_position', 'resize', 'seamless'];
 
@@ -107,12 +118,13 @@ function get_enabled_gizmo_types(config: ModuleGizmosConfig): GizmoType[] {
   });
 }
 
-// Resize border colors
-export const RESIZE_COLORS = {
-  idle: { r: 150, g: 200, b: 255 } as Rgb,    // Light blue
-  hover: { r: 50, g: 255, b: 50 } as Rgb,     // Green
-  dragging: { r: 39, g: 73, b: 208 } as Rgb,  // Vivid blue
-};
+export function get_resize_colors(): { idle: Rgb; hover: Rgb; dragging: Rgb } {
+  return {
+    idle: get_ui_semantic_rgb('medium'),
+    hover: get_ui_semantic_rgb('bright'),
+    dragging: get_ui_semantic_rgb('vivid'),
+  };
+}
 
 /**
  * Calculate the rect for a gizmo button
@@ -170,11 +182,13 @@ export function draw_module_gizmos(
 
   let gizmo_index = 0;
   const enabled_gizmos = get_enabled_gizmo_types(config);
+  const gizmo_colors = get_gizmo_colors();
+  const resize_colors = get_resize_colors();
 
-  // Draw move gizmo (#) - Yellow
+  // Draw move gizmo (#)
   if (enabled_gizmos.includes('move')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    const color = gizmo_state.is_move_mode ? GIZMO_COLORS.active : GIZMO_COLORS.move;
+    const color = gizmo_state.is_move_mode ? gizmo_colors.active : gizmo_colors.move;
 
     const shaded = resolve_cell(
       make_widget_payload({
@@ -195,7 +209,7 @@ export function draw_module_gizmos(
     c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
   }
 
-  // Draw close gizmo (X) - Red
+  // Draw close gizmo (X)
   if (enabled_gizmos.includes('close')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
 
@@ -204,7 +218,7 @@ export function draw_module_gizmos(
         id: `gizmo:close:${rect.x0}:${rect.y1}`,
         widget: 'close',
         widget_state: 'idle',
-        base_fg: GIZMO_COLORS.close,
+        base_fg: gizmo_colors.close,
       }),
       {
         where: 'debug',
@@ -217,7 +231,7 @@ export function draw_module_gizmos(
     c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
   }
 
-  // Draw save gizmo ($) - Green (future feature)
+  // Draw save gizmo ($) (future feature)
   if (enabled_gizmos.includes('save_position')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
 
@@ -226,7 +240,7 @@ export function draw_module_gizmos(
         id: `gizmo:save:${rect.x0}:${rect.y1}`,
         widget: 'save_position',
         widget_state: 'idle',
-        base_fg: GIZMO_COLORS.save,
+        base_fg: gizmo_colors.save,
       }),
       {
         where: 'debug',
@@ -239,10 +253,10 @@ export function draw_module_gizmos(
     c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
   }
 
-  // Draw resize gizmo (╋) - Orange
+  // Draw resize gizmo (╋)
   if (enabled_gizmos.includes('resize')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    const color = gizmo_state.is_resize_mode ? GIZMO_COLORS.active : GIZMO_COLORS.resize;
+    const color = gizmo_state.is_resize_mode ? gizmo_colors.active : gizmo_colors.resize;
 
     const shaded = resolve_cell(
       make_widget_payload({
@@ -262,10 +276,10 @@ export function draw_module_gizmos(
     c.set(pos.x, pos.y, { ...shaded, render_index: MODULE_CHROME_RENDER_INDEX });
   }
 
-  // Draw seamless gizmo (S) - Cyan
+  // Draw seamless gizmo (S)
   if (enabled_gizmos.includes('seamless')) {
     const pos = get_gizmo_rect(rect, gizmo_index++);
-    const color = gizmo_state.is_seamless ? GIZMO_COLORS.active : GIZMO_COLORS.seamless;
+    const color = gizmo_state.is_seamless ? gizmo_colors.active : gizmo_colors.seamless;
 
     const shaded = resolve_cell(
       make_widget_payload({
@@ -289,7 +303,7 @@ export function draw_module_gizmos(
   if (module_name && module_name.length > 0) {
     const name_x = rect.x0 + 1 + (gizmo_index * 2);
     const name_y = rect.y1 - 1;
-    const name_color: Rgb = { r: 200, g: 200, b: 200 }; // Light gray
+    const name_color = get_ui_semantic_rgb('medium');
     
     for (let i = 0; i < module_name.length && name_x + i < rect.x1; i++) {
       c.set(name_x + i, name_y, {
@@ -304,20 +318,18 @@ export function draw_module_gizmos(
 
   // If in move/resize mode, tint the existing border (do not redraw border glyphs).
   if (gizmo_state.is_move_mode) {
-    tint_border_all(c, rect, GIZMO_COLORS.move, 5);
+    tint_border_all(c, rect, gizmo_colors.active, 3);
   }
 
   if (gizmo_state.is_resize_mode) {
-    // Base color for resize mode.
     const base_color = gizmo_state.is_dragging_resize
-      ? RESIZE_COLORS.dragging
-      : RESIZE_COLORS.idle;
+      ? resize_colors.dragging
+      : resize_colors.idle;
 
-    tint_border_all(c, rect, base_color, 5);
+    tint_border_all(c, rect, base_color, 3);
 
-    // Hovered edge gets hover color when not actively dragging.
     if (!gizmo_state.is_dragging_resize && gizmo_state.resize_edge) {
-      tint_border_edge(c, rect, gizmo_state.resize_edge, RESIZE_COLORS.hover, 6);
+      tint_border_edge(c, rect, gizmo_state.resize_edge, resize_colors.hover, 3);
     }
   }
 }

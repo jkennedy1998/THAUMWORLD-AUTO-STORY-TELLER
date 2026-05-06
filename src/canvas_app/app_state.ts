@@ -21,6 +21,8 @@ import { make_initiative_module } from '../mono_ui/modules/initiative_module.js'
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { make_controls_module } from '../mono_ui/modules/controls_module.js';
+import { make_customization_module } from '../mono_ui/modules/customization_module.js';
+import { make_color_picker_module } from '../mono_ui/modules/color_picker_module.js';
 import { makeGroupsModule } from '../mono_ui/modules/groups_module.js';
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { createVoxelSpace, type VoxelSpace } from '../ascii_painter/voxel_space.js';
@@ -38,6 +40,7 @@ import { get_color_by_name } from '../mono_ui/colors.js';
 import type { ModuleGizmosConfig } from '../mono_ui/module_gizmos.js';
 import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
 import { make_program_nav_bar_module, type ProgramNavAction } from '../mono_ui/modules/program_nav_bar_module.js';
+import { make_command_action, make_conditional_tab, make_tab, make_toggle_action } from '../mono_ui/modules/program_shell_bar_helpers.js';
 import { infer_action_verb_hint } from '../shared/intent_hint.js';
 // NOTE: Do NOT import Node.js modules (load_actor, find_kind, etc.) here.
 // This code runs in browser context and must use HTTP APIs instead.
@@ -68,6 +71,8 @@ import {
 } from '../mono_ui/runtime/interaction_runtime_types.js';
 import { get_camera_settings_for_app, get_camera_slider_specs_for_app, load_camera_settings, save_camera_settings } from '../mono_ui/runtime/camera_customization_store.js';
 import { sanitize_camera_config_for_app } from '../mono_ui/runtime/camera_limits.js';
+import { load_module_layouts, save_module_layouts } from '../mono_ui/runtime/module_layout_store.js';
+import { get_ui_customization_state, load_ui_customization_state, save_ui_customization_role_color, set_ui_customization_role_color, type UiCustomizationState, type UiSemanticColorRole } from '../mono_ui/runtime/ui_customization_store.js';
 import { tag_key } from '../tag_system/tag_key.js';
 import type { TagInstance } from '../tag_system/registry.js';
 import { resolve_grow_tag_configs } from '../mag/grow.js';
@@ -105,6 +110,8 @@ import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_vi
 import { create_tool_assisted_inputs_wiring } from './tool_assisted_inputs_wiring.js';
 import { create_game_controls_runtime } from './controls_wiring.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
+import { create_profile_scope, type ProfileScope } from '../user_profiles/profile_scope.js';
+import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
 import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT, build_api_url, type MultiplayerTransportConfig } from '../shared/multiplayer_transport.js';
 import { forget_manual_connection, mark_connection_connected, rename_manual_connection, save_manual_connection } from '../engine_multiplayer/connection_store.js';
 import type { EngineJoinSelection } from '../engine_multiplayer/connection_types.js';
@@ -263,8 +270,15 @@ function has_tag(tags: any[] | undefined | null, want: string): boolean {
 }
 
 export function create_app_state(): AppState {
-    const game_controls = create_game_controls_runtime(APP_CONFIG.selected_data_slot);
-    void game_controls.load();
+    let active_profile_scope: ProfileScope = create_profile_scope(APP_CONFIG.selected_data_slot, 'thaum_world');
+    const profile_scope_ready = resolve_profile_scope(APP_CONFIG.selected_data_slot, 'thaum_world').then((scope) => {
+        active_profile_scope = scope;
+        return scope;
+    }).catch(() => active_profile_scope);
+    const game_controls = create_game_controls_runtime(APP_CONFIG.selected_data_slot, {
+        get_profile_scope: () => active_profile_scope,
+    });
+    void profile_scope_ready.then(() => game_controls.load()).catch(() => null);
     const configured_boot_mode = String((window as Window).electronAPI?.startupBootMode ?? '').trim().toLowerCase();
     const tai_boot_config = (window as Window).electronAPI?.toolAssistedInputsBootConfig;
     const boot_mode: 'manual_shell' | 'direct_runtime' | 'tas_runtime' = Boolean((window as Window).electronAPI?.toolAssistedInputsBootConfig?.enabled)
@@ -1081,10 +1095,69 @@ export function create_app_state(): AppState {
     function set_controls_panel_visible(visible: boolean): void {
         ui_state.modules.visibility.set('controls_panel', visible);
         apply_runtime_module_visibility('controls_panel');
+        if (visible) bring_module_to_front('controls_panel');
+        persist_module_layout_debounced();
     }
 
     function toggle_controls_panel(): void {
         set_controls_panel_visible(!Boolean(ui_state.modules.visibility.get('controls_panel')));
+    }
+
+    let ui_customization_state: UiCustomizationState = get_ui_customization_state();
+    let active_customization_role: UiSemanticColorRole = 'vivid';
+
+    function apply_ui_customization_runtime(next: UiCustomizationState): void {
+        ui_customization_state = next;
+    }
+
+    function bring_module_to_front(module_id: string): void {
+        ui_state.modules.registry?.bring_to_front?.(module_id);
+    }
+
+    function open_customization_picker(): void {
+        bring_module_to_front('customization_panel');
+        set_module_visible('customization_picker', true);
+        bring_module_to_front('customization_picker');
+    }
+
+    function set_customization_panel_visible(visible: boolean): void {
+        set_module_visible('customization_panel', visible);
+        if (!visible) {
+            set_module_visible('customization_picker', false);
+            return;
+        }
+        bring_module_to_front('customization_panel');
+    }
+
+    function toggle_customization_panel(): void {
+        set_customization_panel_visible(!Boolean(ui_state.modules.visibility.get('customization_panel')));
+    }
+
+    function set_debug_reader_visible(visible: boolean): void {
+        set_module_visible('debug', visible);
+        if (visible) bring_module_to_front('debug');
+    }
+
+    function toggle_debug_reader(): void {
+        set_debug_reader_visible(!module_registry.is_visible('debug'));
+    }
+
+    function set_debug_commander_visible(visible: boolean): void {
+        set_module_visible('debug_commander_module', visible);
+        if (visible) bring_module_to_front('debug_commander_module');
+    }
+
+    function toggle_debug_commander_panel(): void {
+        set_debug_commander_visible(!module_registry.is_visible('debug_commander_module'));
+    }
+
+    function set_camera_control_visible(visible: boolean): void {
+        set_module_visible('camera_control', visible);
+        if (visible) bring_module_to_front('camera_control');
+    }
+
+    function toggle_camera_control_panel(): void {
+        set_camera_control_visible(!module_registry.is_visible('camera_control'));
     }
 
     // Keep the current place "active" on the server so breath continues to tick
@@ -3485,25 +3558,26 @@ export function create_app_state(): AppState {
 
     function make_place_painter_toolbar_module(rect: Rect): Module {
         const toggle = (id: string): void => set_module_visible(id, !module_registry.is_visible(id));
-        const debug_items: ProgramNavAction[] = [
-            { id: 'debug_text', label: () => `DEBUG:${module_registry.is_visible('debug') ? 'ON' : 'OFF'}`, width: 13, onPress: () => toggle('debug'), is_active: () => module_registry.is_visible('debug') },
-            { id: 'debug_cmd', label: () => `COMMANDER:${module_registry.is_visible('debug_commander_module') ? 'ON' : 'OFF'}`, width: 17, onPress: () => toggle('debug_commander_module'), is_active: () => module_registry.is_visible('debug_commander_module') },
-        ];
         const module_items: ProgramNavAction[] = [
-            { id: 'status', label: () => `STATUS:${module_registry.is_visible('status') ? 'ON' : 'OFF'}`, width: 14, onPress: () => toggle('status'), is_active: () => module_registry.is_visible('status') },
-            { id: 'transcript', label: () => `TRANSCRIPT:${module_registry.is_visible('transcript') ? 'ON' : 'OFF'}`, width: 18, onPress: () => toggle('transcript'), is_active: () => module_registry.is_visible('transcript') },
-            { id: 'input', label: () => `INPUT:${module_registry.is_visible('input') ? 'ON' : 'OFF'}`, width: 13, onPress: () => toggle('input'), is_active: () => module_registry.is_visible('input') },
-            { id: 'roller', label: () => `ROLLER:${module_registry.is_visible('roller') ? 'ON' : 'OFF'}`, width: 14, onPress: () => toggle('roller'), is_active: () => module_registry.is_visible('roller') },
-            { id: 'character', label: () => `CHAR:${module_registry.is_visible('character_module') ? 'ON' : 'OFF'}`, width: 12, onPress: () => toggle('character_module'), is_active: () => module_registry.is_visible('character_module') },
+            make_toggle_action({ id: 'status', label: 'STATUS', onPress: () => toggle('status'), is_active: () => module_registry.is_visible('status') }),
+            make_toggle_action({ id: 'transcript', label: 'LOG', onPress: () => toggle('transcript'), is_active: () => module_registry.is_visible('transcript') }),
+            make_toggle_action({ id: 'input', label: 'INPUT', onPress: () => toggle('input'), is_active: () => module_registry.is_visible('input') }),
+            make_toggle_action({ id: 'roller', label: 'ROLL', onPress: () => toggle('roller'), is_active: () => module_registry.is_visible('roller') }),
+            make_toggle_action({ id: 'character', label: 'CHAR', onPress: () => toggle('character_module'), is_active: () => module_registry.is_visible('character_module') }),
         ];
         const system_items: ProgramNavAction[] = [
-            { id: 'logout', label: 'LOGOUT', width: 8, onPress: () => { void logout_to_actor_claim(); } },
+            make_toggle_action({ id: 'controls', label: 'CTRLS', onPress: () => toggle_controls_panel(), is_active: () => module_registry.is_visible('controls_panel') }),
+            make_toggle_action({ id: 'custom', label: 'CUSTOM', onPress: () => toggle_customization_panel(), is_active: () => module_registry.is_visible('customization_panel') }),
+            make_toggle_action({ id: 'camera', label: 'CAMERA', onPress: () => toggle_camera_control_panel(), is_active: () => module_registry.is_visible('camera_control') }),
+            make_toggle_action({ id: 'debug_text', label: 'DEBUG', onPress: () => toggle_debug_reader(), is_active: () => module_registry.is_visible('debug') }),
+            make_toggle_action({ id: 'debug_cmd', label: 'CMD', onPress: () => toggle_debug_commander_panel(), is_active: () => module_registry.is_visible('debug_commander_module') }),
+            make_command_action({ id: 'logout', label: 'LOGOUT', onPress: () => { void logout_to_actor_claim(); } }),
         ];
         const paint_items: ProgramNavAction[] = [
-            { id: 'tools', label: () => `TOOLS:${module_registry.is_visible('place_painter_tools') ? 'ON' : 'OFF'}`, width: 14, onPress: () => toggle('place_painter_tools'), is_active: () => module_registry.is_visible('place_painter_tools') },
-            { id: 'picker', label: () => `PICKER:${module_registry.is_visible('place_painter_palette') ? 'ON' : 'OFF'}`, width: 16, onPress: () => toggle('place_painter_palette'), is_active: () => module_registry.is_visible('place_painter_palette') },
-            { id: 'layers', label: () => `LAYERS:${module_registry.is_visible('place_painter_layers') ? 'ON' : 'OFF'}`, width: 16, onPress: () => toggle('place_painter_layers'), is_active: () => module_registry.is_visible('place_painter_layers') },
-            { id: 'props', label: () => `PROPS:${module_registry.is_visible('place_painter_tool_properties') ? 'ON' : 'OFF'}`, width: 15, onPress: () => toggle('place_painter_tool_properties'), is_active: () => module_registry.is_visible('place_painter_tool_properties') },
+            make_toggle_action({ id: 'tools', label: 'TOOLS', onPress: () => toggle('place_painter_tools'), is_active: () => module_registry.is_visible('place_painter_tools') }),
+            make_toggle_action({ id: 'picker', label: 'PICK', onPress: () => toggle('place_painter_palette'), is_active: () => module_registry.is_visible('place_painter_palette') }),
+            make_toggle_action({ id: 'layers', label: 'LAYERS', onPress: () => toggle('place_painter_layers'), is_active: () => module_registry.is_visible('place_painter_layers') }),
+            make_toggle_action({ id: 'props', label: 'PROPS', onPress: () => toggle('place_painter_tool_properties'), is_active: () => module_registry.is_visible('place_painter_tool_properties') }),
         ];
         return make_program_nav_bar_module({
             id: 'place_painter_toolbar',
@@ -3511,17 +3585,11 @@ export function create_app_state(): AppState {
             get_is_visible: () => module_registry.is_visible('place_painter_toolbar'),
             default_expanded: true,
             expanded_height: 5,
-            tabs: () => {
-                const tabs = [
-                    { id: 'debug', label: 'DEBUG', width: 7, items: debug_items },
-                    { id: 'modules', label: 'MODULES', width: 9, items: module_items },
-                    { id: 'system', label: 'SYSTEM', width: 8, items: system_items },
-                ];
-                if (ui_state.place_painter.active) {
-                    tabs.splice(2, 0, { id: 'paint', label: 'PAINT', width: 7, items: paint_items });
-                }
-                return tabs;
-            },
+            tabs: () => [
+                make_tab('modules', 'MODULES', module_items),
+                ...make_conditional_tab(ui_state.place_painter.active, make_tab('paint', 'PAINT', paint_items)),
+                make_tab('system', 'SYSTEM', system_items),
+            ],
         });
     }
 
@@ -3924,7 +3992,8 @@ export function create_app_state(): AppState {
         });
     }
 
-    const MODULE_LAYOUT_STORAGE_KEY = 'thaumworld:module_layout:v1';
+    const MODULE_LAYOUT_CACHE_STORAGE_KEY = 'thaumworld:module_layout_cache:v2';
+    const MODULE_LAYOUT_LEGACY_STORAGE_KEY = 'thaumworld:module_layout:v1';
     const PLACE_FOCUS_Z_STORAGE_KEY = 'thaumworld:place_focus_z:v1';
     const PLACE_PRINCIPAL_VIEW_STORAGE_KEY = 'thaumworld:place_principal_view:v1';
     const PLACE_MATRIX_VIEW_DIRECTION_STORAGE_KEY = 'thaumworld:place_matrix_view_direction:v1';
@@ -3938,29 +4007,102 @@ export function create_app_state(): AppState {
             Number.isFinite(v.x0) && Number.isFinite(v.y0) && Number.isFinite(v.x1) && Number.isFinite(v.y1);
     }
 
-    function load_persisted_module_layout(): void {
+    function apply_module_layout_state(next: { positions: Record<string, Rect>; visibility: Record<string, boolean> }, opts?: { replace?: boolean; sync_runtime?: boolean }): void {
+        if (opts?.replace) {
+            ui_state.modules.positions.clear();
+            ui_state.modules.visibility.clear();
+        }
+        for (const [id, rect] of Object.entries(next.positions)) {
+            if (typeof id !== 'string' || id.length < 1 || !is_rect(rect)) continue;
+            ui_state.modules.positions.set(id, rect);
+        }
+        for (const [id, visible] of Object.entries(next.visibility)) {
+            if (typeof id !== 'string' || id.length < 1) continue;
+            ui_state.modules.visibility.set(id, Boolean(visible));
+        }
+        if (opts?.sync_runtime) {
+            const registry = ui_state.modules.registry;
+            if (registry) {
+                for (const [id, rect] of ui_state.modules.positions.entries()) {
+                    const module = registry.get(id);
+                    if (module) module.rect = rect;
+                }
+                apply_runtime_module_visibility();
+            }
+        }
+    }
+
+    function serialize_module_layout_state(): { positions: Record<string, Rect>; visibility: Record<string, boolean> } {
+        const positions: Record<string, Rect> = {};
+        for (const [id, rect] of ui_state.modules.positions.entries()) {
+            if (typeof id !== 'string' || !is_rect(rect)) continue;
+            positions[id] = rect;
+        }
+        const visibility: Record<string, boolean> = {};
+        for (const [id, visible] of ui_state.modules.visibility.entries()) {
+            if (typeof id !== 'string') continue;
+            visibility[id] = Boolean(visible);
+        }
+        return { positions, visibility };
+    }
+
+    function parse_module_layout_storage(raw: string | null | undefined): { positions: Record<string, Rect>; visibility: Record<string, boolean> } | null {
+        if (!raw) return null;
         try {
-            const raw = window.localStorage?.getItem(MODULE_LAYOUT_STORAGE_KEY);
-            if (!raw) return;
             const parsed = JSON.parse(raw);
+            const positions: Record<string, Rect> = {};
+            const visibility: Record<string, boolean> = {};
             const pos = parsed?.positions && typeof parsed.positions === 'object' ? parsed.positions : null;
             const vis = parsed?.visibility && typeof parsed.visibility === 'object' ? parsed.visibility : null;
-
             if (pos) {
-                for (const [id, r] of Object.entries(pos)) {
-                    if (typeof id !== 'string' || id.length === 0) continue;
-                    if (is_rect(r)) ui_state.modules.positions.set(id, r);
+                for (const [id, rect] of Object.entries(pos)) {
+                    if (typeof id !== 'string' || id.length < 1 || !is_rect(rect)) continue;
+                    positions[id] = rect;
                 }
             }
             if (vis) {
-                for (const [id, v] of Object.entries(vis)) {
-                    if (typeof id !== 'string' || id.length === 0) continue;
-                    ui_state.modules.visibility.set(id, Boolean(v));
+                for (const [id, visible] of Object.entries(vis)) {
+                    if (typeof id !== 'string' || id.length < 1) continue;
+                    visibility[id] = Boolean(visible);
                 }
             }
+            return { positions, visibility };
         } catch {
-            // ignore
+            return null;
         }
+    }
+
+    function load_cached_module_layout(): void {
+        const cached = parse_module_layout_storage(window.localStorage?.getItem(MODULE_LAYOUT_CACHE_STORAGE_KEY));
+        const legacy = cached ? null : parse_module_layout_storage(window.localStorage?.getItem(MODULE_LAYOUT_LEGACY_STORAGE_KEY));
+        const initial = cached ?? legacy;
+        if (!initial) return;
+        apply_module_layout_state(initial, { replace: true });
+        if (!cached && legacy) {
+            try {
+                window.localStorage?.setItem(MODULE_LAYOUT_CACHE_STORAGE_KEY, JSON.stringify(initial));
+            } catch {
+                // ignore cache write failures
+            }
+        }
+    }
+
+    function sync_module_layout_from_shared_store(): void {
+        void profile_scope_ready.then((profile_scope) => load_module_layouts(APP_CONFIG.selected_data_slot, 'thaum_world', profile_scope)).then((state) => {
+            const has_shared_state = Object.keys(state.positions).length > 0 || Object.keys(state.visibility).length > 0;
+            if (has_shared_state) {
+                apply_module_layout_state(state as { positions: Record<string, Rect>; visibility: Record<string, boolean> }, { replace: true, sync_runtime: true });
+                try {
+                    window.localStorage?.setItem(MODULE_LAYOUT_CACHE_STORAGE_KEY, JSON.stringify(serialize_module_layout_state()));
+                } catch {
+                    // ignore cache write failures
+                }
+                return;
+            }
+            const current = serialize_module_layout_state();
+            if (Object.keys(current.positions).length < 1 && Object.keys(current.visibility).length < 1) return;
+            void save_module_layouts(APP_CONFIG.selected_data_slot, 'thaum_world', current, active_profile_scope).catch(() => null);
+        }).catch(() => null);
     }
 
     function load_place_focus_z(): void {
@@ -4272,29 +4414,42 @@ export function create_app_state(): AppState {
         start_place_roll_transition(direction);
     }
 
+    function step_place_camera_view_action(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): void {
+        switch (action) {
+            case 'swing_left': swing_place_camera('left'); break;
+            case 'swing_right': swing_place_camera('right'); break;
+            case 'swing_up': swing_place_camera('up'); break;
+            case 'swing_down': swing_place_camera('down'); break;
+            case 'roll_left': roll_place_camera('left'); break;
+            case 'roll_right': roll_place_camera('right'); break;
+        }
+        flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
+    }
+
+    function step_place_focus_depth(dir: -1 | 1): void {
+        const place = get_render_place();
+        const planes = get_active_place_focus_planes(place);
+        const current = Math.max(0, Math.min(Math.max(0, planes.length - 1), Math.floor(ui_state.place.focus_z)));
+        const next = Math.max(0, Math.min(Math.max(0, planes.length - 1), current + dir));
+        if (next === current) return;
+        ui_state.place.focus_z = next;
+        save_place_focus_z();
+        const world_z = Math.floor(Number(planes[next] ?? ui_state.place.world_z_center));
+        flash_status([`Depth: ${world_z}`], 900);
+    }
+
     let persist_timer: number | null = null;
     function persist_module_layout_debounced(): void {
         if (persist_timer) clearTimeout(persist_timer);
         persist_timer = window.setTimeout(() => {
             persist_timer = null;
+            const next = serialize_module_layout_state();
             try {
-                const positions_obj: Record<string, Rect> = {};
-                for (const [id, r] of ui_state.modules.positions.entries()) {
-                    if (typeof id !== 'string' || !is_rect(r)) continue;
-                    positions_obj[id] = r;
-                }
-                const visibility_obj: Record<string, boolean> = {};
-                for (const [id, v] of ui_state.modules.visibility.entries()) {
-                    if (typeof id !== 'string') continue;
-                    visibility_obj[id] = Boolean(v);
-                }
-                window.localStorage?.setItem(
-                    MODULE_LAYOUT_STORAGE_KEY,
-                    JSON.stringify({ positions: positions_obj, visibility: visibility_obj }),
-                );
+                window.localStorage?.setItem(MODULE_LAYOUT_CACHE_STORAGE_KEY, JSON.stringify(next));
             } catch {
-                // ignore
+                // ignore cache write failures
             }
+            void save_module_layouts(APP_CONFIG.selected_data_slot, 'thaum_world', next, active_profile_scope).catch(() => null);
         }, 200);
     }
 
@@ -4415,7 +4570,11 @@ export function create_app_state(): AppState {
     }
 
     // Load persisted module state early so it affects initial rects/visibility.
-    load_persisted_module_layout();
+    load_cached_module_layout();
+    sync_module_layout_from_shared_store();
+    void profile_scope_ready.then((profile_scope) => load_ui_customization_state(APP_CONFIG.selected_data_slot, { profile_scope })).then((next) => {
+        apply_ui_customization_runtime(next);
+    }).catch(() => null);
     load_place_focus_z();
     load_place_focus_layer_opacity();
     load_place_painter_prefs();
@@ -6688,142 +6847,6 @@ export function create_app_state(): AppState {
     function build_debug_commander_actions(): DebugCommanderAction[] {
         return [
             {
-                id: 'place_view_swing_left',
-                label: 'SWING LEFT',
-                description: 'swing camera left 90 degrees',
-                rgb: get_color_by_name('vivid_cyan').rgb,
-                on_trigger: () => {
-                    swing_place_camera('left');
-                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
-                },
-            },
-            {
-                id: 'place_view_swing_right',
-                label: 'SWING RIGHT',
-                description: 'swing camera right 90 degrees',
-                rgb: get_color_by_name('vivid_cyan').rgb,
-                on_trigger: () => {
-                    swing_place_camera('right');
-                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
-                },
-            },
-            {
-                id: 'place_view_swing_up',
-                label: 'SWING UP',
-                description: 'swing camera up 90 degrees',
-                rgb: get_color_by_name('vivid_cyan').rgb,
-                on_trigger: () => {
-                    swing_place_camera('up');
-                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
-                },
-            },
-            {
-                id: 'place_view_swing_down',
-                label: 'SWING DOWN',
-                description: 'swing camera down 90 degrees',
-                rgb: get_color_by_name('vivid_cyan').rgb,
-                on_trigger: () => {
-                    swing_place_camera('down');
-                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
-                },
-            },
-            {
-                id: 'place_view_roll_left',
-                label: 'ROLL LEFT',
-                description: 'roll camera left 90 degrees',
-                rgb: get_color_by_name('vivid_blue').rgb,
-                on_trigger: () => {
-                    roll_place_camera('left');
-                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
-                },
-            },
-            {
-                id: 'place_view_roll_right',
-                label: 'ROLL RIGHT',
-                description: 'roll camera right 90 degrees',
-                rgb: get_color_by_name('vivid_blue').rgb,
-                on_trigger: () => {
-                    roll_place_camera('right');
-                    flash_status([`View: ${ui_state.place.principal_view} r${ui_state.place.view_roll_quarter_turn}`], 900);
-                },
-            },
-            {
-                id: 'place_focus_layer_opacity_toggle',
-                label: ui_state.place.use_focus_layer_opacity ? 'FOCUS OPACITY: ON' : 'FOCUS OPACITY: OFF',
-                description: 'toggle opacity fade on unfocused place layers',
-                rgb: get_color_by_name('light_orange').rgb,
-                on_trigger: () => {
-                    const enabled = toggle_place_focus_layer_opacity();
-                    flash_status([`Focus opacity: ${enabled ? 'on' : 'off'}`], 900);
-                },
-            },
-            {
-                id: 'place_view_top',
-                label: ui_state.place.principal_view === 'top' ? 'VIEW TOP*' : 'VIEW TOP',
-                description: 'set place view top',
-                rgb: get_color_by_name('vivid_cyan').rgb,
-                on_trigger: () => {
-                    set_place_principal_view('top');
-                    set_place_view_roll_quarter_turn(0);
-                    flash_status(['Place view: top'], 900);
-                },
-            },
-            {
-                id: 'place_view_bottom',
-                label: ui_state.place.principal_view === 'bottom' ? 'VIEW BOTTOM*' : 'VIEW BOTTOM',
-                description: 'set place view bottom',
-                rgb: get_color_by_name('vivid_cyan').rgb,
-                on_trigger: () => {
-                    set_place_principal_view('bottom');
-                    set_place_view_roll_quarter_turn(0);
-                    flash_status(['Place view: bottom'], 900);
-                },
-            },
-            {
-                id: 'place_view_north',
-                label: ui_state.place.principal_view === 'north' ? 'VIEW NORTH*' : 'VIEW NORTH',
-                description: 'set place view north',
-                rgb: get_color_by_name('vivid_blue').rgb,
-                on_trigger: () => {
-                    set_place_principal_view('north');
-                    set_place_view_roll_quarter_turn(0);
-                    flash_status(['Place view: north'], 900);
-                },
-            },
-            {
-                id: 'place_view_east',
-                label: ui_state.place.principal_view === 'east' ? 'VIEW EAST*' : 'VIEW EAST',
-                description: 'set place view east',
-                rgb: get_color_by_name('vivid_blue').rgb,
-                on_trigger: () => {
-                    set_place_principal_view('east');
-                    set_place_view_roll_quarter_turn(0);
-                    flash_status(['Place view: east'], 900);
-                },
-            },
-            {
-                id: 'place_view_south',
-                label: ui_state.place.principal_view === 'south' ? 'VIEW SOUTH*' : 'VIEW SOUTH',
-                description: 'set place view south',
-                rgb: get_color_by_name('vivid_blue').rgb,
-                on_trigger: () => {
-                    set_place_principal_view('south');
-                    set_place_view_roll_quarter_turn(0);
-                    flash_status(['Place view: south'], 900);
-                },
-            },
-            {
-                id: 'place_view_west',
-                label: ui_state.place.principal_view === 'west' ? 'VIEW WEST*' : 'VIEW WEST',
-                description: 'set place view west',
-                rgb: get_color_by_name('vivid_blue').rgb,
-                on_trigger: () => {
-                    set_place_principal_view('west');
-                    set_place_view_roll_quarter_turn(0);
-                    flash_status(['Place view: west'], 900);
-                },
-            },
-            {
                 id: 'debug_add_fire',
                 label: 'FIRE',
                 description: 'add FIRE! tag to controlled actor',
@@ -6861,39 +6884,6 @@ export function create_app_state(): AppState {
                     } else {
                         flash_status(['Inventory: (empty)'], 1500);
                     }
-                },
-            },
-            {
-                id: 'ui_toggle_character',
-                label: module_registry.is_visible('character_module') ? 'CHAR HIDE' : 'CHAR SHOW',
-                description: 'toggle character module',
-                rgb: get_color_by_name('pale_yellow').rgb,
-                on_trigger: () => {
-                    const next = !module_registry.is_visible('character_module');
-                    set_module_visible('character_module', next);
-                    flash_status([next ? 'Character shown' : 'Character hidden'], 900);
-                },
-            },
-            {
-                id: 'ui_toggle_debug',
-                label: module_registry.is_visible('debug') ? 'DEBUG HIDE' : 'DEBUG SHOW',
-                description: 'toggle debug reader window',
-                rgb: get_color_by_name('pale_yellow').rgb,
-                on_trigger: () => {
-                    const next = !module_registry.is_visible('debug');
-                    set_module_visible('debug', next);
-                    flash_status([next ? 'Debug shown' : 'Debug hidden'], 900);
-                },
-            },
-            {
-                id: 'ui_toggle_camera_control',
-                label: module_registry.is_visible('camera_control') ? 'CAMERA HIDE' : 'CAMERA SHOW',
-                description: 'toggle camera control window',
-                rgb: get_color_by_name('pale_yellow').rgb,
-                on_trigger: () => {
-                    const next = !module_registry.is_visible('camera_control');
-                    set_module_visible('camera_control', next);
-                    flash_status([next ? 'Camera control shown' : 'Camera control hidden'], 900);
                 },
             },
             {
@@ -9062,7 +9052,7 @@ export function create_app_state(): AppState {
             }
             if (trimmed.toLowerCase() === '/debugcommander') {
                 const next = !module_registry.is_visible('debug_commander_module');
-                set_module_visible('debug_commander_module', next);
+                set_debug_commander_visible(next);
                 flash_status([next ? 'Debug commander shown' : 'Debug commander hidden'], 900);
                 return;
             }
@@ -9530,6 +9520,30 @@ export function create_app_state(): AppState {
         runtime: game_controls.runtime,
     };
     window.addEventListener('keydown', (e) => {
+        const cameraActionBindings: Array<{ id: string; action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right' }> = [
+            { id: 'game.view.swing_left', action: 'swing_left' },
+            { id: 'game.view.swing_right', action: 'swing_right' },
+            { id: 'game.view.swing_up', action: 'swing_up' },
+            { id: 'game.view.swing_down', action: 'swing_down' },
+            { id: 'game.view.roll_left', action: 'roll_left' },
+            { id: 'game.view.roll_right', action: 'roll_right' },
+        ];
+        for (const binding of cameraActionBindings) {
+            if (!control_binding_matches_keyboard_event(game_controls.runtime.get_binding(binding.id), e)) continue;
+            e.preventDefault();
+            step_place_camera_view_action(binding.action);
+            return;
+        }
+        const depthActionBindings: Array<{ id: string; dir: -1 | 1 }> = [
+            { id: 'game.view.depth_prev', dir: -1 },
+            { id: 'game.view.depth_next', dir: 1 },
+        ];
+        for (const binding of depthActionBindings) {
+            if (!control_binding_matches_keyboard_event(game_controls.runtime.get_binding(binding.id), e)) continue;
+            e.preventDefault();
+            step_place_focus_depth(binding.dir);
+            return;
+        }
         if (control_binding_matches_keyboard_event(game_controls.runtime.get_binding('global.open_controls'), e)) {
             e.preventDefault();
             toggle_controls_panel();
@@ -9600,7 +9614,7 @@ export function create_app_state(): AppState {
     const camera_control_fallback_space = createVoxelSpace(1, 1);
     const WORLD_CAMERA_APP_ID = 'thaum_world' as const;
     function persist_world_camera_config(partial: Partial<VoxelSpace['camera']>): void {
-        void save_camera_settings(APP_CONFIG.selected_data_slot, WORLD_CAMERA_APP_ID, partial).catch(() => null);
+        void save_camera_settings(APP_CONFIG.selected_data_slot, WORLD_CAMERA_APP_ID, partial, active_profile_scope).catch(() => null);
     }
     function apply_saved_camera_config_to_space(space: VoxelSpace, cam: Partial<VoxelSpace['camera']> = get_camera_settings_for_app(WORLD_CAMERA_APP_ID)): void {
         const sanitized = sanitize_camera_config_for_app(WORLD_CAMERA_APP_ID, cam);
@@ -9615,7 +9629,7 @@ export function create_app_state(): AppState {
         if (sanitized.calibration) space.camera.calibration = { ...sanitized.calibration };
     }
     apply_saved_camera_config_to_space(camera_control_fallback_space);
-    void load_camera_settings(APP_CONFIG.selected_data_slot, WORLD_CAMERA_APP_ID).then((cam) => {
+    void profile_scope_ready.then((profile_scope) => load_camera_settings(APP_CONFIG.selected_data_slot, WORLD_CAMERA_APP_ID, profile_scope)).then((cam) => {
         apply_saved_camera_config_to_space(camera_control_fallback_space, cam);
         update_camera_control_spaces((space) => apply_saved_camera_config_to_space(space, cam));
     }).catch(() => null);
@@ -10091,7 +10105,7 @@ export function create_app_state(): AppState {
 
         make_controls_module({
             id: 'controls_panel',
-            rect: { x0: 138, y0: 8, x1: 198, y1: 38 },
+            rect: get_persisted_rect('controls_panel', { x0: 138, y0: 8, x1: 198, y1: 38 }),
             get_is_visible: () => Boolean(ui_state.modules.visibility.get('controls_panel')),
             get_definitions: () => game_controls.runtime.get_definitions('game'),
             get_binding_label: (action_id) => game_controls.runtime.get_binding_label(action_id),
@@ -10101,7 +10115,39 @@ export function create_app_state(): AppState {
             on_move: (new_rect) => {
                 const panel = module_registry.get('controls_panel');
                 if (panel) panel.rect = new_rect;
+                persist_module_rect('controls_panel', new_rect);
             },
+        }),
+
+        make_customization_module({
+            id: 'customization_panel',
+            rect: get_persisted_rect('customization_panel', { x0: 138, y0: 8, x1: 164, y1: 18 }),
+            get_active_role: () => active_customization_role,
+            get_role_color: (role) => ui_customization_state.colors[role],
+            on_role_select: (role) => {
+                active_customization_role = role;
+                open_customization_picker();
+            },
+            on_move: (new_rect) => persist_module_rect('customization_panel', new_rect),
+            on_close: () => set_customization_panel_visible(false),
+        }),
+
+        make_color_picker_module({
+            id: 'customization_picker',
+            rect: get_persisted_rect('customization_picker', { x0: 166, y0: 8, x1: 200, y1: 26 }),
+            title: () => `SET ${active_customization_role.replace(/_/g, ' ').toUpperCase()}`,
+            get_committed_rgb: () => ui_customization_state.colors[active_customization_role],
+            on_preview_change: (rgb) => {
+                apply_ui_customization_runtime(set_ui_customization_role_color(active_customization_role, rgb));
+            },
+            on_commit: (rgb) => {
+                apply_ui_customization_runtime(set_ui_customization_role_color(active_customization_role, rgb));
+                void save_ui_customization_role_color(APP_CONFIG.selected_data_slot, active_customization_role, rgb, active_profile_scope).then((saved) => {
+                    apply_ui_customization_runtime(saved);
+                }).catch(() => null);
+            },
+            on_move: (new_rect) => persist_module_rect('customization_picker', new_rect),
+            on_close: () => set_module_visible('customization_picker', false),
         }),
 
         make_place_module({
@@ -10134,6 +10180,8 @@ export function create_app_state(): AppState {
             get_view_transition_euler: () => get_place_transition_euler(),
             get_view_transition_kind: () => ui_state.place.view_transition?.kind ?? null,
             get_use_focus_layer_opacity: () => ui_state.place.use_focus_layer_opacity,
+            on_step_view_action: (action) => step_place_camera_view_action(action),
+            on_step_depth: (dir) => step_place_focus_depth(dir),
             get_world_z_center: () => ui_state.place.world_z_center,
             get_mouse_parallax: () => ui_state.place.mouse_parallax,
             get_move_mode: () => ui_state.controls.move_mode,
@@ -10301,11 +10349,11 @@ export function create_app_state(): AppState {
                 const cid = build_place_tile_container_id(place.id, tile_x, tile_y, world_z);
                 void open_owner_inventory_view(cid);
             },
-            border_rgb: get_color_by_name('light_gray').rgb,
-            bg_rgb: get_color_by_name('off_black').rgb,
-            npc_rgb: get_color_by_name('vivid_yellow').rgb,  // Brighter yellow for visibility
-            actor_rgb: get_color_by_name('vivid_green').rgb,
-            grid_rgb: get_color_by_name('medium_gray').rgb,
+            border_rgb: undefined,
+            bg_rgb: undefined,
+            npc_rgb: undefined,
+            actor_rgb: undefined,
+            grid_rgb: undefined,
             initial_scale: 1,
             
             // Phase 2: Double-click callbacks
@@ -12253,6 +12301,14 @@ export function create_app_state(): AppState {
     if (!ui_state.modules.visibility.has('camera_control')) {
         ui_state.modules.visibility.set('camera_control', false);
         module_registry.set_visibility('camera_control', false);
+    }
+    if (!ui_state.modules.visibility.has('customization_panel')) {
+        ui_state.modules.visibility.set('customization_panel', false);
+        module_registry.set_visibility('customization_panel', false);
+    }
+    if (!ui_state.modules.visibility.has('customization_picker')) {
+        ui_state.modules.visibility.set('customization_picker', false);
+        module_registry.set_visibility('customization_picker', false);
     }
     if (!ui_state.modules.visibility.has('initiative')) {
         ui_state.modules.visibility.set('initiative', module_registry.is_visible('initiative'));

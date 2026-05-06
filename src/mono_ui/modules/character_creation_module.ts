@@ -1,6 +1,7 @@
 import type { Canvas, Module, PointerEvent, Rect } from "../types.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_color_by_name } from "../colors.js";
+import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 
 export type CharacterCreationField = {
   key: string;
@@ -63,11 +64,7 @@ export function make_character_creation_module(opts: CharacterCreationModuleConf
     rect: opts.rect,
     title: opts.get_title,
     is_visible: opts.get_is_visible,
-    background: { rgb: get_color_by_name("off_black").rgb },
-    border: {
-      border_rgb: get_color_by_name("vivid_green").rgb,
-      text_rgb: get_color_by_name("vivid_green").rgb,
-    },
+    background: { rgb: get_ui_semantic_rgb('background') },
     resize: { min_width: 32, min_height: 12, max_width: 60, max_height: 30 },
     gizmos: {
       enabled: ["close", "move", "resize", "seamless"],
@@ -99,7 +96,7 @@ export function make_character_creation_module(opts: CharacterCreationModuleConf
         const prefix = is_active ? ">" : " ";
         const edit_mark = field.editable === false ? "-" : ":";
         const line = trim_to_width(`${prefix}${field.label}${edit_mark} ${field.value}`, inner_width);
-        draw_line(c, rect.x0 + 1, y, line, is_active ? get_color_by_name("vivid_yellow").rgb : get_color_by_name("off_white").rgb, is_active ? 6 : 4);
+        draw_line(c, rect.x0 + 1, y, line, is_active ? get_ui_semantic_rgb('vivid') : get_ui_semantic_rgb('bright'), is_active ? 3 : 2);
         row_hits.push({ y, hit: { kind: "field", key: field.key } });
         y -= 1;
       }

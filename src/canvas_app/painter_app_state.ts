@@ -104,6 +104,8 @@ import { apply_world_selection_mode, clear_world_selection, create_world_selecti
 import { project_world_point_with_roll, unproject_plane_point_with_roll } from '../mono_ui/runtime/place_view_projection.js';
 import { create_painter_controls_runtime } from './controls_wiring.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
+import { create_profile_scope, type ProfileScope } from '../user_profiles/profile_scope.js';
+import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
 import { create_painter_tool_shortcut_interpreter } from './painter_tool_shortcut_interpreter.js';
 import { create_painter_sync_client } from './painter_sync_client.js';
 import { PAINTER_APP_CONFIG, apply_painter_multiplayer_transport_config } from './painter_runtime_config.js';
@@ -291,7 +293,15 @@ function create_legacy_painter_group_id(): string {
 }
 
 export function create_painter_app_state(options?: PainterAppStateOptions): PainterAppState {
-  initModuleLayoutPersistence(PAINTER_APP_CONFIG.selected_data_slot, 'thaum_painter');
+  let active_profile_scope: ProfileScope = create_profile_scope(PAINTER_APP_CONFIG.selected_data_slot, 'thaum_painter');
+  const profile_scope_ready = resolve_profile_scope(PAINTER_APP_CONFIG.selected_data_slot, 'thaum_painter').then((scope) => {
+    active_profile_scope = scope;
+    return scope;
+  }).catch(() => active_profile_scope);
+  initModuleLayoutPersistence(PAINTER_APP_CONFIG.selected_data_slot, 'thaum_painter', {
+    get_profile_scope: () => active_profile_scope,
+    profile_scope_ready,
+  });
   if (is_tai_fresh_state_enabled()) {
     clearAutoSave();
     clearToolProperties();
@@ -335,7 +345,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const DEFAULT_USER_SELECTION_COLOR_RGB: Rgb = { ...get_color_by_name('pumpkin').rgb };
   const saved_tool_props = loadToolProperties();
   let ui_customization_state: UiCustomizationState = get_ui_customization_state();
-  let user_selection_color_rgb: Rgb = { ...(saved_tool_props.user_selection_color_rgb ?? DEFAULT_USER_SELECTION_COLOR_RGB) };
+  let user_selection_color_rgb: Rgb = { ...ui_customization_state.colors.vivid };
   type PainterSelectionChannelState = {
     connection_id: string;
     color_rgb: Rgb;
@@ -375,7 +385,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
     const created: PainterSelectionChannelState = {
       connection_id: normalized,
-      color_rgb: color_rgb ? { ...color_rgb } : { r: 0, g: 220, b: 255 },
+      color_rgb: color_rgb ? { ...color_rgb } : { ...user_selection_color_rgb },
       selection: create_world_selection(),
       updated_at_ms: Date.now(),
     };
@@ -397,9 +407,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     get_local_selection_channel().color_rgb = { ...user_selection_color_rgb };
   }
 
-  void load_ui_customization_state(PAINTER_APP_CONFIG.selected_data_slot, {
+  void profile_scope_ready.then((profile_scope) => load_ui_customization_state(PAINTER_APP_CONFIG.selected_data_slot, {
     vivid_seed_rgb: saved_tool_props.user_selection_color_rgb ?? DEFAULT_USER_SELECTION_COLOR_RGB,
-  }).then((next) => {
+    profile_scope,
+  })).then((next) => {
     apply_ui_customization_runtime(next);
   }).catch(() => {
     // ignore slot customization load failures and keep defaults in memory
@@ -1598,11 +1609,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function persistPainterCameraConfig(partial: Partial<CameraConfig>): void {
-    void save_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID, partial).catch(() => null);
+    void save_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID, partial, active_profile_scope).catch(() => null);
   }
 
   function resetPainterCameraConfig(): void {
-    void reset_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID).catch(() => null);
+    void reset_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID, active_profile_scope).catch(() => null);
   }
 
   function clampPainterCameraScalar(value: number, limits: { min: number; max: number }): number {
@@ -1660,7 +1671,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   // Load saved camera configuration
   const savedCameraConfig = getSavedPainterCameraConfig();
   mergeSavedPainterCameraConfig(savedCameraConfig);
-  void load_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID).then((config) => {
+  void profile_scope_ready.then((profile_scope) => load_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, PAINTER_CAMERA_APP_ID, profile_scope)).then((config) => {
     mergeSavedPainterCameraConfig(config);
     syncPainterCameraViewTransform();
   }).catch(() => null);
@@ -1766,7 +1777,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     y1: 2
   };
 
-  let canvas_rect: Rect = get_default_canvas_rect();
+  let canvas_rect: Rect = getModulePosition('painter_canvas') ?? get_default_canvas_rect();
   const PAINTER_CANVAS_VIEW_ID = 'painter_canvas_view';
 
   function syncPainterCameraViewStateToLegacyCamera(): void {
@@ -3474,7 +3485,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const next = set_ui_customization_role_color('vivid', rgb);
     apply_ui_customization_runtime(next);
     saveToolProperties({ user_selection_color_rgb });
-    void save_ui_customization_role_color(PAINTER_APP_CONFIG.selected_data_slot, 'vivid', rgb).catch(() => null);
+    void save_ui_customization_role_color(PAINTER_APP_CONFIG.selected_data_slot, 'vivid', rgb, active_profile_scope).catch(() => null);
     syncDOMRenderer();
     publish_local_selection_channel();
   }
@@ -4656,20 +4667,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       return world_clipboard_data ? encode_world_copy_data(world_clipboard_data) : clipboard_data;
     },
     on_move: (new_rect) => {
-      // Update canvas_rect when moved
       canvas_rect = new_rect;
+      saveModulePosition('painter_canvas', new_rect);
       refreshPainterProjectionPreservingCurrentTarget();
       painterDiag('canvas moved', { rect: new_rect });
     },
     on_resize: (new_rect) => {
-      // Update canvas_rect
       canvas_rect = new_rect;
+      saveModulePosition('painter_canvas', new_rect);
       refreshPainterProjectionPreservingCurrentTarget();
       painterDiag('canvas resized', { rect: new_rect });
     },
     on_close: () => {
-      // Reset canvas to default position
       canvas_rect = get_default_canvas_rect();
+      saveModulePosition('painter_canvas', canvas_rect);
       refreshPainterProjectionPreservingCurrentTarget();
       painterDiag('canvas reset to default position');
     },
@@ -4729,8 +4740,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let controls_module: Module | null = null;
   let active_customization_role: UiSemanticColorRole = 'vivid';
 
-  const painter_controls = create_painter_controls_runtime(PAINTER_APP_CONFIG.selected_data_slot);
-  void painter_controls.load();
+  const painter_controls = create_painter_controls_runtime(PAINTER_APP_CONFIG.selected_data_slot, {
+    get_profile_scope: () => active_profile_scope,
+  });
+  void profile_scope_ready.then(() => painter_controls.load()).catch(() => null);
 
   function isToolTargetInvertBindingEvent(e: KeyboardEvent): boolean {
     const binding = painter_controls.runtime.get_binding('painter.tool_target_invert');
@@ -5869,7 +5882,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         const next = set_ui_customization_role_color(active_customization_role, rgb);
         apply_ui_customization_runtime(next);
         saveToolProperties({ user_selection_color_rgb: ui_customization_state.colors.vivid });
-        void save_ui_customization_role_color(PAINTER_APP_CONFIG.selected_data_slot, active_customization_role, rgb).then((saved) => {
+        void save_ui_customization_role_color(PAINTER_APP_CONFIG.selected_data_slot, active_customization_role, rgb, active_profile_scope).then((saved) => {
           apply_ui_customization_runtime(saved);
           saveToolProperties({ user_selection_color_rgb: saved.colors.vivid });
         }).catch(() => null);

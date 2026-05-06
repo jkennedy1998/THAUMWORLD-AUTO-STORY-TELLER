@@ -1,8 +1,9 @@
 import type { ControlActionDefinition, ControlBinding, ControlsProfile } from './controls_registry.js';
 import { control_binding_conflict_key, format_control_binding } from './controls_binding_matcher.js';
 import { load_controls_profile, save_controls_profile } from './controls_profile_store.js';
+import type { ProfileScope } from '../../user_profiles/profile_scope.js';
 
-export function create_controls_runtime(options: { data_slot: number; definitions: ControlActionDefinition[] }) {
+export function create_controls_runtime(options: { data_slot: number; definitions: ControlActionDefinition[]; get_profile_scope?: () => ProfileScope | null }) {
   const definitions = [...options.definitions];
   const definitions_by_id = new Map(definitions.map((definition) => [definition.id, definition] as const));
   let bindings = new Map<string, ControlBinding | null>(definitions.map((definition) => [definition.id, definition.default_binding ?? null]));
@@ -22,7 +23,7 @@ export function create_controls_runtime(options: { data_slot: number; definition
   }
 
   async function load(): Promise<void> {
-    const profile = await load_controls_profile(options.data_slot);
+    const profile = await load_controls_profile(options.data_slot, options.get_profile_scope?.() ?? null);
     if (!profile) return;
     for (const [action_id, binding] of Object.entries(profile.bindings)) {
       if (!definitions_by_id.has(action_id)) continue;
@@ -32,7 +33,7 @@ export function create_controls_runtime(options: { data_slot: number; definition
   }
 
   async function persist(): Promise<void> {
-    await save_controls_profile(options.data_slot, get_profile());
+    await save_controls_profile(options.data_slot, get_profile(), options.get_profile_scope?.() ?? null);
   }
 
   function subscribe(listener: () => void): () => void {

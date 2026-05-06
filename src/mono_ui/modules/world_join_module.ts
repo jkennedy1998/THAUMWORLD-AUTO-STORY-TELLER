@@ -1,6 +1,7 @@
 import type { Canvas, Module, PointerEvent, Rect } from "../types.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_color_by_name } from "../colors.js";
+import { get_standard_ux_chrome_colors } from "../module_borders.js";
 
 export type JoinableWorldEntry = {
   id: string;
@@ -56,7 +57,7 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
     return width <= 1 ? text.slice(0, width) : `${text.slice(0, width - 1)}~`;
   }
 
-  function draw_line(c: Canvas, x: number, y: number, text: string, rgb = get_color_by_name("off_white").rgb, weight_index = 2): void {
+  function draw_line(c: Canvas, x: number, y: number, text: string, rgb = get_standard_ux_chrome_colors().text_rgb, weight_index = 2): void {
     for (let i = 0; i < text.length; i += 1) {
       c.set(x + i, y, { char: text[i]!, rgb, weight_index, render_index: 6, style: "regular" });
     }
@@ -95,11 +96,7 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
     rect: opts.rect,
     title: "JOIN WORLD",
     is_visible: opts.get_is_visible,
-    background: { rgb: get_color_by_name("off_black").rgb },
-    border: {
-      border_rgb: get_color_by_name("vivid_cyan").rgb,
-      text_rgb: get_color_by_name("vivid_cyan").rgb,
-    },
+    
     resize: { min_width: 32, min_height: 12, max_width: 54, max_height: 30 },
     gizmos: {
       enabled: ["move", "seamless"],
@@ -112,6 +109,7 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
     draw_content(c: Canvas, rect: Rect): void {
       row_hits = [];
       button_hits = [];
+      const { accent_rgb, muted_rgb, text_rgb } = get_standard_ux_chrome_colors();
       const entries = opts.get_entries();
       const selected = opts.get_selected_world_id();
       const editor = opts.get_editor_state();
@@ -129,9 +127,9 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
         const rgb = entry.local
           ? get_color_by_name('vivid_green').rgb
           : online
-            ? get_color_by_name('vivid_cyan').rgb
-            : get_color_by_name('medium_gray').rgb;
-        draw_line(c, rect.x0 + 1, y, line, rgb, entry.id === selected ? 6 : 4);
+            ? accent_rgb
+            : muted_rgb;
+        draw_line(c, rect.x0 + 1, y, line, rgb, entry.id === selected ? 3 : 2);
         row_hits.push({ y, world_id: entry.id });
         y -= 1;
       }
@@ -143,29 +141,29 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
       const forget = '[FORGET]';
       const back = "[BACK]";
       let buttonX = rect.x0 + 1;
-      buttonX = draw_button(c, buttonX, buttonY, join, get_color_by_name('vivid_green').rgb, 'join');
-      buttonX = draw_button(c, buttonX, buttonY, refresh, get_color_by_name('vivid_blue').rgb, 'refresh');
-      buttonX = draw_button(c, buttonX, buttonY, add, get_color_by_name('vivid_cyan').rgb, 'add');
-      buttonX = draw_button(c, buttonX, buttonY, edit, get_color_by_name('vivid_yellow').rgb, 'edit');
+      buttonX = draw_button(c, buttonX, buttonY, join, accent_rgb, 'join');
+      buttonX = draw_button(c, buttonX, buttonY, refresh, text_rgb, 'refresh');
+      buttonX = draw_button(c, buttonX, buttonY, add, text_rgb, 'add');
+      buttonX = draw_button(c, buttonX, buttonY, edit, text_rgb, 'edit');
       buttonX = draw_button(c, buttonX, buttonY, forget, get_color_by_name('vivid_red').rgb, 'forget');
-      draw_button(c, buttonX, buttonY, back, get_color_by_name('vivid_red').rgb, 'back');
+      draw_button(c, buttonX, buttonY, back, muted_rgb, 'back');
       const status = opts.get_status_lines?.() ?? [];
       const selectedEntry = entries.find((entry) => entry.id === selected) ?? null;
       if (selectedEntry?.description) {
         draw_line(c, rect.x0 + 1, rect.y0 + 3, trim(selectedEntry.description, innerWidth), get_color_by_name("light_gray").rgb, 3);
       }
       for (let i = 0; i < status.length && rect.y0 + 4 + i < list_floor_y; i += 1) {
-        draw_line(c, rect.x0 + 1, rect.y0 + 4 + i, trim(status[i] ?? "", innerWidth), get_color_by_name("medium_gray").rgb, 3);
+        draw_line(c, rect.x0 + 1, rect.y0 + 4 + i, trim(status[i] ?? "", innerWidth), muted_rgb, 3);
       }
       if (editor.mode !== 'hidden') {
         const editorTitle = editor.mode === 'add' ? 'ADD WI-FI HOST' : 'RENAME WI-FI HOST';
-        draw_line(c, rect.x0 + 1, rect.y0 + 6, trim_end(editorTitle, innerWidth), get_color_by_name('vivid_yellow').rgb, 5);
+        draw_line(c, rect.x0 + 1, rect.y0 + 6, trim_end(editorTitle, innerWidth), accent_rgb, 5);
         const hostPrefix = editor.active_field === 'host' ? '>host: ' : ' host: ';
         const labelPrefix = editor.active_field === 'label' ? '>name: ' : ' name: ';
         const hostValue = trim_end(editor.host || (editor.mode === 'add' ? '192.168.1.50:8787' : ''), Math.max(1, innerWidth - hostPrefix.length));
         const labelValue = trim_end(editor.label || 'My Host', Math.max(1, innerWidth - labelPrefix.length));
-        draw_line(c, rect.x0 + 1, rect.y0 + 5, trim_end(`${hostPrefix}${hostValue}`, innerWidth), get_color_by_name('off_white').rgb, 4);
-        draw_line(c, rect.x0 + 1, rect.y0 + 4, trim_end(`${labelPrefix}${labelValue}`, innerWidth), get_color_by_name('off_white').rgb, 4);
+        draw_line(c, rect.x0 + 1, rect.y0 + 5, trim_end(`${hostPrefix}${hostValue}`, innerWidth), text_rgb, 2);
+        draw_line(c, rect.x0 + 1, rect.y0 + 4, trim_end(`${labelPrefix}${labelValue}`, innerWidth), text_rgb, 2);
         button_hits.push({ x0: rect.x0 + 1, x1: rect.x0 + 1 + trim_end(`${hostPrefix}${hostValue}`, innerWidth).length - 1, y: rect.y0 + 5, action: 'field_host' });
         button_hits.push({ x0: rect.x0 + 1, x1: rect.x0 + 1 + trim_end(`${labelPrefix}${labelValue}`, innerWidth).length - 1, y: rect.y0 + 4, action: 'field_label' });
         const saveLabel = '[SAVE]';
@@ -175,7 +173,7 @@ export function make_world_join_module(opts: WorldJoinModuleConfig): Module {
         const helper = editor.mode === 'add'
           ? 'host or host:port, tab switches field'
           : 'rename saved host, esc cancels';
-        draw_line(c, rect.x0 + 1, rect.y0 + 7, trim_end(helper, innerWidth), get_color_by_name('medium_gray').rgb, 3);
+        draw_line(c, rect.x0 + 1, rect.y0 + 7, trim_end(helper, innerWidth), muted_rgb, 3);
         if (editor.error) {
           draw_line(c, rect.x0 + 1, rect.y0 + 8, trim_end(editor.error, innerWidth), get_color_by_name('vivid_red').rgb, 3);
         }

@@ -1,6 +1,7 @@
 import type { Canvas, Module, PointerEvent, Rect, WheelEvent, Rgb } from "../types.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_color_by_name } from "../colors.js";
+import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 
 export type DebugCommanderAction = {
   id: string;
@@ -32,7 +33,9 @@ const MAX_HEIGHT = 34;
 
 export function make_debug_commander_module(opts: DebugCommanderModuleConfig): Module {
   let scroll_offset = 0;
-  let row_hits: Array<{ y: number; action_id: string }> = [];
+  let row_hits: Array<{ action_id: string; x0: number; y0: number; x1: number; y1: number }> = [];
+  let hovered_action_id: string | null = null;
+  let pressed_action_id: string | null = null;
 
   function trim_to_width(text: string, width: number): string {
     if (width <= 0) return "";
@@ -41,7 +44,7 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
     return `${text.slice(0, width - 1)}~`;
   }
 
-  function draw_line(c: Canvas, x: number, y: number, text: string, rgb: Rgb, weight_index = 2): void {
+  function draw_line(c: Canvas, x: number, y: number, text: string, rgb: Rgb, weight_index: 0 | 1 | 2 | 3 = 2): void {
     for (let i = 0; i < text.length; i += 1) {
       c.set(x + i, y, { char: text[i]!, rgb, weight_index, render_index: 6, style: "regular" });
     }
@@ -49,6 +52,28 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
 
   function get_actions(): DebugCommanderAction[] {
     return opts.get_actions();
+  }
+
+  function find_hit(x: number, y: number): { action_id: string; x0: number; y0: number; x1: number; y1: number } | null {
+    for (let i = row_hits.length - 1; i >= 0; i -= 1) {
+      const hit = row_hits[i]!;
+      if (x >= hit.x0 && x <= hit.x1 && y >= hit.y0 && y <= hit.y1) return hit;
+    }
+    return null;
+  }
+
+  function resolve_action_rgb(action: DebugCommanderAction, selected: boolean): Rgb {
+    if (action.disabled) return get_ui_semantic_rgb('dimmest');
+    if (pressed_action_id === action.id) return get_ui_semantic_rgb('vivid');
+    if (hovered_action_id === action.id) return get_ui_semantic_rgb('vivid');
+    if (selected) return get_ui_semantic_rgb('bright');
+    return get_ui_semantic_rgb('bright');
+  }
+
+  function resolve_action_weight(selected: boolean, action_id: string): 0 | 1 | 2 | 3 {
+    const base = selected ? 2 : 1;
+    const next = pressed_action_id === action_id ? base + 1 : base;
+    return Math.max(0, Math.min(3, next)) as 0 | 1 | 2 | 3;
   }
 
   function get_selected_index(actions: DebugCommanderAction[]): number {
@@ -87,11 +112,7 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
     rect: opts.rect,
     title: "DEBUG CMDR",
     is_visible: opts.get_is_visible,
-    background: { rgb: get_color_by_name("off_black").rgb },
-    border: {
-      border_rgb: get_color_by_name("pale_yellow").rgb,
-      text_rgb: get_color_by_name("pale_yellow").rgb,
-    },
+    background: { rgb: get_ui_semantic_rgb('background') },
     resize: {
       min_width: MIN_WIDTH,
       min_height: MIN_HEIGHT,
@@ -127,32 +148,46 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
         const y = top_y - i;
         if (y <= rect.y0 + 3) break;
         const selected = action.id === selected_action_id;
-        const prefix = selected ? ">" : " ";
+        const prefix = selected ? '[x]' : '[ ]';
         const line = trim_to_width(`${prefix} ${action.label}`, inner_width);
-        const rgb = action.disabled
-          ? get_color_by_name("dark_gray").rgb
-          : selected
-            ? action.rgb
-            : get_color_by_name("off_white").rgb;
-        draw_line(c, rect.x0 + 1, y, line, rgb, selected ? 6 : 4);
-        row_hits.push({ y, action_id: action.id });
+        draw_line(c, rect.x0 + 1, y, line, resolve_action_rgb(action, selected), resolve_action_weight(selected, action.id));
+        row_hits.push({ action_id: action.id, x0: rect.x0 + 1, y0: y, x1: rect.x1 - 1, y1: y });
       }
 
       const selected = actions.find((action) => action.id === selected_action_id) ?? null;
       const summary = selected
         ? trim_to_width(selected.description ?? selected.label, inner_width)
-        : trim_to_width("select a debug command", inner_width);
-      draw_line(c, rect.x0 + 1, footer_y, summary, get_color_by_name("medium_gray").rgb, 3);
+        : trim_to_width('select a debug command', inner_width);
+      draw_line(c, rect.x0 + 1, footer_y, summary, get_ui_semantic_rgb('medium'), 1);
 
-      for (let i = 0; i < status_lines.length && footer_y - 1 - i > rect.y0; i += 1) {
-        draw_line(c, rect.x0 + 1, footer_y - 1 - i, trim_to_width(status_lines[i] ?? "", inner_width), get_color_by_name("medium_gray").rgb, 3);
+      const hint_y = footer_y - 1;
+      if (hint_y > rect.y0) {
+        draw_line(c, rect.x0 + 1, hint_y, trim_to_width('↑↓ select  enter run  esc close', inner_width), get_ui_semantic_rgb('medium'), 1);
+      }
+
+      for (let i = 0; i < status_lines.length && footer_y - 2 - i > rect.y0; i += 1) {
+        draw_line(c, rect.x0 + 1, footer_y - 2 - i, trim_to_width(status_lines[i] ?? '', inner_width), get_ui_semantic_rgb('medium'), 1);
       }
     },
     on_pointer_down_content(e: PointerEvent): void {
-      const hit = row_hits.find((entry) => entry.y === e.y);
+      const hit = find_hit(e.x, e.y);
+      hovered_action_id = hit?.action_id ?? null;
+      pressed_action_id = hit?.action_id ?? null;
       if (!hit) return;
       opts.on_select_action(hit.action_id);
-      opts.on_trigger_action(hit.action_id);
+    },
+    on_pointer_move_content(e: PointerEvent): void {
+      hovered_action_id = find_hit(e.x, e.y)?.action_id ?? null;
+    },
+    on_pointer_up_content(rect: Rect): void {
+      const hit = hovered_action_id ? row_hits.find((entry) => entry.action_id === hovered_action_id) ?? null : null;
+      const triggered_action_id = pressed_action_id && hit && hit.action_id === pressed_action_id ? pressed_action_id : null;
+      pressed_action_id = null;
+      if (triggered_action_id) opts.on_trigger_action(triggered_action_id);
+    },
+    on_pointer_leave_content(): void {
+      hovered_action_id = null;
+      pressed_action_id = null;
     },
     on_wheel_content(e: WheelEvent, rect: Rect): void {
       const actions = get_actions();

@@ -1,6 +1,5 @@
 import type { Canvas, Module, PointerEvent, Rect } from '../types.js';
-import { get_color_by_name } from '../colors.js';
-import { draw_module_border, PANEL_BORDER_PRESETS } from '../module_borders.js';
+import { draw_standard_ux_border, get_standard_ux_chrome_colors } from '../module_borders.js';
 
 type OverlayButton = {
   id: string;
@@ -237,19 +236,11 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
     Draw(c: Canvas): void {
       if (opts.get_is_visible && !opts.get_is_visible()) return;
       const rect = get_rect();
-      const border_rgb = get_color_by_name('medium_gray').rgb;
-      const bg_rgb = get_color_by_name('off_black').rgb;
-      const text_rgb = get_color_by_name('off_white').rgb;
-      const accent_rgb = get_color_by_name('vivid_yellow').rgb;
+      const { background_rgb: bg_rgb, border_rgb, title_rgb, text_rgb, accent_rgb, muted_rgb } = get_standard_ux_chrome_colors();
       const handle = get_handle_bounds(rect);
 
       c.fill_rect(rect, { char: ' ', rgb: bg_rgb, style: 'regular', weight_index: 1 });
-      draw_module_border(c, {
-        rect,
-        style: PANEL_BORDER_PRESETS.default_double.style,
-        border_rgb,
-        weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
-      });
+      draw_standard_ux_border(c, rect);
 
       c.set(handle.x0, handle.y, {
         char: get_target_expanded() ? 'v' : '^',
@@ -263,7 +254,7 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
       if (tab_y !== null) {
         for (const entry of get_tab_layout(rect)) {
           const label = resolve_label(entry.tab.label);
-          const color = entry.tab.id === active_tab_id ? accent_rgb : text_rgb;
+          const color = entry.tab.id === active_tab_id ? accent_rgb : title_rgb;
           for (let i = 0; i < label.length && entry.x0 + i <= entry.x1; i++) {
             c.set(entry.x0 + i, tab_y, {
               char: label[i]!,
@@ -298,7 +289,7 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
             for (let i = 0; i < status_text.length && rect.x0 + 2 + i < rect.x1; i++) {
               c.set(rect.x0 + 2 + i, button_y, {
                 char: status_text[i]!,
-                rgb: text_rgb,
+                rgb: muted_rgb,
                 style: 'regular',
                 weight_index: 2,
                 render_index: 6,

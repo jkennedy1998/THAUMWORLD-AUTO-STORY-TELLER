@@ -1,8 +1,8 @@
 import type { Canvas, Module, PointerEvent, Rect, WheelEvent } from '../types.js';
-import { get_color_by_name } from '../colors.js';
 import { PANEL_BORDER_PRESETS, draw_panel_horizontal_divider } from '../module_borders.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 
 export type InitiativeEntryView = {
   actor_ref: string;
@@ -113,15 +113,15 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
   let transition_until_ms = 0;
   let end_turn_hitbox: Rect | null = null;
 
-  const bg_color = get_color_by_name('off_black').rgb;
-  const border_color = get_color_by_name('light_gray').rgb;
-  const text_color = get_color_by_name('off_white').rgb;
-  const muted_color = get_color_by_name('medium_gray').rgb;
-  const accent_color = get_color_by_name('vivid_yellow').rgb;
-  const world_color = get_color_by_name('vivid_cyan').rgb;
-  const active_color = get_color_by_name('pale_green').rgb;
-  const flash_color = get_color_by_name('vivid_green').rgb;
-  const status_color = get_color_by_name('light_blue').rgb;
+  const bg_color = () => get_ui_semantic_rgb('background');
+  const border_color = () => get_ui_semantic_rgb('dimmest');
+  const text_color = () => get_ui_semantic_rgb('bright');
+  const muted_color = () => get_ui_semantic_rgb('medium');
+  const accent_color = () => get_ui_semantic_rgb('vivid');
+  const world_color = () => get_ui_semantic_rgb('vivid');
+  const active_color = () => get_ui_semantic_rgb('bright');
+  const flash_color = () => get_ui_semantic_rgb('vivid');
+  const status_color = () => get_ui_semantic_rgb('medium');
 
   const gizmo_config: ModuleGizmosConfig = {
     enabled: ['move', 'resize', 'close', 'seamless'],
@@ -150,12 +150,11 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
     rect: opts.rect,
     title: 'INITIATIVE',
     gizmos: gizmo_config,
-    background: { rgb: bg_color },
+    background: { rgb: bg_color() },
     border: {
       style: PANEL_BORDER_PRESETS.default_double.style,
-      border_rgb: border_color,
+      border_rgb: border_color(),
       weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
-      text_rgb: text_color,
       markers: () => {
         const rows = build_rows(opts.get_state());
         return {
@@ -172,7 +171,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
     },
     draw_content(c: Canvas, next_rect: Rect): void {
       rect = next_rect;
-      c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
+      c.fill_rect(rect, { char: ' ', rgb: bg_color(), style: 'regular' });
 
       const state = opts.get_state();
       const rows = build_rows(state);
@@ -211,7 +210,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
       for (let i = 0; i < summary_text.length; i += 1) {
         c.set(rect.x0 + 1 + i, summary_y, {
           char: summary_text[i]!,
-          rgb: state.active ? accent_color : muted_color,
+          rgb: state.active ? accent_color() : muted_color(),
           style: 'regular',
           weight_index: 2,
         });
@@ -221,7 +220,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
       for (let i = 0; i < detail_text.length; i += 1) {
         c.set(rect.x0 + 1 + i, detail_y, {
           char: detail_text[i]!,
-          rgb: state.phase === 'world_sim_interstitial' ? world_color : muted_color,
+          rgb: state.phase === 'world_sim_interstitial' ? world_color() : muted_color(),
           style: 'regular',
           weight_index: 2,
         });
@@ -235,7 +234,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         && state.active_actor_ref === state.controlled_actor_ref
       );
       const action_label = state.active ? (can_end_turn ? '[END TURN]' : '[WAIT TURN]') : '';
-      const action_rgb = can_end_turn ? flash_color : muted_color;
+      const action_rgb = can_end_turn ? flash_color() : muted_color();
       const action_x = rect.x0 + 1;
       end_turn_hitbox = action_label
         ? {
@@ -258,7 +257,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         y: divider_y,
         rect,
         style: PANEL_BORDER_PRESETS.default_double.style,
-        rgb: border_color,
+        rgb: border_color(),
         weight_index: 1,
       });
 
@@ -269,7 +268,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         for (let i = 0; i < empty.length && x + i < rect.x1; i += 1) {
           c.set(x + i, y, {
             char: empty[i]!,
-            rgb: muted_color,
+            rgb: muted_color(),
             style: 'regular',
             weight_index: 2,
           });
@@ -294,10 +293,10 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         if (y < content_bottom_y) break;
 
         const row_rgb = row.kind === 'world'
-          ? world_color
+          ? world_color()
           : row.is_active
-            ? (transition_active ? flash_color : active_color)
-            : text_color;
+            ? (transition_active ? flash_color() : active_color())
+            : text_color();
         const marker = row.kind === 'world' ? '*' : (row.is_active ? '>' : ' ');
 
         c.set(marker_x, y, {
@@ -321,7 +320,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
           for (let j = 0; j < detail_text_world.length && status_x + j < rect.x1; j += 1) {
             c.set(status_x + j, y, {
               char: detail_text_world[j]!,
-              rgb: status_color,
+              rgb: status_color(),
               style: 'regular',
               weight_index: 2,
             });
@@ -333,7 +332,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         for (let j = 0; j < roll.length; j += 1) {
           c.set(roll_x + j, y, {
             char: roll[j]!,
-            rgb: accent_color,
+            rgb: accent_color(),
             style: 'regular',
             weight_index: row.is_active ? 3 : 2,
           });
@@ -353,7 +352,7 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         for (let j = 0; j < status.length && status_x + j < rect.x1; j += 1) {
           c.set(status_x + j, y, {
             char: status[j]!,
-            rgb: row.is_active ? row_rgb : status_color,
+            rgb: row.is_active ? row_rgb : status_color(),
             style: 'regular',
             weight_index: 2,
           });

@@ -39,6 +39,13 @@ import {
   type OrderedResolvedTargets,
   type ResolvedTarget,
 } from '../runtime/interaction_runtime_types.js';
+import {
+  draw_canvas_nav_cluster,
+  get_canvas_nav_hit,
+  get_canvas_nav_reserved_left_x,
+  type CanvasNavButtonId,
+  type CanvasNavViewAction,
+} from './canvas_nav_cluster.js';
 
 function painterCanvasDiag(message: string, payload?: Record<string, unknown>): void {
   diag_log('painter', 'verbose', 'PAINTER_CANVAS', message, payload);
@@ -148,7 +155,7 @@ export type PainterCanvasOptions = {
 };
 
 export type PainterInteractionAnchor = CameraAnchor;
-export type PainterViewAction = 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right';
+export type PainterViewAction = CanvasNavViewAction;
 
 export type RasterMoveSourceVoxel = { x: number; y: number; z: number; cell: GridCell };
 
@@ -1529,8 +1536,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let interaction_end_world: { x: number; y: number; z: number } | null = null;
   let shape_start_world: { x: number; y: number; z: number } | null = null;
 
-  type CanvasNavButtonId = 'nav_toggle' | PainterViewAction | 'depth_prev' | 'depth_next' | 'pan_placeholder';
-
   function getCanvasTopLeftGizmoCount(): number {
     let count = 0;
     if (gizmo_config.enabled.includes('move') && gizmo_config.can_move) count++;
@@ -1541,32 +1546,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return count;
   }
 
-  function getCanvasNavTogglePosition(): { x: number; y: number } {
-    return { x: rect.x0 + 1 + (getCanvasTopLeftGizmoCount() * 2), y: rect.y1 - 1 };
-  }
-
-  function getCanvasNavClusterButtons(): Array<{ id: CanvasNavButtonId; x: number; y: number; char: string }> {
-    if (!show_canvas_nav_cluster) return [];
-    const start_x = rect.x1 - 4;
-    const start_y = rect.y1 - 2;
-    return [
-      { id: 'roll_left', x: start_x, y: start_y, char: 'r' },
-      { id: 'swing_up', x: start_x + 1, y: start_y, char: '↑' },
-      { id: 'roll_right', x: start_x + 2, y: start_y, char: 'R' },
-      { id: 'swing_left', x: start_x, y: start_y - 1, char: '←' },
-      { id: 'pan_placeholder', x: start_x + 1, y: start_y - 1, char: '·' },
-      { id: 'swing_right', x: start_x + 2, y: start_y - 1, char: '→' },
-      { id: 'depth_prev', x: start_x, y: start_y - 2, char: '-' },
-      { id: 'swing_down', x: start_x + 1, y: start_y - 2, char: '↓' },
-      { id: 'depth_next', x: start_x + 2, y: start_y - 2, char: '+' },
-    ];
-  }
-
   function getCanvasNavHit(x: number, y: number): CanvasNavButtonId | null {
-    const toggle = getCanvasNavTogglePosition();
-    if (x === toggle.x && y === toggle.y) return 'nav_toggle';
-    const hit = getCanvasNavClusterButtons().find((button) => button.x === x && button.y === y);
-    return hit?.id ?? null;
+    return get_canvas_nav_hit(rect, show_canvas_nav_cluster, getCanvasTopLeftGizmoCount(), x, y);
   }
 
   function updateCanvasNavHover(x: number, y: number): void {
@@ -1579,8 +1560,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function getCanvasNavReservedLeftX(): number {
-    if (!show_canvas_nav_cluster) return rect.x1;
-    return rect.x1 - 5;
+    return get_canvas_nav_reserved_left_x(rect, show_canvas_nav_cluster);
   }
 
   function getCursorWorldReadout(): string | null {
@@ -2870,25 +2850,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         draw_module_gizmos(c, rect, gizmo_config, gizmo_state);
       }
 
-      const navToggle = getCanvasNavTogglePosition();
-      c.set(navToggle.x, navToggle.y, {
-        char: '>',
-        rgb: get_ui_semantic_rgb('bright'),
-        style: 'regular',
-        weight_index: pressed_canvas_nav_button === 'nav_toggle' ? 3 : 2,
+      draw_canvas_nav_cluster(c, {
+        rect,
+        show_cluster: show_canvas_nav_cluster,
+        top_left_gizmo_count: getCanvasTopLeftGizmoCount(),
+        hovered_button: hovered_canvas_nav_button,
+        pressed_button: pressed_canvas_nav_button,
         render_index: 1003,
       });
-      for (const button of getCanvasNavClusterButtons()) {
-        const pressed = pressed_canvas_nav_button === button.id;
-        const hovered = hovered_canvas_nav_button === button.id;
-        c.set(button.x, button.y, {
-          char: button.char,
-          rgb: pressed ? get_ui_semantic_rgb('vivid') : get_ui_semantic_rgb('bright'),
-          style: 'regular',
-          weight_index: pressed || hovered ? 1 : 0,
-          render_index: 1003,
-        });
-      }
     },
 
     OnPointerDown(e: PointerEvent): void {

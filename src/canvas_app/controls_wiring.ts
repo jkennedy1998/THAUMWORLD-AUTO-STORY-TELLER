@@ -6,11 +6,13 @@ import { create_controls_runtime } from '../mono_ui/runtime/controls_runtime.js'
 import { configure_input_bindings } from '../mono_ui/runtime/input_actions.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
 import type { ToolType } from '../ascii_painter/types.js';
+import type { ProfileScope } from '../user_profiles/profile_scope.js';
 
-export function create_game_controls_runtime(data_slot: number) {
+export function create_game_controls_runtime(data_slot: number, opts?: { get_profile_scope?: () => ProfileScope | null }) {
   const runtime = create_controls_runtime({
     data_slot,
     definitions: merge_control_definitions(GLOBAL_CONTROLS_PROFILE, GAME_CONTROLS_PROFILE),
+    get_profile_scope: opts?.get_profile_scope,
   });
 
   function apply_game_bindings(): void {
@@ -65,10 +67,11 @@ const PAINTER_TOOL_ACTIONS: Record<ToolType, string> = {
   move: 'painter.tool_assign.move',
 };
 
-export function create_painter_controls_runtime(data_slot: number) {
+export function create_painter_controls_runtime(data_slot: number, opts?: { get_profile_scope?: () => ProfileScope | null }) {
   const runtime = create_controls_runtime({
     data_slot,
     definitions: merge_control_definitions(GLOBAL_CONTROLS_PROFILE, PAINTER_CONTROLS_PROFILE),
+    get_profile_scope: opts?.get_profile_scope,
   });
 
   return {
