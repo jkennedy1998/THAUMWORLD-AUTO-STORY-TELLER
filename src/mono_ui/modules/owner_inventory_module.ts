@@ -1,6 +1,5 @@
 import type { Canvas, Module, PointerEvent, Rect, Rgb, WheelEvent } from "../types.js";
 import { calculate_grid_dimensions } from "../../types/container.js";
-import { get_color_by_name } from "../colors.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 import { make_item_payload, make_slot_payload } from "../../render_shaders/payload_builders.js";
@@ -154,7 +153,6 @@ export function make_owner_inventory_module(opts: OwnerInventoryModuleConfig): M
       return `${name.slice(0, 10)} INV`;
     },
     is_visible: opts.get_is_visible,
-    background: { rgb: get_ui_semantic_rgb('background') },
     gizmos: {
       enabled: ["close", "move", "resize", "seamless"],
       can_close: true,

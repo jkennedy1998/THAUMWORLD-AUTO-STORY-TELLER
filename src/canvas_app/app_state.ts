@@ -10994,9 +10994,6 @@ export function create_app_state(): AppState {
             id: 'status',
             rect: get_persisted_rect('status', { x0: L_X0, y0: Y_SYS0, x1: L_X1, y1: Y_SYS1 }),
             get_source: () => ui_state.text_windows.get('status') ?? { messages: [], rev: 0 },
-            border_rgb: get_color_by_name('medium_gray').rgb,
-            text_rgb: get_color_by_name('pale_gray').rgb,
-            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 0,
             title: 'STATUS',
             gizmos: {
@@ -11016,13 +11013,7 @@ export function create_app_state(): AppState {
             id: 'transcript',
             rect: get_persisted_rect('transcript', { x0: L_X0, y0: Y_TRANSCRIPT0, x1: L_X1, y1: Y_TRANSCRIPT1 }),
             get_source: () => ui_state.text_windows.get('transcript') ?? { messages: [], rev: 0 },
-            border_rgb: get_color_by_name('light_gray').rgb,
-            text_rgb: get_color_by_name('off_white').rgb,
-            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 0,
-            hint_rgb: get_color_by_name('pale_yellow').rgb,
-            npc_rgb: get_color_by_name('pumpkin').rgb,
-            state_rgb: get_color_by_name('dark_gray').rgb,
             title: 'TRANSCRIPT',
             gizmos: {
                 enabled: ['move', 'resize', 'close', 'seamless'],
@@ -11056,10 +11047,6 @@ export function create_app_state(): AppState {
                     ui_state.controls.suggested_matched = hint.matched_keyword ?? null;
                 }, 1000);
             },
-            border_rgb: get_color_by_name('light_gray').rgb,
-            text_rgb: get_color_by_name('off_white').rgb,
-            cursor_rgb: get_color_by_name('off_white').rgb,
-            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 0,
             placeholder: 'Type… (Enter=send, Shift+Enter=new line, Backspace=delete)',
             header_buttons: [
@@ -11085,13 +11072,7 @@ export function create_app_state(): AppState {
             id: 'debug',
             rect: get_persisted_rect('debug', { x0: R_X0, y0: Y_PLACE0, x1: R_X1, y1: Y_PLACE1 }),
             get_source: () => ui_state.text_windows.get('debug') ?? { messages: [], rev: 0 },
-            border_rgb: get_color_by_name('light_gray').rgb,
-            text_rgb: get_color_by_name('off_white').rgb,
-            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 0,
-            hint_rgb: get_color_by_name('pale_yellow').rgb,
-            npc_rgb: get_color_by_name('pumpkin').rgb,
-            state_rgb: get_color_by_name('dark_gray').rgb,
             title: 'DEBUG',
             gizmos: {
                 enabled: ['close', 'move', 'resize', 'seamless'],
@@ -11251,10 +11232,6 @@ export function create_app_state(): AppState {
                     body: JSON.stringify({ roll_id }),
                 });
             },
-            text_rgb: get_color_by_name('pale_orange').rgb,
-            dim_rgb: get_color_by_name('medium_gray').rgb,
-            border_rgb: get_color_by_name('dark_gray').rgb,
-            bg: { char: ' ', rgb: get_color_by_name('off_black').rgb },
             base_weight_index: 0,
             gizmos: {
                 enabled: ['move', 'resize', 'close', 'seamless'],
@@ -11682,7 +11659,6 @@ export function create_app_state(): AppState {
                 drag_state.reject_drag();
                 return false;
             },
-            border_rgb: get_color_by_name('light_gray').rgb,
             // Player character module: standard widgets
             gizmos: {
                 enabled: ['close', 'move', 'resize', 'seamless'],

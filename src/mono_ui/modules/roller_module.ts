@@ -1,6 +1,7 @@
 import type { Canvas, Module, PointerEvent, Rect, Rgb } from "../types.js";
 import { rect_height, rect_width } from "../types.js";
 import type { ModuleGizmosConfig } from "../module_gizmos.js";
+import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from "../weight_system.js";
 
@@ -18,9 +19,9 @@ export type RollerModuleOptions = {
     get_is_visible?: () => boolean;
     get_state: () => RollerState;
     on_roll: (roll_id: string) => void;
-    text_rgb: Rgb;
-    dim_rgb: Rgb;
-    border_rgb: Rgb;
+    text_rgb?: Rgb;
+    dim_rgb?: Rgb;
+    border_rgb?: Rgb;
     bg?: { char: string; rgb: Rgb };
     base_weight_index?: number;
     gizmos?: ModuleGizmosConfig;
@@ -77,9 +78,14 @@ export function make_roller_module(opts: RollerModuleOptions): Module {
             const state = opts.get_state();
             const w_base = base_weight();
 
-            c.fill_rect(rect, { char: opts.bg?.char ?? ' ', rgb: opts.bg?.rgb ?? { r: 0, g: 0, b: 0 }, style: "regular", weight_index: w_base });
+            const bg_char = opts.bg?.char ?? ' ';
+            const bg_rgb = opts.bg?.rgb ?? get_ui_semantic_rgb('background');
+            const vivid_rgb = opts.text_rgb ?? get_ui_semantic_rgb('vivid');
+            const medium_rgb = opts.dim_rgb ?? get_ui_semantic_rgb('medium');
+            const border_rgb = opts.border_rgb ?? get_ui_semantic_rgb('dimmest');
+            c.fill_rect(rect, { char: bg_char, rgb: bg_rgb, style: "regular", weight_index: w_base });
 
-            const text_rgb = state.disabled ? opts.dim_rgb : opts.text_rgb;
+            const text_rgb = state.disabled ? medium_rgb : vivid_rgb;
             const label = state.disabled ? ":3" : state.dice_label;
             const roll_line = state.last_roll.length > 0 ? state.last_roll : "no roll";
             const spinner = state.spinner || "|";
@@ -93,8 +99,8 @@ export function make_roller_module(opts: RollerModuleOptions): Module {
 
             // button area
             const btn = button_rect();
-            const btn_rgb = state.disabled ? opts.dim_rgb : opts.text_rgb;
-            c.fill_rect(btn, { char: "-", rgb: opts.border_rgb, style: "regular", weight_index: w_base });
+            const btn_rgb = state.disabled ? medium_rgb : vivid_rgb;
+            c.fill_rect(btn, { char: "-", rgb: border_rgb, style: "regular", weight_index: w_base });
 
             const btn_label = label;
             const start_x = btn.x0 + Math.max(0, Math.floor((rect_width(btn) - btn_label.length) / 2));

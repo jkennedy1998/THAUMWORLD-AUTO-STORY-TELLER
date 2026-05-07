@@ -1,22 +1,9 @@
-import type { Canvas, Module, Rect, Rgb, PointerEvent } from "../types.js";
+import type { Canvas, Rect, Rgb, PointerEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
-import { draw_module_border, PANEL_BORDER_PRESETS } from "../module_borders.js";
-import { get_color_by_name } from "../colors.js";
-import type { ModuleGizmosConfig, GizmoState } from "../module_gizmos.js";
-import {
-    clear_gizmo_hover_state,
-    create_gizmo_state,
-    draw_module_gizmos,
-    get_resize_edge,
-    handle_global_pointer_down_for_gizmos,
-    handle_gizmo_click,
-    handle_move_drag,
-    handle_resize_drag,
-    is_in_gizmo_area,
-    should_draw_module_chrome,
-    update_gizmo_hover_state,
-} from "../module_gizmos.js";
+import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
+import type { ModuleGizmosConfig } from "../module_gizmos.js";
 import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from "../weight_system.js";
+import { make_floating_panel_module } from "./floating_panel_module.js";
 
 export type InputModuleOptions = {
     id: string;
@@ -119,17 +106,11 @@ function wrap_preserve_newlines(text: string, width: number): string[] {
     return lines;
 }
 
-export function make_input_module(opts: InputModuleOptions): Module {
-    const text_rgb: Rgb = opts.text_rgb ?? get_color_by_name("off_white").rgb;
-    const border_rgb: Rgb = opts.border_rgb ?? get_color_by_name("light_gray").rgb;
-    const cursor_rgb: Rgb = opts.cursor_rgb ?? get_color_by_name("off_white").rgb;
+export function make_input_module(opts: InputModuleOptions) {
     const w_base = typeof opts.base_weight_index === "number" ? clamp_weight_index(opts.base_weight_index) : DEFAULT_WEIGHT_INDEX;
 
     let focused = false;
     let buffer = ""; // raw text (can include \n)
-    let rect = opts.rect;
-    const gizmos = opts.gizmos;
-    const gizmo_state: GizmoState = create_gizmo_state();
 
     function backspace_one_codepoint() {
         const cps = Array.from(buffer);
@@ -140,7 +121,6 @@ export function make_input_module(opts: InputModuleOptions): Module {
     }
 
     function insert_text(t: string) {
-        // treat tab as spaces to keep tile-grid clean
         const cleaned = t.replace(/\t/g, "    ");
         buffer = buffer + cleaned;
         opts.on_change?.(buffer);
@@ -157,7 +137,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
     function draw_cursor(c: Canvas, x: number, y: number) {
         c.set(x, y, {
             char: "▌",
-            rgb: cursor_rgb,
+            rgb: opts.cursor_rgb ?? get_ui_semantic_rgb('vivid'),
             style: "regular",
             weight_index: w_base,
         });
@@ -169,7 +149,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
         return typeof label === "function" ? label() : label;
     }
 
-    function header_button_row_y(): number {
+    function header_button_row_y(rect: Rect): number {
         return rect.y1 - 1;
     }
 
@@ -177,7 +157,7 @@ export function make_input_module(opts: InputModuleOptions): Module {
         return opts.header_buttons ?? [];
     }
 
-    function get_header_button_layout(): Array<{ id: string; label: string; x0: number; x1: number; on_press: () => void; is_active?: () => boolean }> {
+    function get_header_button_layout(rect: Rect): Array<{ id: string; label: string; x0: number; x1: number; on_press: () => void; is_active?: () => boolean }> {
         const layout: Array<{ id: string; label: string; x0: number; x1: number; on_press: () => void; is_active?: () => boolean }> = [];
         let x = rect.x0 + 2;
         for (const button of get_header_buttons()) {
@@ -190,124 +170,42 @@ export function make_input_module(opts: InputModuleOptions): Module {
         return layout;
     }
 
-    return {
+    return make_floating_panel_module({
         id: opts.id,
-        get rect() { return rect; },
-        set rect(next_rect: Rect) { rect = next_rect; },
-        Focusable: true,
-
-        OnFocus() { focused = true; },
-        OnBlur() { focused = false; },
-        WantsTextCapture() { return focused; },
-
-        OnGlobalPointerDown(e: PointerEvent) {
-            handle_global_pointer_down_for_gizmos(e, rect, gizmos, gizmo_state);
+        rect: opts.rect,
+        title: 'INPUT',
+        focusable: true,
+        gizmos: opts.gizmos,
+        background: opts.bg,
+        border: {
+            border_rgb: opts.border_rgb,
         },
-
-        OnPointerDown(e: PointerEvent) {
-            update_gizmo_hover_state(e.x, e.y, rect, gizmos, gizmo_state);
-            if (gizmos && is_in_gizmo_area(e.x, e.y, rect, gizmos)) {
-                const gizmo = handle_gizmo_click(e.x, e.y, rect, gizmos, gizmo_state);
-                if (gizmo === 'move' || gizmo === 'resize') {
-                    gizmo_state.move_start_x = e.x;
-                    gizmo_state.move_start_y = e.y;
-                    gizmo_state.original_rect = { ...rect };
-                }
-                return;
-            }
-
-            if (gizmo_state.is_resize_mode) {
-                const edge = get_resize_edge(e.x, e.y, rect);
-                if (edge) {
-                    gizmo_state.resize_edge = edge;
-                    gizmo_state.is_dragging_resize = true;
-                    gizmo_state.move_start_x = e.x;
-                    gizmo_state.move_start_y = e.y;
-                    gizmo_state.original_rect = { ...rect };
+        resize: opts.gizmos ? {
+            min_width: 12,
+            min_height: 4,
+            max_width: Number.MAX_SAFE_INTEGER,
+            max_height: Number.MAX_SAFE_INTEGER,
+        } : undefined,
+        wants_text_capture: () => focused,
+        on_focus: () => { focused = true; },
+        on_blur: () => { focused = false; },
+        on_pointer_down_content: (e: PointerEvent, rect: Rect) => {
+            if (e.y !== header_button_row_y(rect)) return;
+            for (const button of get_header_button_layout(rect)) {
+                if (e.x >= button.x0 && e.x <= button.x1) {
+                    button.on_press();
                     return;
                 }
             }
-
-            if (gizmo_state.is_move_mode) {
-                gizmo_state.move_start_x = e.x;
-                gizmo_state.move_start_y = e.y;
-                if (!gizmo_state.original_rect) gizmo_state.original_rect = { ...rect };
-                return;
-            }
-
-            if (e.y === header_button_row_y()) {
-                for (const button of get_header_button_layout()) {
-                    if (e.x >= button.x0 && e.x <= button.x1) {
-                        button.on_press();
-                        return;
-                    }
-                }
-            }
-
-            // focus is handled by main.ts (Focusable). No caret positioning yet.
         },
-
-        OnPointerMove(e: PointerEvent) {
-            update_gizmo_hover_state(e.x, e.y, rect, gizmos, gizmo_state);
-        },
-
-        OnPointerLeave() {
-            clear_gizmo_hover_state(gizmo_state);
-        },
-
-        OnDragStart(e) {
-            if (gizmo_state.is_move_mode || gizmo_state.is_resize_mode) {
-                gizmo_state.move_start_x = e.start_x;
-                gizmo_state.move_start_y = e.start_y;
-                if (!gizmo_state.original_rect) gizmo_state.original_rect = { ...rect };
-            }
-        },
-
-        OnDragMove(e) {
-            if (gizmo_state.is_move_mode && gizmo_state.original_rect) {
-                const next_rect = handle_move_drag(e.x, e.y, gizmo_state, gizmo_state.original_rect, gizmos?.on_move);
-                if (next_rect) rect = next_rect;
-                return;
-            }
-            if (gizmo_state.is_resize_mode && gizmo_state.is_dragging_resize && gizmo_state.original_rect) {
-                const next_rect = handle_resize_drag(
-                    e.x,
-                    e.y,
-                    gizmo_state,
-                    gizmo_state.original_rect,
-                    12,
-                    4,
-                    Number.MAX_SAFE_INTEGER,
-                    Number.MAX_SAFE_INTEGER,
-                    gizmos?.on_resize,
-                );
-                if (next_rect) rect = next_rect;
-            }
-        },
-
-        OnDragEnd() {
-            if (gizmo_state.is_dragging_resize) {
-                gizmos?.on_resize_end?.(rect);
-                gizmo_state.is_dragging_resize = false;
-                gizmo_state.original_rect = null;
-                return;
-            }
-            if (gizmo_state.is_move_mode) {
-                gizmos?.on_move_end?.(rect);
-                gizmo_state.original_rect = null;
-            }
-        },
-
-        OnTextInput(text: string) {
+        on_text_input: (text: string) => {
             if (!focused) return;
             if (!text) return;
             insert_text(text);
         },
-
-        OnKeyDown(e: KeyboardEvent) {
+        on_key_down: (e: KeyboardEvent) => {
             if (!focused) return;
 
-            // Backspace
             if (e.key === "Backspace") {
                 e.preventDefault();
                 e.stopPropagation();
@@ -315,72 +213,29 @@ export function make_input_module(opts: InputModuleOptions): Module {
                 return;
             }
 
-            // Enter: Shift+Enter inserts newline, Enter submits
             if (e.key === "Enter") {
                 e.preventDefault();
                 e.stopPropagation();
                 if (e.shiftKey) insert_text("\n");
                 else submit();
-                return;
             }
         },
-
-        Draw(c: Canvas) {
-            const r = rect;
-            const inner: Rect = { x0: r.x0 + 1, y0: r.y0 + 1, x1: r.x1 - 1, y1: r.y1 - 1 };
-
-            if (opts.bg) {
-                c.fill_rect(r, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
-            }
-
-            // border
-            if (should_draw_module_chrome(gizmos, gizmo_state)) {
-                draw_module_border(c, {
-                    rect: r,
-                    style: PANEL_BORDER_PRESETS.default_double.style,
-                    border_rgb,
-                    weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
-                    header: {
-                        text: 'INPUT',
-                        reserve_left_cols: 2 + ((gizmos?.enabled?.length ?? 0) * 2),
-                    },
-                });
-                if (gizmos) draw_module_gizmos(c, r, gizmos, gizmo_state);
-            }
-
-            for (const button of get_header_button_layout()) {
-                const rgb = button.is_active?.() ? get_color_by_name("pale_yellow").rgb : get_color_by_name("medium_gray").rgb;
-                for (let i = 0; i < button.label.length && button.x0 + i <= button.x1; i++) {
-                    c.set(button.x0 + i, header_button_row_y(), {
-                        char: button.label[i]!,
-                        rgb,
-                        style: "regular",
-                        weight_index: button.is_active?.() ? w_base + 1 : w_base,
-                    });
-                }
-            }
-
+        draw_content(c: Canvas, rect: Rect) {
+            const inner: Rect = { x0: rect.x0 + 1, y0: rect.y0 + 1, x1: rect.x1 - 1, y1: rect.y1 - 1 };
+            const bg_char = opts.bg?.char ?? ' ';
+            const bg_rgb = opts.bg?.rgb ?? get_ui_semantic_rgb('background');
             const w = rect_width(inner);
             const h = rect_height(inner);
 
+            c.fill_rect(inner, { char: bg_char, rgb: bg_rgb, style: "regular", weight_index: w_base });
+
             const text_to_show = buffer.length > 0 ? buffer : (opts.placeholder ?? "");
             const lines = wrap_preserve_newlines(text_to_show, w);
-
-            // show the *bottom* h lines (like a chat input area)
             const start = Math.max(0, lines.length - h);
-
-            // clear inner area
-            if (opts.bg) {
-                c.fill_rect(inner, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
-            } else {
-                c.fill_rect(inner, { char: " ", style: "regular", weight_index: w_base });
-            }
 
             for (let row = 0; row < h; row++) {
                 const line = lines[start + row] ?? "";
                 const cps = Array.from(line);
-
-                // top-down render inside inner rect
                 const y = inner.y1 - row;
 
                 for (let col = 0; col < w; col++) {
@@ -388,33 +243,37 @@ export function make_input_module(opts: InputModuleOptions): Module {
                     const is_placeholder = buffer.length === 0 && (opts.placeholder ?? "").length > 0;
                     c.set(inner.x0 + col, y, {
                         char: ch,
-                        rgb: is_placeholder ? get_color_by_name("medium_gray").rgb : text_rgb,
+                        rgb: is_placeholder ? get_ui_semantic_rgb('medium') : (opts.text_rgb ?? get_ui_semantic_rgb('bright')),
                         style: "regular",
                         weight_index: w_base,
                     });
                 }
             }
 
-            // cursor at end (no mid-buffer editing yet)
             if (focused) {
                 const content_lines = wrap_preserve_newlines(buffer, w);
-
-                // same "show bottom h lines" logic as the renderer
-                const start = Math.max(0, content_lines.length - h);
-
+                const visible_start = Math.max(0, content_lines.length - h);
                 const last_index = Math.max(0, content_lines.length - 1);
-                const cursor_row_visible = clamp(last_index - start, 0, h - 1); // 0=top row
-
+                const cursor_row_visible = clamp(last_index - visible_start, 0, h - 1);
                 const last_line = content_lines[last_index] ?? "";
-
-                // match draw loop: y = inner.y1 - row
                 const cursor_y = inner.y1 - cursor_row_visible;
-
                 const cursor_x = inner.x0 + clamp(Array.from(last_line).length, 0, w - 1);
-
                 draw_cursor(c, cursor_x, cursor_y);
             }
-
         },
-    };
+        draw_overlay(c: Canvas, rect: Rect): void {
+            for (const button of get_header_button_layout(rect)) {
+                const active = button.is_active?.() ?? false;
+                const rgb = active ? get_ui_semantic_rgb('vivid') : get_ui_semantic_rgb('medium');
+                for (let i = 0; i < button.label.length && button.x0 + i <= button.x1; i++) {
+                    c.set(button.x0 + i, header_button_row_y(rect), {
+                        char: button.label[i]!,
+                        rgb,
+                        style: "regular",
+                        weight_index: active ? Math.min(3, w_base + 1) : w_base,
+                    });
+                }
+            }
+        },
+    });
 }

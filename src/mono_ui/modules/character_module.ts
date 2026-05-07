@@ -5,7 +5,7 @@ import type { ItemDefinition } from "../../item_storage/store.js";
 import type { EquipmentSlots } from "../../types/body_slots.js";
 import { debug_log } from "../../shared/debug.js";
 import { PANEL_BORDER_PRESETS, draw_container_box } from "../module_borders.js";
-import { get_color_by_name } from "../colors.js";
+import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 import { resolve_cell } from "../../render_shaders/resolver.js";
 import { make_item_payload, make_slot_payload } from "../../render_shaders/payload_builders.js";
 import { draw_render_queue, type RenderRequest } from "../../render_shaders/render_queue.js";
@@ -372,12 +372,12 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     title: () => opts.get_actor_name(),
     gizmos: opts.gizmos,
     is_visible: opts.get_is_visible,
-    background: { rgb: opts.bg_rgb ?? { r: 20, g: 20, b: 20 } },
+    background: opts.bg_rgb ? { rgb: opts.bg_rgb } : undefined,
     border: {
       style: PANEL_BORDER_PRESETS.default_double.style,
-      border_rgb: opts.border_rgb ?? { r: 150, g: 150, b: 150 },
+      border_rgb: opts.border_rgb,
       weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
-      text_rgb: opts.text_rgb ?? { r: 220, g: 220, b: 220 },
+      text_rgb: opts.text_rgb,
       divider_at_col: 5,
       divider_mode: 'full_height',
       reserve_left_cols: 2 + ((opts.gizmos?.enabled?.length ?? 0) * 2),
@@ -429,8 +429,8 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
             );
 
             const border_color: Rgb = is_default
-              ? { r: 255, g: 255, b: 100 }
-              : { r: 100, g: 100, b: 100 };
+              ? get_ui_semantic_rgb('vivid')
+              : get_ui_semantic_rgb('medium');
             
             draw_container_box(
               c,
@@ -471,17 +471,17 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
         const tag = visible_tags[i] ?? null;
         const is_add = i === visible_tags.length;
         let text = "";
-        let rgb = get_color_by_name("medium_gray").rgb;
+        let rgb = get_ui_semantic_rgb('medium');
         let weight_index = 1;
         if (tag) {
           const key = tag_key(tag as any);
           const selected = key === selected_tag_key;
           text = `${selected ? ">" : " "}${String(tag.name ?? "")} ${Math.max(0, Math.floor(Number((tag as any).mag ?? 0) || 0))}`;
-          rgb = selected ? get_color_by_name("vivid_yellow").rgb : get_color_by_name("off_white").rgb;
+          rgb = selected ? get_ui_semantic_rgb('vivid') : get_ui_semantic_rgb('bright');
           weight_index = selected ? 3 : 2;
         } else if (is_add) {
           text = "+ add tag";
-          rgb = get_color_by_name("vivid_green").rgb;
+          rgb = get_ui_semantic_rgb('vivid');
           weight_index = 2;
         } else {
           text = ".";
@@ -504,16 +504,16 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       const filled_width = Math.floor(bar_width * Math.min(weight_pct, 1));
       
       let weight_color: Rgb;
-      if (weight_pct < 0.5) weight_color = { r: 100, g: 200, b: 100 };
-      else if (weight_pct < 0.75) weight_color = { r: 200, g: 200, b: 100 };
-      else weight_color = { r: 200, g: 100, b: 100 };
+      if (weight_pct < 0.5) weight_color = get_ui_semantic_rgb('bright');
+      else if (weight_pct < 0.75) weight_color = get_ui_semantic_rgb('vivid');
+      else weight_color = get_ui_semantic_rgb('right_hand');
       
       const bar_x = rect.x0 + SIDEBAR_WIDTH + 2;
       for (let i = 0; i < bar_width; i++) {
         const char = i < filled_width ? "=" : "-";
         c.set(bar_x + i, weight_y, { 
           char, 
-          rgb: i < filled_width ? weight_color : { r: 60, g: 60, b: 60 }, 
+          rgb: i < filled_width ? weight_color : get_ui_semantic_rgb('dimmest'), 
           style: "regular", 
           weight_index: 1 
         });
@@ -621,7 +621,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
           hover_slot?.garb_index === s.garb_index
         );
         
-        const label_rgb = group_hovered ? { r: 255, g: 255, b: 100 } : { r: 150, g: 150, b: 150 };
+        const label_rgb = group_hovered ? get_ui_semantic_rgb('vivid') : get_ui_semantic_rgb('medium');
         
         // Clip labels to content bounds
         const bounds = get_content_bounds();

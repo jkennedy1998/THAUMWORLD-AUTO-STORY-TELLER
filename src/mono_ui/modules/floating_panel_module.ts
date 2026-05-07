@@ -42,6 +42,7 @@ type ResizeOptions = {
 
 type FloatingPanelCallbacks = {
   draw_content: (c: Canvas, rect: Rect) => void;
+  draw_overlay?: (c: Canvas, rect: Rect) => void;
   on_pointer_enter_content?: (e: PointerEvent, rect: Rect) => void;
   on_pointer_down_content?: (e: PointerEvent, rect: Rect) => void;
   on_pointer_move_content?: (e: PointerEvent, rect: Rect) => void;
@@ -133,6 +134,7 @@ export function make_floating_panel_module(opts: FloatingPanelOptions): Module {
           } : undefined,
         });
         draw_module_gizmos(c, rect, gizmos, gizmo_state);
+        opts.draw_overlay?.(c, rect);
       }
     },
 

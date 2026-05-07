@@ -9,7 +9,7 @@ import {
   release_hovered_plain_text_control,
   update_plain_text_hover,
 } from '../ux/plain_text_controls.js';
-import { draw_text_command_row, draw_text_stateful_row } from '../ux/plain_text_interactables.js';
+import { draw_text_stateful_row } from '../ux/plain_text_interactables.js';
 import type { LaunchActionId, LaunchMenuState } from '../../engine_launch/types.js';
 
 type LaunchModuleOptions = {
@@ -89,8 +89,6 @@ export function make_launch_module(opts: LaunchModuleOptions): Module {
           disabled: !enabled,
           inactive_role: 'custom',
           active_role: 'custom',
-          hover_role: 'bright',
-          pressed_role: 'vivid',
           disabled_role: 'dimmest',
           custom_inactive_rgb: text,
           custom_active_rgb: accent,
@@ -126,8 +124,6 @@ export function make_launch_module(opts: LaunchModuleOptions): Module {
             active: selected,
             inactive_role: 'custom',
             active_role: 'custom',
-            hover_role: 'bright',
-            pressed_role: 'vivid',
             custom_inactive_rgb: text,
             custom_active_rgb: accent,
             base_weight_index: 2,

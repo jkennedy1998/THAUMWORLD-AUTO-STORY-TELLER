@@ -146,8 +146,6 @@ export function make_debug_commander_module(opts: DebugCommanderModuleConfig): M
           disabled: action.disabled,
           inactive_role: 'medium',
           active_role: 'custom',
-          hover_role: 'custom',
-          pressed_role: 'custom',
           custom_active_rgb: action.rgb,
           base_weight_index: 1,
           active_weight_index: 2,

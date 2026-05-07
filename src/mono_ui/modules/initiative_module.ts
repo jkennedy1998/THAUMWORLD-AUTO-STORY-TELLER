@@ -1,5 +1,5 @@
 import type { Canvas, Module, PointerEvent, Rect, WheelEvent } from '../types.js';
-import { PANEL_BORDER_PRESETS, draw_panel_horizontal_divider } from '../module_borders.js';
+import { MODULE_CHROME_RENDER_INDEX, PANEL_BORDER_PRESETS, draw_panel_horizontal_divider, get_standard_ux_chrome_colors } from '../module_borders.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
@@ -113,15 +113,15 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
   let transition_until_ms = 0;
   let end_turn_hitbox: Rect | null = null;
 
-  const bg_color = () => get_ui_semantic_rgb('background');
-  const border_color = () => get_ui_semantic_rgb('dimmest');
-  const text_color = () => get_ui_semantic_rgb('bright');
-  const muted_color = () => get_ui_semantic_rgb('medium');
-  const accent_color = () => get_ui_semantic_rgb('vivid');
-  const world_color = () => get_ui_semantic_rgb('vivid');
-  const active_color = () => get_ui_semantic_rgb('bright');
-  const flash_color = () => get_ui_semantic_rgb('vivid');
-  const status_color = () => get_ui_semantic_rgb('medium');
+  const bg_color = () => get_standard_ux_chrome_colors().background_rgb;
+  const border_color = () => get_standard_ux_chrome_colors().border_rgb;
+  const text_color = () => get_standard_ux_chrome_colors().text_rgb;
+  const muted_color = () => get_standard_ux_chrome_colors().muted_rgb;
+  const accent_color = () => get_standard_ux_chrome_colors().accent_rgb;
+  const world_color = () => get_standard_ux_chrome_colors().accent_rgb;
+  const active_color = () => get_standard_ux_chrome_colors().text_rgb;
+  const flash_color = () => get_standard_ux_chrome_colors().accent_rgb;
+  const status_color = () => get_standard_ux_chrome_colors().muted_rgb;
 
   const gizmo_config: ModuleGizmosConfig = {
     enabled: ['move', 'resize', 'close', 'seamless'],
@@ -150,10 +150,8 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
     rect: opts.rect,
     title: 'INITIATIVE',
     gizmos: gizmo_config,
-    background: { rgb: bg_color() },
     border: {
       style: PANEL_BORDER_PRESETS.default_double.style,
-      border_rgb: border_color(),
       weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
       markers: () => {
         const rows = build_rows(opts.get_state());
@@ -259,6 +257,20 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         style: PANEL_BORDER_PRESETS.default_double.style,
         rgb: border_color(),
         weight_index: 1,
+      });
+      c.set(rect.x0, divider_y, {
+        char: PANEL_BORDER_PRESETS.default_double.style.junction_l,
+        rgb: border_color(),
+        style: 'regular',
+        weight_index: 1,
+        render_index: MODULE_CHROME_RENDER_INDEX,
+      });
+      c.set(rect.x1, divider_y, {
+        char: PANEL_BORDER_PRESETS.default_double.style.junction_r,
+        rgb: border_color(),
+        style: 'regular',
+        weight_index: 1,
+        render_index: MODULE_CHROME_RENDER_INDEX,
       });
 
       if (!state.active || rows.length === 0) {

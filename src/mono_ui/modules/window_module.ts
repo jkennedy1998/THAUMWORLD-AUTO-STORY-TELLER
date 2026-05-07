@@ -1,8 +1,8 @@
 import type { Canvas, Module, Rect, Rgb, WheelEvent, DragEvent } from "../types.js";
 import { rect_width, rect_height } from "../types.js";
-import { get_color_by_name } from "../colors.js";
 import { PANEL_BORDER_PRESETS } from "../module_borders.js";
 import type { ModuleGizmosConfig } from "../module_gizmos.js";
+import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from "../weight_system.js";
 
@@ -250,7 +250,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         gizmos: gizmo_config,
         background: opts.bg,
         border: {
-            border_rgb: opts.border_rgb ?? get_color_by_name("light_gray").rgb,
+            border_rgb: opts.border_rgb,
             weight_index: PANEL_BORDER_PRESETS.default_double.weight_index,
             style: PANEL_BORDER_PRESETS.default_double.style,
             markers: (current_rect: Rect) => get_border_markers(current_rect),
@@ -263,8 +263,8 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         } : undefined,
         draw_content(c: Canvas, next_rect: Rect): void {
             rect = next_rect;
-            const text_rgb = opts.text_rgb ?? get_color_by_name("off_white").rgb;
-            const hint_rgb = opts.hint_rgb ?? get_color_by_name("pale_yellow").rgb;
+            const text_rgb = opts.text_rgb ?? get_ui_semantic_rgb('bright');
+            const hint_rgb = opts.hint_rgb ?? get_ui_semantic_rgb('vivid');
             const w_base = base_weight();
             const text_r = inner_text_rect();
             const text_w = rect_width(text_r);
@@ -276,11 +276,9 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
 
             ensure_layout(text_w);
 
-            if (opts.bg) {
-                c.fill_rect(text_r, { char: opts.bg.char, rgb: opts.bg.rgb, style: "regular", weight_index: w_base });
-            } else {
-                c.fill_rect(text_r, { char: " ", style: "regular", weight_index: w_base });
-            }
+            const bg_char = opts.bg?.char ?? ' ';
+            const bg_rgb = opts.bg?.rgb ?? get_ui_semantic_rgb('background');
+            c.fill_rect(text_r, { char: bg_char, rgb: bg_rgb, style: "regular", weight_index: w_base });
 
             let npcLinesRendered = 0;
             for (let row = 0; row < text_h; row++) {
@@ -291,9 +289,9 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
                 let line_rgb = text_rgb;
                 if (line_sender === "hint" || line_sender === "inspection") line_rgb = hint_rgb;
                 else if (line_sender === "npc") {
-                    line_rgb = opts.npc_rgb ?? text_rgb;
+                    line_rgb = opts.npc_rgb ?? get_ui_semantic_rgb('vivid');
                     npcLinesRendered++;
-                } else if (line_sender === "state") line_rgb = opts.state_rgb ?? text_rgb;
+                } else if (line_sender === "state") line_rgb = opts.state_rgb ?? get_ui_semantic_rgb('medium');
                 const y = text_r.y1 - row;
                 const cps = Array.from(line_text);
                 for (let col = 0; col < text_w; col++) {

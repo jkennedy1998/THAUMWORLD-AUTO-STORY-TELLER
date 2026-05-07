@@ -202,7 +202,7 @@ export function draw_module_border(
   const {
     rect,
     style = BORDER_STYLES.double,
-    border_rgb = { r: 150, g: 150, b: 150 },
+    border_rgb = get_ui_semantic_rgb('dimmest'),
     bg_rgb,
     weight_index = 1,
     header,
@@ -282,7 +282,7 @@ export function draw_module_border(
     }
 
     // Draw the text
-    const text_rgb = header.text_rgb ?? { r: 200, g: 200, b: 200 };
+    const text_rgb = header.text_rgb ?? get_ui_semantic_rgb('medium');
     for (let i = 0; i < display_text.length; i++) {
       const x = start_x + i;
       const char = display_text[i];
