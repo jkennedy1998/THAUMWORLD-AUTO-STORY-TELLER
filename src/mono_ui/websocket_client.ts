@@ -16,6 +16,7 @@ export class WebSocketClient {
   private ws: WebSocket | null = null;
   private url: string;
   private sessionToken: string | null = null;
+  private requestId: string | null = null;
   private slot: number = 1;
   private reconnectInterval: number = 5000;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -25,6 +26,8 @@ export class WebSocketClient {
   private mainThreadMonitorTimer: ReturnType<typeof setInterval> | null = null;
   private lastMainThreadMonitorAt: number = 0;
   private connectionId: string | null = null;
+  private roomId: string | null = null;
+  private attachToken: string | null = null;
   private eventHandlers: Map<string, ((event: any) => void)[]> = new Map();
 
   private isMovementType(type: string): boolean {
@@ -50,10 +53,18 @@ export class WebSocketClient {
   private buildUrl(): string | null {
     const token = String(this.sessionToken ?? '').trim();
     if (!token) return null;
-    return `${this.url}?slot=${encodeURIComponent(String(this.slot))}&session_token=${encodeURIComponent(token)}`;
+    const separator = this.url.includes('?') ? '&' : '?';
+    const parts = [
+      `slot=${encodeURIComponent(String(this.slot))}`,
+      `session_token=${encodeURIComponent(token)}`,
+    ];
+    if (this.roomId) parts.push(`room_id=${encodeURIComponent(this.roomId)}`);
+    if (this.attachToken) parts.push(`attach_token=${encodeURIComponent(this.attachToken)}`);
+    if (this.requestId) parts.push(`request_id=${encodeURIComponent(this.requestId)}`);
+    return `${this.url}${separator}${parts.join('&')}`;
   }
 
-  updateConnectionOptions(options: { sessionToken?: string | null; slot?: number | null; baseUrl?: string | null }): void {
+  updateConnectionOptions(options: { sessionToken?: string | null; slot?: number | null; baseUrl?: string | null; roomId?: string | null; attachToken?: string | null; requestId?: string | null }): void {
     const nextBaseUrl = typeof options.baseUrl === 'string' ? options.baseUrl.trim() : '';
     if (nextBaseUrl) {
       this.url = nextBaseUrl;
@@ -63,6 +74,15 @@ export class WebSocketClient {
     }
     if (typeof options.slot === 'number' && Number.isFinite(options.slot) && options.slot > 0) {
       this.slot = Math.floor(options.slot);
+    }
+    if (typeof options.roomId === 'string') {
+      this.roomId = options.roomId.trim() || null;
+    }
+    if (typeof options.attachToken === 'string') {
+      this.attachToken = options.attachToken.trim() || null;
+    }
+    if (typeof options.requestId === 'string') {
+      this.requestId = options.requestId.trim() || null;
     }
     if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
       this.connect();
@@ -82,11 +102,11 @@ export class WebSocketClient {
         console.log('[WebSocketClient] Waiting for multiplayer session before connecting');
         return;
       }
-      console.log('[WebSocketClient] Connecting to', connectionUrl.replace(/session_token=[^&]+/, 'session_token=[redacted]'));
+      console.log('[WebSocketClient] Connecting to', connectionUrl.replace(/session_token=[^&]+/, 'session_token=[redacted]'), JSON.stringify({ request_id: this.requestId, room_id: this.roomId }));
       this.ws = new WebSocket(connectionUrl);
 
       this.ws.onopen = () => {
-        console.log('[WebSocketClient] Connected successfully');
+        console.log('[WebSocketClient] Connected successfully', JSON.stringify({ request_id: this.requestId, room_id: this.roomId, connection_id: this.connectionId }));
         this.startMainThreadMonitor();
         // Clear any pending reconnect timer
         if (this.reconnectTimer) {
@@ -140,12 +160,12 @@ export class WebSocketClient {
       this.ws.onclose = () => {
         this.clearHeartbeatTimers();
         this.stopMainThreadMonitor();
-        console.log('[WebSocketClient] Connection closed, reconnecting in', this.reconnectInterval, 'ms');
+        console.log('[WebSocketClient] Connection closed, reconnecting in', this.reconnectInterval, 'ms', JSON.stringify({ request_id: this.requestId, room_id: this.roomId, connection_id: this.connectionId }));
         this.scheduleReconnect();
       };
 
       this.ws.onerror = (error: Event) => {
-        console.error('[WebSocketClient] WebSocket error:', error);
+        console.error('[WebSocketClient] WebSocket error:', error, JSON.stringify({ request_id: this.requestId, room_id: this.roomId, connection_id: this.connectionId }));
       };
 
     } catch (err) {
@@ -339,7 +359,7 @@ export class WebSocketClient {
       this.ws = null;
     }
 
-    console.log('[WebSocketClient] Disconnected');
+    console.log('[WebSocketClient] Disconnected', JSON.stringify({ request_id: this.requestId, room_id: this.roomId, connection_id: this.connectionId }));
   }
 }
 
@@ -349,7 +369,7 @@ let client: WebSocketClient | null = null;
 /**
  * Initialize WebSocket client (call from renderer startup)
  */
-export function initWebSocketClient(baseUrl?: string, options?: { sessionToken?: string | null; slot?: number | null; baseUrl?: string | null }): WebSocketClient {
+export function initWebSocketClient(baseUrl?: string, options?: { sessionToken?: string | null; slot?: number | null; baseUrl?: string | null; roomId?: string | null; attachToken?: string | null; requestId?: string | null }): WebSocketClient {
   if (!client) {
     client = new WebSocketClient(baseUrl || DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.bridge_ws_base_url);
   }

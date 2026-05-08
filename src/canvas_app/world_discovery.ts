@@ -13,7 +13,7 @@ export type JoinableWorldEntry = {
   host_origin: string;
   supports_join: boolean;
   online: boolean;
-  source_kind: 'local' | 'saved_remote';
+  source_kind: 'local' | 'saved_remote' | 'remote_relay';
   saved_host_id?: string;
   host_address?: string;
   last_connected_at?: string;
@@ -54,6 +54,7 @@ function build_world_entry(connection: EngineConnectionEntry, probe: EngineConne
     : isLocal
       ? 'local host offline'
       : `${connection.host} offline - ${lastSeenMs ? `last seen ${format_relative_timestamp(lastSeenMs)}` : 'never seen online'}${lastConnectedMs ? `, joined ${format_relative_timestamp(lastConnectedMs)}` : ', never joined'}`;
+  const isRemoteRelay = connection.kind === 'remote_join_code' || connection.method === 'remote_relay' || transport.transport_kind === 'relay_ws_tunnel';
   return {
     id: connection.kind === 'saved_manual' ? `saved:${connection.id}` : connection.id,
     label: String(probe?.painter_display_name ?? probe?.world_label ?? connection.name),
@@ -62,7 +63,7 @@ function build_world_entry(connection: EngineConnectionEntry, probe: EngineConne
     host_origin: transport.host_origin,
     supports_join: Boolean(probe?.supports_join),
     online,
-    source_kind: isLocal ? 'local' : 'saved_remote',
+    source_kind: isLocal ? 'local' : (isRemoteRelay ? 'remote_relay' : 'saved_remote'),
     saved_host_id: connection.kind === 'saved_manual' ? connection.id : undefined,
     host_address: isLocal ? 'local' : connection.host,
     last_connected_at: typeof lastConnectedMs === 'number' ? new Date(lastConnectedMs).toISOString() : undefined,
@@ -96,7 +97,7 @@ export async function discover_local_joinable_worlds(slot: number): Promise<Join
 export async function discover_manual_joinable_worlds(slot: number): Promise<JoinableWorldEntry[]> {
   const directory = await build_join_directory(slot);
   return directory.connections
-    .filter((connection) => connection.kind === 'saved_manual')
+    .filter((connection) => connection.kind === 'saved_manual' || connection.kind === 'remote_join_code')
     .map((connection) => build_world_entry(connection, directory.probes_by_connection_id[connection.id], slot));
 }
 

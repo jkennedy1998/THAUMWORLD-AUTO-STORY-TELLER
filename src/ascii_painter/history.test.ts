@@ -13,9 +13,12 @@ function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-function makeCell(char: string): { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } {
+function makeCell(char: string) {
   return {
     char,
+    graphic: char === ' ' ? undefined : { graphic_id: `text_${char}`, view_direction: 'south' as const, weight_index: 1 as const },
+    appearance_slots: char === ' ' ? undefined : { 1: { kind: 'flat_rgb' as const, rgb: { r: 10, g: 20, b: 30 } } },
+    materials: char === ' ' ? undefined : { 1: 'STONE_PALE' },
     rgb: { r: 255, g: 255, b: 255 },
     weight_index: 1,
   };
@@ -51,6 +54,9 @@ assert(groupBState.current_position === 1 && groupBState.total_actions === 1, 'g
 
 const undoneA = popUndoGroupAction(history, 'group-a');
 assert(undoneA?.description.includes('Group A stroke 2'), 'group A undo should pop its most recent action');
+assert(undoneA?.cellChanges?.[0]?.newCell.graphic?.graphic_id === 'text_B', 'history undo should preserve graphic payload');
+assert(undoneA?.cellChanges?.[0]?.newCell.appearance_slots?.[1]?.kind === 'flat_rgb', 'history undo should preserve appearance slot payload');
+assert(undoneA?.cellChanges?.[0]?.newCell.materials?.[1] === 'STONE_PALE', 'history undo should preserve material payload');
 
 groupAState = getGroupHistoryState(history, 'group-a');
 groupBState = getGroupHistoryState(history, 'group-b');

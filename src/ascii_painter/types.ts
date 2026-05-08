@@ -6,8 +6,26 @@
  */
 
 import type { Rgb } from '../mono_ui/types.js';
-import type { InlineMaterialAssignments, RenderGraphicRef } from '../render_shaders/graphics_contract.js';
+import type { AppearanceSlotAssignments, AppearanceSlotValue, InlineMaterialAssignments, RenderGraphicRef } from '../render_shaders/graphics_contract.js';
 import type { PlaneId, Point2 } from '../shared/coords.js';
+
+export type { AppearanceSlotAssignments, AppearanceSlotValue } from '../render_shaders/graphics_contract.js';
+
+function clone_appearance_slot_value(value: AppearanceSlotValue): AppearanceSlotValue {
+  if (value.kind === 'material') return { kind: 'material', material_id: String(value.material_id ?? '') };
+  return { kind: 'flat_rgb', rgb: { ...value.rgb } };
+}
+
+export function clone_appearance_slot_assignments(assignments: AppearanceSlotAssignments | null | undefined): AppearanceSlotAssignments | undefined {
+  if (!assignments) return undefined;
+  const cloned: AppearanceSlotAssignments = {};
+  for (const slot of [1, 2, 3] as const) {
+    const value = assignments[slot];
+    if (!value) continue;
+    cloned[slot] = clone_appearance_slot_value(value);
+  }
+  return Object.keys(cloned).length > 0 ? cloned : undefined;
+}
 
 /**
  * A single cell in the ASCII grid
@@ -15,6 +33,7 @@ import type { PlaneId, Point2 } from '../shared/coords.js';
 export interface GridCell {
   char: string;
   graphic?: RenderGraphicRef;
+  appearance_slots?: AppearanceSlotAssignments;
   materials?: InlineMaterialAssignments;
   rgb: Rgb;
   weight_index: number; // 0-3
@@ -55,6 +74,9 @@ export type ToolEditTarget = 'content' | 'selection';
  */
 export interface Brush {
   char: string;
+  graphic?: RenderGraphicRef;
+  appearance_slots?: AppearanceSlotAssignments;
+  materials?: InlineMaterialAssignments;
   rgb: Rgb;
   weight_index: number;
 }
@@ -139,6 +161,7 @@ export function createGrid(width: number, height: number): Grid {
     for (let x = 0; x < width; x++) {
       row.push({
         char: ' ',
+        appearance_slots: undefined,
         rgb: { r: 0, g: 0, b: 0 },
         weight_index: 0
       });
@@ -159,6 +182,9 @@ export function cloneGrid(grid: Grid): Grid {
     cells: grid.cells.map(row => 
       row.map(cell => ({
         char: cell.char,
+        graphic: cell.graphic ? { ...cell.graphic } : undefined,
+        appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+        materials: cell.materials ? { ...cell.materials } : undefined,
         rgb: { ...cell.rgb },
         weight_index: cell.weight_index,
         render_index: cell.render_index
@@ -187,7 +213,15 @@ export function setCell(grid: Grid, x: number, y: number, cell: GridCell): boole
   }
   const row = grid.cells[y];
   if (!row) return false;
-  row[x] = { ...cell };
+  row[x] = {
+    char: cell.char,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
+    rgb: { ...cell.rgb },
+    weight_index: cell.weight_index,
+    render_index: cell.render_index,
+  };
   return true;
 }
 
@@ -202,6 +236,9 @@ export function exportGrid(grid: Grid, metadata?: GridExport['metadata']): GridE
     cells: grid.cells.map(row => 
       row.map(cell => ({
         char: cell.char,
+        graphic: cell.graphic ? { ...cell.graphic } : undefined,
+        appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+        materials: cell.materials ? { ...cell.materials } : undefined,
         rgb: { ...cell.rgb },
         weight_index: cell.weight_index,
         render_index: cell.render_index
@@ -222,6 +259,9 @@ export function importGrid(export_data: GridExport): Grid {
     cells: export_data.cells.map(row =>
       row.map(cell => ({
         char: cell.char,
+        graphic: cell.graphic ? { ...cell.graphic } : undefined,
+        appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+        materials: cell.materials ? { ...cell.materials } : undefined,
         rgb: { ...cell.rgb },
         weight_index: cell.weight_index,
         render_index: cell.render_index
@@ -240,6 +280,7 @@ export function clearGrid(grid: Grid): void {
     for (let x = 0; x < grid.width; x++) {
       row[x] = {
         char: ' ',
+        appearance_slots: undefined,
         rgb: { r: 0, g: 0, b: 0 },
         weight_index: 0
       };

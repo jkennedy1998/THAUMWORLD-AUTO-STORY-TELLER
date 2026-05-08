@@ -54,6 +54,8 @@ export function resolve_painter_tai_join_request(): TaiJoinRequest | null {
   if (!config?.enabled) return null;
   if (get_tai_painter_boot_file_path()) return null;
   const preferred_host = String(config.joinPreferredHost ?? '').trim() || null;
+  const preferred_remote_join_code = String(config.joinCode ?? '').trim() || null;
+  const preferred_remote_relay_origin = String(config.joinRelayOrigin ?? (window as Window).electronAPI?.startupJoinConfig?.remoteRelayOrigin ?? '').trim() || null;
   if (preferred_host) {
     try {
       save_manual_connection(preferred_host, preferred_host);
@@ -61,16 +63,21 @@ export function resolve_painter_tai_join_request(): TaiJoinRequest | null {
       // ignore invalid host bootstrap input here; join flow will report it
     }
   }
+  const preferred_connection_kind = String(config.joinPreferredConnectionKind ?? '').trim() || (preferred_remote_join_code ? 'remote_join_code' : (preferred_host ? 'saved_manual' : 'local'));
   log_painter_launch('resolve_tai_join_request', {
     preferred_connection_id: String(config.joinPreferredConnectionId ?? '').trim() || null,
-    preferred_connection_kind: String(config.joinPreferredConnectionKind ?? '').trim() || (preferred_host ? 'saved_manual' : 'local'),
+    preferred_connection_kind,
     preferred_host,
+    preferred_remote_join_code,
+    preferred_remote_relay_origin,
     auto_join: config.joinAutoJoin !== false,
   });
   return {
     preferred_connection_id: String(config.joinPreferredConnectionId ?? '').trim() || null,
-    preferred_connection_kind: (String(config.joinPreferredConnectionKind ?? '').trim() || (preferred_host ? 'saved_manual' : 'local')) as TaiJoinRequest['preferred_connection_kind'],
+    preferred_connection_kind: preferred_connection_kind as TaiJoinRequest['preferred_connection_kind'],
     preferred_host,
+    preferred_remote_join_code,
+    preferred_remote_relay_origin,
     auto_join: config.joinAutoJoin !== false,
   };
 }

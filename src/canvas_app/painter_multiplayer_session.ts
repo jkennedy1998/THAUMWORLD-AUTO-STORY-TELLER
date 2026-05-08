@@ -2,6 +2,8 @@ import { initWebSocketClient, type WebSocketClient } from '../mono_ui/websocket_
 import { debug_log, debug_warn } from '../shared/debug.js';
 import type { PainterDocumentBootstrap, PainterSessionLifecycle } from '../shared/painter_protocol.js';
 import type { MultiplayerTransportConfig } from '../shared/multiplayer_transport.js';
+import { make_request_id } from '../shared/request_id.js';
+import { PAINTER_APP_CONFIG } from './painter_runtime_config.js';
 import { fetch_host_status } from './world_discovery.js';
 
 export type PainterMultiplayerSessionState = PainterDocumentBootstrap & {
@@ -30,12 +32,20 @@ function is_local_host_transport(transport: MultiplayerTransportConfig): boolean
 function resolve_painter_transport(options: PainterMultiplayerSessionOptions): MultiplayerTransportConfig {
   const api_url = new URL(options.get_api_base_url());
   const bridge_ws_url = new URL(options.get_bridge_ws_base_url());
+  const transport_kind = String((PAINTER_APP_CONFIG as any).multiplayer_transport_kind ?? 'direct_http_ws').trim() === 'relay_ws_tunnel'
+    ? 'relay_ws_tunnel'
+    : 'direct_http_ws';
+  const room_id = String((PAINTER_APP_CONFIG as any).relay_room_id ?? '').trim() || undefined;
+  const attach_token = String((PAINTER_APP_CONFIG as any).relay_attach_token ?? '').trim() || undefined;
   return {
+    transport_kind,
     host_input: api_url.host || 'localhost',
     host_origin: api_url.origin,
     api_base_url: `${api_url.origin}${api_url.pathname.replace(/\/+$/, '')}`,
     bridge_http_url: api_url.origin,
-    bridge_ws_base_url: bridge_ws_url.origin,
+    bridge_ws_base_url: `${bridge_ws_url.origin}${bridge_ws_url.pathname.replace(/\/+$/, '')}`,
+    room_id,
+    attach_token,
   };
 }
 
@@ -163,6 +173,8 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         slot: options.slot,
         force,
         started_at_ms: bootstrap_started_at_ms,
+        method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+        room_id: transport.room_id ?? null,
         api_base_url: transport.api_base_url,
         bridge_ws_base_url: transport.bridge_ws_base_url,
         expect_local_host_boot,
@@ -170,23 +182,30 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         max_attempts,
       }));
       let host_status: Awaited<ReturnType<typeof fetch_host_status>> = null;
+      const connect_request_id = make_request_id('painter_connect');
+      const ws_attach_request_id = make_request_id('painter_ws_attach');
       for (let attempt = 1; attempt <= max_attempts; attempt += 1) {
         const host_status_started_at_ms = Date.now();
         console.log('[JOIN_CONNECT]', JSON.stringify({
           event: 'painter_host_status_started',
           slot: options.slot,
           started_at_ms: host_status_started_at_ms,
+          method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+          room_id: transport.room_id ?? null,
           api_base_url: transport.api_base_url,
           bridge_ws_base_url: transport.bridge_ws_base_url,
           attempt,
           max_attempts,
           expect_local_host_boot,
+          request_id: connect_request_id,
         }));
         host_status = await fetch_host_status(options.slot, transport);
         console.log('[JOIN_CONNECT]', JSON.stringify({
           event: 'painter_host_status_completed',
           slot: options.slot,
           latency_ms: Date.now() - host_status_started_at_ms,
+          method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+          room_id: transport.room_id ?? null,
           api_base_url: transport.api_base_url,
           attempt,
           max_attempts,
@@ -194,6 +213,7 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
           join_mode: host_status?.join_mode ?? null,
           host_mode: host_status?.host_mode ?? null,
           painter_document_id: host_status?.painter_document_id ?? null,
+          request_id: connect_request_id,
         }));
         if (host_status?.ok && host_status.supports_join) break;
         if (attempt < max_attempts) {
@@ -244,17 +264,21 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
             event: 'painter_connect_started',
             slot: options.slot,
             started_at_ms: connect_started_at_ms,
+            method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+            room_id: transport.room_id ?? null,
             api_base_url: transport.api_base_url,
             bridge_ws_base_url: transport.bridge_ws_base_url,
             reconnect_token_present: Boolean(reconnect_token),
-          attempt,
-          max_attempts,
+            attempt,
+            max_attempts,
             expect_local_host_boot,
+            request_id: connect_request_id,
+            ws_request_id: ws_attach_request_id,
           }));
         try {
           response = await fetch(`${transport.api_base_url}/connect`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'x-join-request-id': connect_request_id },
             body: JSON.stringify({ slot: options.slot, reconnect_token }),
           });
           data = await response.json().catch(() => null) as any;
@@ -265,10 +289,13 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
             slot: options.slot,
             latency_ms: Date.now() - connect_started_at_ms,
             status: response.status,
+            method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+            room_id: transport.room_id ?? null,
             api_base_url: transport.api_base_url,
             error: data?.error ?? null,
             attempt,
             max_attempts,
+            request_id: connect_request_id,
           }));
         } catch (error) {
           last_connect_error = error instanceof Error ? error.message : String(error);
@@ -276,10 +303,13 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
             event: 'painter_connect_error',
             slot: options.slot,
             latency_ms: Date.now() - connect_started_at_ms,
+            method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+            room_id: transport.room_id ?? null,
             api_base_url: transport.api_base_url,
             message: last_connect_error,
             attempt,
             max_attempts,
+            request_id: connect_request_id,
           }));
         }
         if (attempt < max_attempts) {
@@ -319,29 +349,43 @@ export function create_painter_multiplayer_session(options: PainterMultiplayerSe
         event: 'painter_connect_succeeded',
         slot: options.slot,
         bootstrap_latency_ms: Date.now() - bootstrap_started_at_ms,
+        method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+        room_id: transport.room_id ?? null,
+        session_id: String(data?.boot_session_id ?? '').trim() || null,
         connection_id: String(data?.connection_id ?? '').trim() || null,
         reconnect_token_reused: next_reconnect_token === reconnect_token,
         api_base_url: transport.api_base_url,
         bridge_ws_base_url: transport.bridge_ws_base_url,
+        request_id: connect_request_id,
+        ws_request_id: ws_attach_request_id,
       }));
       const ws_attach_started_at_ms = Date.now();
       console.log('[PAINTER_WS_ATTACH]', JSON.stringify({
         event: 'ws_attach_started',
         slot: options.slot,
         started_at_ms: ws_attach_started_at_ms,
+        method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+        room_id: transport.room_id ?? null,
         bridge_ws_base_url: transport.bridge_ws_base_url,
+        request_id: ws_attach_request_id,
       }));
       ws_client = initWebSocketClient(transport.bridge_ws_base_url, {
         baseUrl: transport.bridge_ws_base_url,
         sessionToken: session_token,
         slot: options.slot,
+        roomId: transport.room_id ?? null,
+        attachToken: transport.attach_token ?? null,
+        requestId: ws_attach_request_id,
       });
       attach_ws_handlers(ws_client);
       console.log('[PAINTER_WS_ATTACH]', JSON.stringify({
         event: 'ws_attach_completed',
         slot: options.slot,
         latency_ms: Date.now() - ws_attach_started_at_ms,
+        method: transport.transport_kind === 'relay_ws_tunnel' ? 'remote_relay' : 'direct',
+        room_id: transport.room_id ?? null,
         bridge_ws_base_url: transport.bridge_ws_base_url,
+        request_id: ws_attach_request_id,
       }));
       return set_state({
         lifecycle: 'multiplayer_ready',

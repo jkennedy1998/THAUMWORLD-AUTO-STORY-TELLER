@@ -1,4 +1,4 @@
-import { commit_grid_to_painter_world, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, get_painter_focus_slot_for_anchor, sync_grid_to_painter_projection } from './painter_view_projection_adapter.js';
+import { commit_grid_to_painter_world, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, get_painter_focus_slot_for_anchor, get_painter_world_content_bounds_center, sync_grid_to_painter_projection } from './painter_view_projection_adapter.js';
 import { addLayer, createVoxelSpace, getLayer } from './voxel_space.js';
 import { createGrid } from './types.js';
 import { create_painter_document, create_painter_group, create_painter_voxel_record } from './painter_document.js';
@@ -15,6 +15,14 @@ const layer0 = getLayer(space, 0)!;
 const layer1 = getLayer(space, 1)!;
 layer0.cells[0]![0] = { char: 'A', rgb: { r: 255, g: 255, b: 255 }, weight_index: 1 };
 layer1.cells[1]![2] = { char: 'B', rgb: { r: 255, g: 255, b: 255 }, weight_index: 1 };
+layer1.cells[0]![1] = {
+  char: 'G',
+  graphic: { graphic_id: 'tile_test', view_direction: 'south', weight_index: 3 },
+  appearance_slots: { 1: { kind: 'flat_rgb', rgb: { r: 1, g: 2, b: 3 } } },
+  materials: { 1: 'STONE_PALE' },
+  rgb: { r: 1, g: 2, b: 3 },
+  weight_index: 3,
+};
 
 space.camera.center_target_in_view = true;
 const projectionAnchor = { x: 1, y: 1, z: 0 };
@@ -31,6 +39,11 @@ assert(JSON.stringify(topProjection.visible_planes) === JSON.stringify([0, 1]), 
 assert(topProjection.target_projected.u === 1 && topProjection.target_projected.v === 1, 'top view target projection should be tracked');
 assert(topProjection.scene.slots.get(0)?.cells[1]?.[1]?.char === 'A', 'top view slot 0 should recenter content around target');
 assert(topProjection.scene.slots.get(1)?.cells[2]?.[3]?.char === 'B', 'top view slot 1 should recenter higher plane content');
+const projectedGraphicCell = topProjection.scene.slots.get(1)?.cells[1]?.[2];
+assert(projectedGraphicCell?.graphic?.graphic_id === 'tile_test', 'projected view should preserve graphic payload');
+assert(projectedGraphicCell?.appearance_slots?.[1]?.kind === 'flat_rgb', 'projected view should preserve appearance slot payload');
+assert(projectedGraphicCell?.materials?.[1] === 'STONE_PALE', 'projected view should preserve materials payload');
+assert(projectedGraphicCell?.appearance_slots?.[1] !== layer1.cells[0]![1]!.appearance_slots?.[1], 'projected appearance slots should be deep-cloned');
 assert(getLayer(space, 0)?.cells[0]?.[0]?.char === 'A', 'source voxel space should retain original world-space cell position');
 
 space.camera.center_target_in_view = false;
@@ -245,5 +258,19 @@ const eastEmptyPlaneFocus = get_painter_focus_slot_for_anchor({
   fallback_world_plane: 12,
 });
 assert(eastEmptyPlaneFocus.focus_world_plane === 12 && eastEmptyPlaneFocus.focus_slot === 2, 'focus lookup should track empty camera-centered planes on side views');
+
+const graphicOnlySpace = createVoxelSpace(4, 4, { minZ: 0, maxZ: 2, defaultZ: 0 });
+addLayer(graphicOnlySpace, 1, 'Mid');
+addLayer(graphicOnlySpace, 2, 'Top');
+graphicOnlySpace.layers.get(2)!.cells[3]![1] = {
+  char: ' ',
+  graphic: { graphic_id: 'tile_graphic_only', view_direction: 'south', weight_index: 2 },
+  appearance_slots: { 2: { kind: 'flat_rgb', rgb: { r: 9, g: 8, b: 7 } } },
+  materials: { 2: 'MOSS_LIGHT' },
+  rgb: { r: 9, g: 8, b: 7 },
+  weight_index: 2,
+};
+const graphicOnlyCenter = get_painter_world_content_bounds_center(graphicOnlySpace);
+assert(JSON.stringify(graphicOnlyCenter) === JSON.stringify({ x: 1, y: 3, z: 2 }), 'content center should count graphic-only cells as real content');
 
 console.log('painter_view_projection_adapter tests passed');

@@ -186,3 +186,20 @@ export function nearest_indexed_color(rgb: Rgb): IndexedColor {
 export function nearest_indexed_rgb(rgb: Rgb): Rgb {
     return { ...nearest_indexed_color(rgb).rgb };
 }
+
+export function lerp_rgb(a: Rgb, b: Rgb, mix: number): Rgb {
+    const t = Number.isFinite(mix) ? Math.max(0, Math.min(1, mix)) : 0;
+    return {
+        r: Math.round(a.r + ((b.r - a.r) * t)),
+        g: Math.round(a.g + ((b.g - a.g) * t)),
+        b: Math.round(a.b + ((b.b - a.b) * t)),
+    };
+}
+
+export function mid_rgb(a: Rgb, b: Rgb): Rgb {
+    return lerp_rgb(a, b, 0.5);
+}
+
+export function nearest_indexed_lerp_rgb(a: Rgb, b: Rgb, mix: number): Rgb {
+    return nearest_indexed_rgb(lerp_rgb(a, b, mix));
+}

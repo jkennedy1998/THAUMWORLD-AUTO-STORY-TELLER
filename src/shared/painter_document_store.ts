@@ -1,5 +1,5 @@
 import { get_data_slot_dir } from '../engine/paths.js';
-import { create_painter_document, create_painter_group, type PainterDocument, type PainterPropertyKind, type PainterPropertyValue } from '../ascii_painter/painter_document.js';
+import { clone_painter_voxel_record, create_painter_document, create_painter_group, type PainterDocument, type PainterPropertyKind, type PainterPropertyValue, type PainterVoxelRecord } from '../ascii_painter/painter_document.js';
 import { import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
 import { add_painter_group, blank_painter_group_property_block, compact_painter_group_blank_property_block_left, duplicate_painter_group, erase_group_voxel_at_breath, export_painter_document, merge_painter_group_blank_property_block, move_painter_group_property_block, normalize_painter_document_runtime, offset_painter_group_in_time, remove_painter_group, rename_painter_group, reorder_painter_groups, set_group_voxel_at_breath, set_painter_document_loop_window, set_painter_document_timing, set_painter_group_breath_span, set_painter_group_locked, set_painter_group_property_block, set_painter_group_property_block_edge_destructive, set_painter_group_property_block_length, set_painter_group_raster_state, set_painter_group_timing, set_painter_group_visibility, set_painter_runtime_active_breath, split_painter_group_property_block, swap_painter_group_property_blocks, trim_painter_group_property_block_edge } from '../ascii_painter/painter_document_runtime.js';
 import { importVoxelSpace, type VoxelSpaceExport } from '../ascii_painter/voxel_space.js';
@@ -29,8 +29,8 @@ type PainterGroupVoxelHistoryEntry = {
   breath: number;
   changes: Array<{
     key: string;
-    before: { key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number } | null;
-    after: { key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number } | null;
+    before: PainterVoxelRecord | null;
+    after: PainterVoxelRecord | null;
   }>;
 };
 
@@ -115,6 +115,10 @@ function clear_document_group_histories(slot: number, document_id: string): void
   }
 }
 
+function clone_history_voxel(voxel: PainterVoxelRecord | null | undefined): PainterVoxelRecord | null {
+  return voxel ? clone_painter_voxel_record(voxel) : null;
+}
+
 function apply_history_entry(snapshot: PainterDocumentSnapshot, entry: PainterGroupVoxelHistoryEntry, direction: 'undo' | 'redo'): PainterDocumentSnapshot {
   const runtime = normalize_painter_document_runtime(snapshot.snapshot);
   const target_group = runtime.document.groups[entry.group_id];
@@ -122,19 +126,12 @@ function apply_history_entry(snapshot: PainterDocumentSnapshot, entry: PainterGr
   set_painter_runtime_active_breath(runtime, entry.breath);
   for (const change of entry.changes) {
     const next = direction === 'undo' ? change.before : change.after;
-    if (!next || next.char === ' ') {
+    const shouldErase = !next || (next.char === ' ' && !next.graphic);
+    if (shouldErase) {
       erase_group_voxel_at_breath(runtime, entry.group_id, entry.breath, change.key);
       continue;
     }
-    set_group_voxel_at_breath(runtime, entry.group_id, entry.breath, {
-      key: next.key,
-      x: next.x,
-      y: next.y,
-      z: next.z,
-      char: next.char,
-      rgb: { ...next.rgb },
-      weight_index: next.weight_index,
-    }, { auto_key: true });
+    set_group_voxel_at_breath(runtime, entry.group_id, entry.breath, clone_painter_voxel_record(next), { auto_key: true });
   }
   return {
     document_id: snapshot.document_id,
@@ -244,7 +241,7 @@ export function apply_painter_group_voxel_changes(
   slot: number,
   document_id: string,
   group_id: string,
-  changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }>,
+  changes: Array<{ x: number; y: number; z: number; cell: { char: string; graphic?: PainterVoxelRecord['graphic']; appearance_slots?: PainterVoxelRecord['appearance_slots']; materials?: PainterVoxelRecord['materials']; rgb: { r: number; g: number; b: number }; weight_index: number } }>,
   options?: { breath?: number; auto_key?: boolean }
 ): PainterDocumentSnapshot {
   const current = get_or_create_painter_document_snapshot(slot, document_id);
@@ -260,12 +257,14 @@ export function apply_painter_group_voxel_changes(
     const key = `${Math.floor(change.x)}:${Math.floor(change.y)}:${Math.floor(change.z)}`;
     const before = runtime.group_voxel_index.get(group_id)?.get(key) ?? null;
     const nextChar = String(change.cell.char ?? ' ').slice(0, 1) || ' ';
-    if (nextChar === ' ') {
+    const nextGraphic = change.cell.graphic ? { ...change.cell.graphic } : undefined;
+    const shouldErase = nextChar === ' ' && !nextGraphic;
+    if (shouldErase) {
       if (runtime.group_voxel_index.get(group_id)?.has(key)) {
         erase_group_voxel_at_breath(runtime, group_id, targetBreath, key);
         history_entry.changes.push({
           key,
-          before: before ? { ...before, rgb: { ...before.rgb } } : null,
+          before: clone_history_voxel(before),
           after: null,
         });
         changed = true;
@@ -278,6 +277,9 @@ export function apply_painter_group_voxel_changes(
       y: Math.floor(change.y),
       z: Math.floor(change.z),
       char: nextChar,
+      graphic: nextGraphic,
+      appearance_slots: change.cell.appearance_slots,
+      materials: change.cell.materials ? { ...change.cell.materials } : undefined,
       rgb: { ...change.cell.rgb },
       weight_index: change.cell.weight_index,
     };
@@ -285,8 +287,8 @@ export function apply_painter_group_voxel_changes(
     if (!written.applied) continue;
     history_entry.changes.push({
       key,
-      before: before ? { ...before, rgb: { ...before.rgb } } : null,
-      after: { ...nextVoxel, rgb: { ...nextVoxel.rgb } },
+      before: clone_history_voxel(before),
+      after: clone_history_voxel(nextVoxel),
     });
     changed = true;
   }
@@ -326,7 +328,7 @@ export function apply_painter_group_voxel_command(
   slot: number,
   document_id: string,
   group_id: string,
-  changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }>,
+  changes: Array<{ x: number; y: number; z: number; cell: { char: string; graphic?: PainterVoxelRecord['graphic']; appearance_slots?: PainterVoxelRecord['appearance_slots']; materials?: PainterVoxelRecord['materials']; rgb: { r: number; g: number; b: number }; weight_index: number } }>,
   options?: { base_revision?: number | null; breath?: number; auto_key?: boolean }
 ): PainterCommandApplyResult {
   const current = get_or_create_painter_document_snapshot(slot, document_id);
@@ -393,7 +395,7 @@ export function apply_painter_group_structure_change(
     | { kind: 'rename_group'; group_id: string; group_name: string }
      | { kind: 'set_group_visibility'; group_id: string; visible: boolean }
      | { kind: 'set_group_locked'; group_id: string; locked: boolean }
-     | { kind: 'set_group_raster_state'; group_id: string; breath: number; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> }
+     | { kind: 'set_group_raster_state'; group_id: string; breath: number; voxels: PainterVoxelRecord[] }
      | { kind: 'set_group_property_block'; group_id: string; property_kind: Extract<PainterPropertyKind, 'move' | 'rotation'>; property_id?: string | null; property_label?: string; breath: number; value: PainterPropertyValue }
      | { kind: 'blank_group_property_block'; group_id: string; property_id: string; block_id: string }
      | { kind: 'trim_group_property_block_edge'; group_id: string; property_id: string; block_id: string; edge: 'start' | 'end' }
@@ -530,15 +532,7 @@ export function apply_painter_group_structure_change(
     }
     case 'set_group_raster_state': {
       assert_group_exists(runtime, command.group_id);
-      set_painter_group_raster_state(runtime, command.group_id, command.breath, command.voxels.map((voxel) => ({
-        key: voxel.key,
-        x: voxel.x,
-        y: voxel.y,
-        z: voxel.z,
-        char: voxel.char,
-        rgb: { ...voxel.rgb },
-        weight_index: voxel.weight_index,
-      })));
+      set_painter_group_raster_state(runtime, command.group_id, command.breath, command.voxels.map(clone_painter_voxel_record));
       break;
     }
     case 'set_group_property_block': {
@@ -588,7 +582,7 @@ export function apply_painter_group_structure_command(
     | { kind: 'rename_group'; group_id: string; group_name: string }
      | { kind: 'set_group_visibility'; group_id: string; visible: boolean }
      | { kind: 'set_group_locked'; group_id: string; locked: boolean }
-     | { kind: 'set_group_raster_state'; group_id: string; breath: number; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> }
+     | { kind: 'set_group_raster_state'; group_id: string; breath: number; voxels: PainterVoxelRecord[] }
      | { kind: 'set_group_property_block'; group_id: string; property_kind: Extract<PainterPropertyKind, 'move' | 'rotation'>; property_id?: string | null; property_label?: string; breath: number; value: PainterPropertyValue }
      | { kind: 'blank_group_property_block'; group_id: string; property_id: string; block_id: string }
      | { kind: 'trim_group_property_block_edge'; group_id: string; property_id: string; block_id: string; edge: 'start' | 'end' }

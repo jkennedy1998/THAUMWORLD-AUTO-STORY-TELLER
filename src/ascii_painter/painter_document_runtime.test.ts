@@ -262,7 +262,7 @@ assert(get_painter_group_raster_state_at_breath(swapRuntime.document.groups[swap
 assert(get_painter_group_raster_state_at_breath(swapRuntime.document.groups[swapGroupId]!, 2)?.content[0]?.char === 'A', 'generic swap should move source raster content to target span');
 
 const exported = export_painter_document(runtime);
-assert(exported.version === 5, 'exported painter document should use property-only version');
+assert(exported.version === 6, 'exported painter document should use property-only version');
 assert(!(legacyContentStatesKey in exported.groups[baseGroupId]!), 'exported groups should not include legacy raster state arrays');
 
 console.log('painter_document_runtime tests passed');

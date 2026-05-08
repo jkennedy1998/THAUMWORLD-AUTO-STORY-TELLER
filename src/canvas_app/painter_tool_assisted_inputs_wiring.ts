@@ -6,7 +6,7 @@ import { create_tool_assisted_inputs_runtime } from '../mono_ui/runtime/automati
 import { create_tool_assisted_inputs_script_repository_local } from '../mono_ui/runtime/automation_script_repository_local.js';
 import { create_tool_assisted_inputs_trace_sink } from '../mono_ui/runtime/automation_trace.js';
 import type { ToolAssistedInputsJoinSnapshot } from '../mono_ui/runtime/automation_interfaces.js';
-import type { ToolType } from '../ascii_painter/types.js';
+import { clone_appearance_slot_assignments, type GridCell, type ToolType } from '../ascii_painter/types.js';
 
 type PainterToolAssistedInputsWiringOptions = {
   data_slot: number;
@@ -15,7 +15,7 @@ type PainterToolAssistedInputsWiringOptions = {
   get_camera_target: () => { x: number; y: number; z: number } | null;
   get_bounds: () => { width: number; height: number; minZ: number; maxZ: number };
   get_interaction_anchor: () => any;
-  get_cell: (x: number, y: number, z?: number | null) => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } | null;
+  get_cell: (x: number, y: number, z?: number | null) => GridCell | null;
   get_join_snapshot?: () => ToolAssistedInputsJoinSnapshot | null;
   get_text_value?: (source: string, field?: string | null) => string | null;
   invoke_helper?: (helper: string, payload?: Record<string, unknown>) => Promise<unknown> | unknown;
@@ -84,6 +84,9 @@ export function create_painter_tool_assisted_inputs_wiring(options: PainterToolA
           y,
           z: typeof z === 'number' ? z : (options.get_focus_plane() ?? 0),
           char: cell.char,
+          graphic: cell.graphic ? { ...cell.graphic } : undefined,
+          appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+          materials: cell.materials ? { ...cell.materials } : undefined,
           rgb: { ...cell.rgb },
           weight_index: cell.weight_index,
           render_index: cell.render_index,

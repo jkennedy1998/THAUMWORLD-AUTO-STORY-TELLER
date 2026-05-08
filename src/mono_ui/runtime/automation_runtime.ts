@@ -8,6 +8,7 @@ import type {
   ToolAssistedInputsContext,
   ToolAssistedInputsScript,
   ToolAssistedInputsStatus,
+  ToolAssistedInputsTimingProfile,
   WorldSessionBootstrap,
 } from './automation_interfaces.js';
 import { create_tool_assisted_inputs_capture_store } from './automation_capture_store.js';
@@ -37,6 +38,13 @@ type ToolAssistedInputsRuntimeOptions = {
 
 const BOOT_READY_TIMEOUT_MS = 20_000;
 const BREATH_ZERO_TIMEOUT_MS = 15_000;
+
+function resolve_timing_profile(script: ToolAssistedInputsScript | null): ToolAssistedInputsTimingProfile {
+  const configured = String((window as Window).electronAPI?.toolAssistedInputsBootConfig?.timingProfile ?? '').trim().toLowerCase();
+  if (configured === 'fast' || configured === 'slow_debug' || configured === 'human') return configured;
+  if (script?.timing_profile === 'fast' || script?.timing_profile === 'slow_debug' || script?.timing_profile === 'human') return script.timing_profile;
+  return 'human';
+}
 
 function with_timeout<T>(promise: Promise<T>, timeout_ms: number, error_message: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -227,6 +235,7 @@ export function create_tool_assisted_inputs_runtime(options: ToolAssistedInputsR
         mark_action_completed: () => {
           last_action_completed_at_ms = Date.now();
         },
+        timing_profile: resolve_timing_profile(running_script),
       });
       if (!ok) {
         if (running_script?.stop_on_error !== false) {
@@ -284,6 +293,7 @@ export function create_tool_assisted_inputs_runtime(options: ToolAssistedInputsR
         action_count: loaded.script.actions.length,
         start_delay_ms: loaded.script.start_delay_ms,
         description: loaded.script.description ?? null,
+        timing_profile: resolve_timing_profile(loaded.script),
         tai_id: (window as Window).electronAPI?.toolAssistedInputsBootConfig?.taiId ?? null,
         tai_test_name: (window as Window).electronAPI?.toolAssistedInputsBootConfig?.testName ?? loaded.script.test_name,
         tai_open_ms: (window as Window).electronAPI?.toolAssistedInputsBootConfig?.openMs ?? loaded.script.open_ms,
@@ -297,6 +307,7 @@ export function create_tool_assisted_inputs_runtime(options: ToolAssistedInputsR
         action_count: loaded.script.actions.length,
         start_delay_ms: loaded.script.start_delay_ms,
         description: loaded.script.description ?? null,
+        timing_profile: resolve_timing_profile(loaded.script),
       });
       emit('boot_started', {
         test_name: loaded.script.test_name,

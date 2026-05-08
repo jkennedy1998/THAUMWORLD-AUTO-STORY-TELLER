@@ -14,8 +14,6 @@ import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import { clamp_numeric_slider_value, draw_numeric_dual_slider_markers, draw_numeric_single_slider_markers, draw_numeric_slider_track, get_numeric_slider_layout, get_numeric_slider_marker_x, get_numeric_slider_nudge_hit, get_numeric_slider_value_from_x } from '../runtime/slider_primitives.js';
 import type { ToolType } from '../../ascii_painter/types.js';
 import type { SelectionMode } from '../../ascii_painter/selection.js';
-import type { GradiatorState, GradiatorSlot } from '../../ascii_painter/gradiator.js';
-import { getSafeGradiatorSlot } from '../../ascii_painter/gradiator.js';
 
 type ToolPropertiesCustomPanel = {
   should_render: () => boolean;
@@ -151,13 +149,6 @@ export type ToolPropertiesOptions = {
   on_paste_ignore_color_change: (ignore: boolean) => void;
   get_paste_ignore_color_rgb: () => { r: number; g: number; b: number };
   on_paste_ignore_color_select: () => void;
-  // Gradiator options
-  get_gradiator_state: () => GradiatorState;
-  on_gradiator_slot_select: (slot: GradiatorSlot) => void;
-  on_gradiator_char_select: (slot: GradiatorSlot, x: number) => void;
-  on_gradiator_add_char: (slot: GradiatorSlot) => void;
-  on_gradiator_remove_char: (slot: GradiatorSlot) => void;
-  on_gradiator_char_set: (slot: GradiatorSlot, x: number, char: string) => void;
   // Selection controls
   on_selection_clear?: () => void;
   on_selection_invert?: () => void;
@@ -227,66 +218,6 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
   function is_on_paste_ignore_color_selector(x: number, y: number): boolean {
     const selector_y = rect.y1 - 14;
     return y === selector_y && x >= rect.x0 + 14 && x <= rect.x0 + 16;
-  }
-
-  // Check if position is on gradiator slot selector
-  function is_on_gradiator_slot(x: number, y: number): number | null {
-    const gradiator_start_y = rect.y1 - 3;
-    for (let slot = 0; slot < 3; slot++) {
-      const y_pos = gradiator_start_y - (slot * 2);
-      if (y === y_pos && x >= rect.x0 + 2 && x <= rect.x0 + 4) {
-        return slot;
-      }
-    }
-    return null;
-  }
-
-  // Check if position is on gradiator character area (for editing)
-  function is_on_gradiator_char(x: number, y: number): { slot: number; charX: number } | null {
-    const gradiator_start_y = rect.y1 - 3;
-    const gradiatorState = opts.get_gradiator_state();
-    for (let slot = 0; slot < 3; slot++) {
-      const y_pos = gradiator_start_y - (slot * 2);
-      const gradiator = getSafeGradiatorSlot(gradiatorState, slot);
-      // Clickable area is within the brackets based on actual gradiator length
-      const endX = rect.x0 + 6 + Math.min(gradiator.length, 12);
-      if (y === y_pos && x >= rect.x0 + 6 && x < endX) {
-        return { slot, charX: x - (rect.x0 + 6) };
-      }
-    }
-    return null;
-  }
-
-  // Check if position is on gradiator add (+) button
-  function is_on_gradiator_add(x: number, y: number): number | null {
-    const gradiator_start_y = rect.y1 - 3;
-    const gradiatorState = opts.get_gradiator_state();
-    for (let slot = 0; slot < 3; slot++) {
-      const y_pos = gradiator_start_y - (slot * 2);
-      const gradiator = getSafeGradiatorSlot(gradiatorState, slot);
-      // + button appears after the closing bracket
-      const buttonX = rect.x0 + 6 + Math.min(gradiator.length, 12) + 1;
-      if (y === y_pos && x === buttonX) {
-        return slot;
-      }
-    }
-    return null;
-  }
-
-  // Check if position is on gradiator remove (-) button
-  function is_on_gradiator_remove(x: number, y: number): number | null {
-    const gradiator_start_y = rect.y1 - 3;
-    const gradiatorState = opts.get_gradiator_state();
-    for (let slot = 0; slot < 3; slot++) {
-      const y_pos = gradiator_start_y - (slot * 2);
-      const gradiator = getSafeGradiatorSlot(gradiatorState, slot);
-      // - button appears after the + button
-      const buttonX = rect.x0 + 6 + Math.min(gradiator.length, 12) + 2;
-      if (y === y_pos && x === buttonX) {
-        return slot;
-      }
-    }
-    return null;
   }
 
   // Check if position is on scale slider (between the buttons)
@@ -881,72 +812,29 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           }
         }
       } else if (opts.get_current_tool() === 'paste') {
-        const gradiatorState = opts.get_gradiator_state();
         const pasteScale = opts.get_paste_scale();
         const paste_replace = opts.get_paste_space_replace();
-        
-        // Draw gradiators
-        const gradiator_start_y = rect.y1 - 3;
-        const activeColor = get_color_by_name('vivid_yellow').rgb;
-        const inactiveColor = get_color_by_name('medium_gray').rgb;
-        
-        for (let slot = 0; slot < 3; slot++) {
-          const isActive = slot === gradiatorState.activeSlot;
-          const gradiator = getSafeGradiatorSlot(gradiatorState, slot);
-          const y_pos = gradiator_start_y - (slot * 2);
-          
-          // Draw slot label
-          const label = `G${slot + 1}`;
-          for (let i = 0; i < label.length; i++) {
-            c.set(rect.x0 + 2 + i, y_pos, {
-              char: label[i]!,
-              rgb: isActive ? activeColor : inactiveColor,
-              style: 'regular',
-              weight_index: isActive ? 2 : 1
-            });
-          }
-          
-          // Draw gradiator characters in brackets
-          c.set(rect.x0 + 5, y_pos, { char: '[', rgb: text_color, style: 'regular', weight_index: 1 });
-          
-          for (let x = 0; x < gradiator.length && x < 12; x++) {
-            const char = gradiator[x]!;
-            // Highlight selected character position if this is the active slot and has a selection
-            const isSelected = isActive && gradiatorState.isEditing && gradiatorState.editSlot === slot && x === gradiatorState.editCursorX;
-            
-            c.set(rect.x0 + 6 + x, y_pos, {
-              char: char,
-              rgb: isSelected ? activeColor : text_color,
-              style: isSelected ? 'reverse' : 'regular',
-              weight_index: isSelected ? 2 : 2
-            });
-          }
-          
-          c.set(rect.x0 + 6 + Math.min(gradiator.length, 12), y_pos, { 
-            char: ']', 
-            rgb: text_color, 
-            style: 'regular', 
-            weight_index: 1 
-          });
-          
-          // Draw + and - buttons
-          const buttonX = rect.x0 + 6 + Math.min(gradiator.length, 12) + 1;
-          c.set(buttonX, y_pos, {
-            char: '+',
-            rgb: get_color_by_name('vivid_yellow').rgb,
+
+        const visuals_hint_y = rect.y1 - 3;
+        const visuals_hint = 'Gradiator: VISUALS';
+        for (let i = 0; i < visuals_hint.length && rect.x0 + 2 + i < rect.x1; i++) {
+          c.set(rect.x0 + 2 + i, visuals_hint_y, {
+            char: visuals_hint[i]!,
+            rgb: i < 10 ? get_ui_semantic_rgb('medium') : get_ui_semantic_rgb('vivid'),
             style: 'regular',
-            weight_index: 2
+            weight_index: i < 10 ? 2 : 3,
           });
-          
-          // Only show - if gradiator has more than minimum characters
-          if (gradiator.length > 2) {
-            c.set(buttonX + 1, y_pos, {
-              char: '-',
-              rgb: get_color_by_name('vivid_red').rgb,
-              style: 'regular',
-              weight_index: 2
-            });
-          }
+        }
+
+        const visuals_hint_2_y = rect.y1 - 4;
+        const visuals_hint_2 = 'edit ramps in picker';
+        for (let i = 0; i < visuals_hint_2.length && rect.x0 + 2 + i < rect.x1; i++) {
+          c.set(rect.x0 + 2 + i, visuals_hint_2_y, {
+            char: visuals_hint_2[i]!,
+            rgb: get_ui_semantic_rgb('medium'),
+            style: 'regular',
+            weight_index: 2,
+          });
         }
         
         // Draw scale slider
@@ -1304,33 +1192,6 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
         // Handle paste ignore color selector
         if (is_on_paste_ignore_color_selector(e.x, e.y)) {
           opts.on_paste_ignore_color_select();
-          return;
-        }
-        
-        // Handle gradiator slot selection
-        const gradiatorSlot = is_on_gradiator_slot(e.x, e.y);
-        if (gradiatorSlot !== null) {
-          opts.on_gradiator_slot_select(gradiatorSlot as GradiatorSlot);
-          return;
-        }
-        
-        // Handle gradiator character selection
-        const gradiatorChar = is_on_gradiator_char(e.x, e.y);
-        if (gradiatorChar !== null) {
-          opts.on_gradiator_char_select(gradiatorChar.slot as GradiatorSlot, gradiatorChar.charX);
-          return;
-        }
-        
-        // Handle gradiator add/remove buttons
-        const gradiatorAdd = is_on_gradiator_add(e.x, e.y);
-        if (gradiatorAdd !== null) {
-          opts.on_gradiator_add_char(gradiatorAdd as GradiatorSlot);
-          return;
-        }
-        
-        const gradiatorRemove = is_on_gradiator_remove(e.x, e.y);
-        if (gradiatorRemove !== null) {
-          opts.on_gradiator_remove_char(gradiatorRemove as GradiatorSlot);
           return;
         }
         

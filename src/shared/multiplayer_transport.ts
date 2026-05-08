@@ -3,11 +3,17 @@ export const DEFAULT_BRIDGE_HTTP_PORT = 8788;
 export const DEFAULT_BRIDGE_WS_PORT = 8789;
 
 export type MultiplayerTransportConfig = {
+  transport_kind: 'direct_http_ws' | 'relay_ws_tunnel';
   host_input: string;
   host_origin: string;
   api_base_url: string;
   bridge_http_url: string;
   bridge_ws_base_url: string;
+  relay_https_origin?: string;
+  relay_wss_origin?: string;
+  room_id?: string;
+  join_code?: string;
+  attach_token?: string;
 };
 
 export type NormalizedJoinHost = {
@@ -132,11 +138,53 @@ export function build_multiplayer_transport_config(args: BuildMultiplayerTranspo
     ? normalize_origin(String(args.bridge_ws_base_url), 'ws:')
     : set_port(host_origin, bridge_ws_port, 'ws:');
   return {
+    transport_kind: 'direct_http_ws',
     host_input: normalized_host.normalized_host,
     host_origin,
     api_base_url,
     bridge_http_url,
     bridge_ws_base_url,
+  };
+}
+
+export function build_remote_relay_transport_config(args: {
+  relay_https_origin: string;
+  relay_wss_origin?: string | null;
+  room_id?: string | null;
+  join_code?: string | null;
+  attach_token?: string | null;
+  api_base_url?: string | null;
+  bridge_ws_base_url?: string | null;
+  host_input?: string | null;
+}): MultiplayerTransportConfig {
+  const relay_https_origin = normalize_origin(String(args.relay_https_origin ?? ''), 'http:');
+  const relay_wss_origin = String(args.relay_wss_origin ?? '').trim()
+    ? normalize_origin(String(args.relay_wss_origin), 'ws:')
+    : relay_https_origin.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+  const room_id = String(args.room_id ?? '').trim() || undefined;
+  const attach_token = String(args.attach_token ?? '').trim() || undefined;
+  const api_base_url = String(args.api_base_url ?? '').trim()
+    ? String(args.api_base_url).trim().replace(/\/+$/, '')
+    : (room_id && attach_token
+      ? `${relay_https_origin}/api/relay/room/${encodeURIComponent(room_id)}/attach/${encodeURIComponent(attach_token)}`
+      : `${relay_https_origin}/api`);
+  const bridge_ws_base_url = String(args.bridge_ws_base_url ?? '').trim()
+    ? String(args.bridge_ws_base_url).trim().replace(/\/+$/, '')
+    : (room_id && attach_token
+      ? `${relay_wss_origin}/relay/room/${encodeURIComponent(room_id)}/attach/${encodeURIComponent(attach_token)}`
+      : relay_wss_origin);
+  return {
+    transport_kind: 'relay_ws_tunnel',
+    host_input: String(args.host_input ?? args.join_code ?? args.room_id ?? relay_https_origin).trim() || relay_https_origin,
+    host_origin: relay_https_origin,
+    api_base_url,
+    bridge_http_url: relay_https_origin,
+    bridge_ws_base_url,
+    relay_https_origin,
+    relay_wss_origin,
+    room_id,
+    join_code: String(args.join_code ?? '').trim() || undefined,
+    attach_token,
   };
 }
 

@@ -80,7 +80,7 @@ export function makeLayerRendererModule(opts: LayerRendererOptions): Module {
       for (let y = startY; y < endY; y++) {
         for (let x = startX; x < endX; x++) {
           const cell = layer.cells[y]?.[x];
-          if (!cell || cell.char === ' ') continue;
+          if (!cell || (cell.char === ' ' && !cell.graphic)) continue;
           
           const screenX = rect.x0 + x + parallaxX;
           const screenY = rect.y0 + y;

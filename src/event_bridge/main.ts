@@ -32,6 +32,7 @@ type BridgeClientMeta = {
   client_session_id: string | null;
   session_token: string | null;
   slot: number | null;
+  request_id: string | null;
   last_heartbeat_at: number | null;
   last_claimed_actor_ref: string | null;
 };
@@ -259,6 +260,7 @@ export class EventBridge {
           client_session_id: null,
           session_token: null,
           slot: null,
+          request_id: null,
           last_heartbeat_at: null,
           last_claimed_actor_ref: null,
         });
@@ -277,11 +279,30 @@ export class EventBridge {
       }
       const slot = Number(requestUrl.searchParams.get('slot') ?? 1);
       const session_token = String(requestUrl.searchParams.get('session_token') ?? '').trim();
+      const request_id = String(requestUrl.searchParams.get('request_id') ?? '').trim() || null;
       const session = touch_multiplayer_session_by_token(slot, session_token) ?? resolve_multiplayer_session_by_token(slot, session_token);
       if (!session) {
+        debug_event('EVENT_BRIDGE', 'renderer_attach_rejected', {
+          method: 'event_bridge',
+          slot,
+          session_id: null,
+          connection_id: null,
+          client_session_id: null,
+          request_id,
+          reason: 'invalid_session',
+        });
         ws.close(1008, 'invalid_session');
         return;
       }
+      debug_event('EVENT_BRIDGE', 'renderer_connected', {
+        method: 'event_bridge',
+        slot,
+        session_id: session.boot_session_id,
+        connection_id: session.connection_id,
+        client_session_id: session.client_session_id,
+        request_id,
+        clientCount: this.wsClients.size + 1,
+      });
       log_event_bridge('renderer_connected', { clientCount: this.wsClients.size + 1 });
       this.wsClients.add(ws);
       this.wsClientMeta.set(ws, {
@@ -290,6 +311,7 @@ export class EventBridge {
         client_session_id: session.client_session_id,
         session_token,
         slot,
+        request_id,
         last_heartbeat_at: Date.now(),
         last_claimed_actor_ref: null,
       });
@@ -304,6 +326,15 @@ export class EventBridge {
 
       ws.on('close', () => {
         const meta = this.wsClientMeta.get(ws) ?? null;
+        debug_event('EVENT_BRIDGE', 'renderer_disconnected', {
+          method: 'event_bridge',
+          slot: meta?.slot ?? null,
+          session_id: null,
+          connection_id: meta?.connection_id ?? null,
+          client_session_id: meta?.client_session_id ?? null,
+          request_id: meta?.request_id ?? null,
+          clientCount: this.wsClients.size - 1,
+        });
         log_event_bridge('renderer_disconnected', { clientCount: this.wsClients.size - 1 });
         this.wsClients.delete(ws);
         this.wsClientMeta.delete(ws);
@@ -314,7 +345,15 @@ export class EventBridge {
 
       ws.on('error', (err: Error) => {
         const meta = this.wsClientMeta.get(ws) ?? null;
-        debug_event('EVENT_BRIDGE', 'renderer_error', { error: err.message });
+        debug_event('EVENT_BRIDGE', 'renderer_error', {
+          method: 'event_bridge',
+          slot: meta?.slot ?? null,
+          session_id: null,
+          connection_id: meta?.connection_id ?? null,
+          client_session_id: meta?.client_session_id ?? null,
+          request_id: meta?.request_id ?? null,
+          error: err.message,
+        });
         this.wsClients.delete(ws);
         this.wsClientMeta.delete(ws);
         if (meta) {
@@ -384,7 +423,15 @@ export class EventBridge {
         this.handleRendererHeartbeat(ws, meta, message?.data ?? {});
       }
     } catch (err) {
-      debug_event('EVENT_BRIDGE', 'renderer_message_error', { error: (err as Error).message });
+      debug_event('EVENT_BRIDGE', 'renderer_message_error', {
+        method: 'event_bridge',
+        slot: meta?.slot ?? null,
+        session_id: null,
+        connection_id: meta?.connection_id ?? null,
+        client_session_id: meta?.client_session_id ?? null,
+        request_id: meta?.request_id ?? null,
+        error: (err as Error).message,
+      });
     }
   }
 
@@ -392,11 +439,29 @@ export class EventBridge {
     const slot = Number(meta.slot ?? 0);
     const session_token = String(meta.session_token ?? '').trim();
     if (!slot || !session_token) {
+      debug_event('EVENT_BRIDGE', 'renderer_heartbeat_rejected', {
+        method: 'event_bridge',
+        slot,
+        session_id: null,
+        connection_id: meta.connection_id,
+        client_session_id: meta.client_session_id,
+        request_id: meta.request_id,
+        reason: 'missing_session_context',
+      });
       ws.send(JSON.stringify({ type: 'SESSION_INVALIDATED', data: { reason: 'missing_session_context' } }));
       return;
     }
     const session = touch_multiplayer_session_by_token(slot, session_token);
     if (!session) {
+      debug_event('EVENT_BRIDGE', 'renderer_heartbeat_rejected', {
+        method: 'event_bridge',
+        slot,
+        session_id: null,
+        connection_id: meta.connection_id,
+        client_session_id: meta.client_session_id,
+        request_id: meta.request_id,
+        reason: 'invalid_session_token',
+      });
       ws.send(JSON.stringify({ type: 'SESSION_INVALIDATED', data: { reason: 'invalid_session_token' } }));
       return;
     }
@@ -473,6 +538,18 @@ export class EventBridge {
         });
       }
 
+      debug_event('EVENT_BRIDGE', 'renderer_disconnect_cleanup', {
+        method: 'event_bridge',
+        slot,
+        session_id: null,
+        connection_id: meta.connection_id,
+        client_session_id,
+        request_id: meta.request_id,
+        actor_ref,
+        released_claim,
+        place_id,
+        reason,
+      });
       log_event_bridge('renderer_disconnect_cleanup', {
         reason,
         slot,
@@ -487,6 +564,7 @@ export class EventBridge {
         reason,
         connection_id: meta.connection_id,
         client_session_id: meta.client_session_id,
+        request_id: meta.request_id,
         error: (err as Error).message,
       });
     }
@@ -540,6 +618,13 @@ export class EventBridge {
     if (scope === 'connection') {
       const sentCount = this.sendToConnection(String(delivery?.connection_id ?? ''), type, data);
       if (sentCount > 0 && type !== 'PLACE_BREATH_TICK') {
+        debug_event('EVENT_BRIDGE', 'targeted_broadcast_sent', {
+          method: 'event_bridge',
+          scope,
+          connection_id: String(delivery?.connection_id ?? '').trim() || null,
+          recipientCount: sentCount,
+          type,
+        });
         log_event_bridge('targeted_broadcast_sent', {
           type,
           recipientCount: sentCount,

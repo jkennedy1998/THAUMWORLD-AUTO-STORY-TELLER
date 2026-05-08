@@ -7,7 +7,7 @@
  * Key concept: Data is ALWAYS 3D. Camera modes are view transformations.
  */
 
-import type { Grid, GridCell, GridExport } from './types.js';
+import { clone_appearance_slot_assignments, type Grid, type GridCell, type GridExport } from './types.js';
 import type { EditPlaneId, GridPoint } from './types.js';
 import type { Voxel3 } from '../shared/coords.js';
 import type { PlacePrincipalView, PlaceViewRollQuarterTurn } from '../mono_ui/runtime/place_view_projection.js';
@@ -24,6 +24,18 @@ function clamp_imported_color_channel(value: unknown): number {
   return Math.max(0, Math.min(255, n));
 }
 
+function clone_grid_cell(cell: GridCell): GridCell {
+  return {
+    char: cell.char,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
+    rgb: { ...cell.rgb },
+    weight_index: cell.weight_index,
+    render_index: cell.render_index,
+  };
+}
+
 function sanitize_imported_layer_cells(cells: unknown, width: number, height: number): GridCell[][] {
   const rows = Array.isArray(cells) ? cells : [];
   const sanitized: GridCell[][] = [];
@@ -35,14 +47,32 @@ function sanitize_imported_layer_cells(cells: unknown, width: number, height: nu
       const maybe = cell && typeof cell === 'object' ? cell as Record<string, unknown> : null;
       const char_value = typeof maybe?.char === 'string' && maybe.char.length > 0 ? maybe.char[0]! : ' ';
       const rgb_value = maybe?.rgb && typeof maybe.rgb === 'object' ? maybe.rgb as Record<string, unknown> : {};
+      const graphic_value = maybe?.graphic && typeof maybe.graphic === 'object' ? maybe.graphic as Record<string, unknown> : null;
+      const materials_value = maybe?.materials && typeof maybe.materials === 'object' ? maybe.materials as Record<string, unknown> : null;
+      const appearance_slots_value = maybe?.appearance_slots && typeof maybe.appearance_slots === 'object' ? maybe.appearance_slots as Record<string, unknown> : null;
       out_row.push({
         char: char_value,
+        graphic: graphic_value ? {
+          graphic_id: typeof graphic_value.graphic_id === 'string' ? graphic_value.graphic_id : '',
+          view_direction: (typeof graphic_value.view_direction === 'string' ? graphic_value.view_direction : 'south') as any,
+          facing: typeof graphic_value.facing === 'string' ? graphic_value.facing as any : undefined,
+          weight_index: clamp_imported_weight_index(graphic_value.weight_index),
+          variant: typeof graphic_value.variant === 'string' ? graphic_value.variant : undefined,
+          frame: typeof graphic_value.frame === 'string' ? graphic_value.frame : undefined,
+        } : undefined,
+        appearance_slots: clone_appearance_slot_assignments(appearance_slots_value as any),
+        materials: materials_value ? {
+          1: typeof materials_value[1] === 'string' ? materials_value[1] : undefined,
+          2: typeof materials_value[2] === 'string' ? materials_value[2] : undefined,
+          3: typeof materials_value[3] === 'string' ? materials_value[3] : undefined,
+        } : undefined,
         rgb: {
           r: clamp_imported_color_channel(rgb_value.r),
           g: clamp_imported_color_channel(rgb_value.g),
           b: clamp_imported_color_channel(rgb_value.b),
         },
         weight_index: clamp_imported_weight_index(maybe?.weight_index),
+        render_index: typeof maybe?.render_index === 'number' ? Math.trunc(maybe.render_index) : undefined,
       });
     }
     sanitized.push(out_row);
@@ -356,7 +386,8 @@ export function getVoxel(
   if (x < 0 || x >= space.bounds.width || y < 0 || y >= space.bounds.height) {
     return null;
   }
-  return layer.cells[y]?.[x] ?? null;
+  const cell = layer.cells[y]?.[x] ?? null;
+  return cell ? clone_grid_cell(cell) : null;
 }
 
 export function getVoxelAt(space: VoxelSpace, voxel: Voxel3): GridCell | null {
@@ -382,7 +413,7 @@ export function setVoxel(
   
   const row = layer.cells[y];
   if (!row) return false;
-  row[x] = { ...cell };
+  row[x] = clone_grid_cell(cell);
   
   // Update modified timestamp
   if (space.metadata) {
@@ -509,11 +540,7 @@ export function duplicateLayer(
   
   // Deep copy cells
   const copiedCells: GridCell[][] = source.cells.map(row =>
-    row.map(cell => ({
-      char: cell.char,
-      rgb: { ...cell.rgb },
-      weight_index: cell.weight_index,
-    }))
+    row.map(cell => clone_grid_cell(cell))
   );
   
   const newLayer: VoxelLayer = {
@@ -563,11 +590,11 @@ export function mergeLayerDown(space: VoxelSpace, targetZ: number): boolean {
   for (let y = 0; y < space.bounds.height; y++) {
     for (let x = 0; x < space.bounds.width; x++) {
       const targetCell = target.cells[y]?.[x];
-      if (targetCell && targetCell.char !== ' ') {
+      if (targetCell && (targetCell.char !== ' ' || !!targetCell.graphic)) {
         if (!source.cells[y]) {
           source.cells[y] = [];
         }
-        source.cells[y]![x] = { ...targetCell };
+        source.cells[y]![x] = clone_grid_cell(targetCell);
       }
     }
   }
@@ -592,8 +619,8 @@ export function flattenLayers(space: VoxelSpace): VoxelSpace {
       for (let y = 0; y < space.bounds.height; y++) {
         for (let x = 0; x < space.bounds.width; x++) {
           const cell = layer.cells[y]?.[x];
-          if (cell && cell.char !== ' ') {
-            baseLayer.cells[y]![x] = { ...cell };
+          if (cell && (cell.char !== ' ' || !!cell.graphic)) {
+            baseLayer.cells[y]![x] = clone_grid_cell(cell);
           }
         }
       }
@@ -626,11 +653,7 @@ export function exportVoxelSpace(space: VoxelSpace): VoxelSpaceExport {
         opacity: layer.opacity,
         locked: layer.locked,
         cells: layer.cells.map(row =>
-          row.map(cell => ({
-            char: cell.char,
-            rgb: { ...cell.rgb },
-            weight_index: cell.weight_index,
-          }))
+          row.map(cell => clone_grid_cell(cell))
         ),
       })),
     camera: { ...space.camera },
@@ -702,11 +725,7 @@ export function gridToVoxelSpace(grid: Grid, z: number = 0): VoxelSpace {
   layer.z = z;
   layer.name = `Layer ${z}`;
   layer.cells = grid.cells.map(row =>
-    row.map(cell => ({
-      char: cell.char,
-      rgb: { ...cell.rgb },
-      weight_index: cell.weight_index,
-    }))
+    row.map(cell => clone_grid_cell(cell))
   );
   
   space.bounds.minZ = z;
@@ -730,11 +749,7 @@ export function voxelSpaceToGrid(space: VoxelSpace, z?: number): Grid {
     width: space.bounds.width,
     height: space.bounds.height,
     cells: layer.cells.map(row =>
-      row.map(cell => ({
-        char: cell.char,
-        rgb: { ...cell.rgb },
-        weight_index: cell.weight_index,
-      }))
+      row.map(cell => clone_grid_cell(cell))
     ),
   };
 }

@@ -18,9 +18,23 @@
     "path": "tai06_painter_depth_focus_regression/script.json"
   },
   "10": {
-    "path": "tai10_game_join_actor_claim_smoke/script.json"
+    "path": "tai10_game_join_actor_claim_smoke/script.json",
+    "lane": "thaumworld_direct",
+    "status": "secondary",
+    "purpose": "actor_claim_after_join"
   },
   "11": {
-    "path": "tai11_painter_join_bootstrap_smoke/script.json"
+    "path": "tai11_painter_join_bootstrap_smoke/script.json",
+    "lane": "painter_direct",
+    "status": "blocked",
+    "purpose": "painter_join_bootstrap",
+    "notes": "Known blocked while Painter boot/init instability is unresolved; do not use as canonical multiplayer truth source."
+  },
+  "12": {
+    "path": "tai12_game_join_session_baseline/script.json",
+    "lane": "thaumworld_direct",
+    "status": "canonical",
+    "purpose": "join_session_baseline",
+    "notes": "Primary THAUMWORLD multiplayer baseline for probe/connect/ws/session readiness without actor-claim coupling."
   }
 }

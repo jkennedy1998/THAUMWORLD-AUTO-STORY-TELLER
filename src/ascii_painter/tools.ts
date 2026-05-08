@@ -5,7 +5,7 @@
  */
 
 import type { Grid, GridCell, GridPoint, Brush, ToolType } from './types.js';
-import { getCell, setCell } from './types.js';
+import { clone_appearance_slot_assignments, getCell, setCell } from './types.js';
 import {
   get_flood_fill_points,
   get_line_points,
@@ -19,6 +19,9 @@ import {
 export function drawCell(grid: Grid, x: number, y: number, brush: Brush): boolean {
   return setCell(grid, x, y, {
     char: brush.char,
+    graphic: brush.graphic ? { ...brush.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(brush.appearance_slots),
+    materials: brush.materials ? { ...brush.materials } : undefined,
     rgb: { ...brush.rgb },
     weight_index: brush.weight_index
   });
@@ -30,6 +33,9 @@ export function drawCell(grid: Grid, x: number, y: number, brush: Brush): boolea
 export function eraseCell(grid: Grid, x: number, y: number): boolean {
   return setCell(grid, x, y, {
     char: ' ',
+    graphic: undefined,
+    appearance_slots: undefined,
+    materials: undefined,
     rgb: { r: 0, g: 0, b: 0 },
     weight_index: 0
   });

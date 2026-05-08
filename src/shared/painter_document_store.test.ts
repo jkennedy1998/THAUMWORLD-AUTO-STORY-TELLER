@@ -1,6 +1,6 @@
-import { create_painter_document, create_painter_group, get_painter_group_raster_state_at_breath, make_painter_coord_key, type PainterGroup } from '../ascii_painter/painter_document.js';
+import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, make_painter_coord_key, type PainterGroup } from '../ascii_painter/painter_document.js';
 import { normalize_painter_document_runtime, resolve_painter_voxel_winner } from '../ascii_painter/painter_document_runtime.js';
-import { apply_painter_group_structure_change, apply_painter_group_structure_command, apply_painter_group_voxel_changes, apply_painter_group_voxel_command, redo_painter_group_changes, save_painter_document_snapshot, undo_painter_group_changes } from './painter_document_store.js';
+import { apply_painter_group_structure_change, apply_painter_group_structure_command, apply_painter_group_voxel_changes, apply_painter_group_voxel_command, get_or_create_painter_document_snapshot, redo_painter_group_changes, save_painter_document_snapshot, undo_painter_group_changes } from './painter_document_store.js';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -162,6 +162,73 @@ assert(get_painter_group_raster_state_at_breath(runtime.document.groups[breathGr
 const redoneBreath = redo_painter_group_changes(slot, breathDocumentId, breathGroupId);
 runtime = normalize_painter_document_runtime(redoneBreath.snapshot);
 assert(get_painter_group_raster_state_at_breath(runtime.document.groups[breathGroupId]!, 3)?.content[0]?.char === 'K', 'redo should restore the targeted breath frame content');
+
+const graphicDocumentId = `painter_store_graphic_${Date.now()}`;
+const graphicDocument = create_painter_document(6, 6, { default_group_name: 'Graphic Store' });
+const graphicGroupId = graphicDocument.group_order[0]!;
+save_painter_document_snapshot(slot, {
+  document_id: graphicDocumentId,
+  revision: 1,
+  updated_at: new Date().toISOString(),
+  snapshot: graphicDocument,
+});
+const graphicApply = apply_painter_group_voxel_changes(slot, graphicDocumentId, graphicGroupId, [{
+  x: 2,
+  y: 2,
+  z: 0,
+  cell: {
+    char: ' ',
+    graphic: { graphic_id: 'atlas:terrain.tree', view_direction: 'south', weight_index: 2 },
+    appearance_slots: { 1: { kind: 'flat_rgb', rgb: { r: 12, g: 34, b: 56 } } },
+    materials: { 1: 'STONE_PALE' },
+    rgb: { r: 12, g: 34, b: 56 },
+    weight_index: 2,
+  },
+}], { breath: 0, auto_key: true });
+runtime = normalize_painter_document_runtime(graphicApply.snapshot);
+const graphicKey = make_painter_coord_key(2, 2, 0);
+let graphicVoxel = runtime.group_voxel_index.get(graphicGroupId)?.get(graphicKey) ?? null;
+assert(graphicVoxel?.graphic?.graphic_id === 'atlas:terrain.tree', 'authoritative voxel apply should preserve graphic-only authored cells');
+assert(graphicVoxel?.appearance_slots?.[1]?.kind === 'flat_rgb', 'authoritative voxel apply should preserve appearance slots');
+const graphicUndo = undo_painter_group_changes(slot, graphicDocumentId, graphicGroupId);
+runtime = normalize_painter_document_runtime(graphicUndo.snapshot);
+assert(!runtime.group_voxel_index.get(graphicGroupId)?.has(graphicKey), 'undo should erase graphic-only authored cells cleanly');
+const graphicRedo = redo_painter_group_changes(slot, graphicDocumentId, graphicGroupId);
+runtime = normalize_painter_document_runtime(graphicRedo.snapshot);
+graphicVoxel = runtime.group_voxel_index.get(graphicGroupId)?.get(graphicKey) ?? null;
+assert(graphicVoxel?.graphic?.graphic_id === 'atlas:terrain.tree', 'redo should restore graphic-only authored cells');
+assert(graphicVoxel?.appearance_slots?.[1]?.kind === 'flat_rgb', 'redo should restore appearance slots for graphic-only authored cells');
+
+const rasterStateDocumentId = `painter_store_raster_state_${Date.now()}`;
+const rasterStateDocument = create_painter_document(6, 6, { default_group_name: 'Raster State' });
+const rasterStateGroupId = rasterStateDocument.group_order[0]!;
+save_painter_document_snapshot(slot, {
+  document_id: rasterStateDocumentId,
+  revision: 1,
+  updated_at: new Date().toISOString(),
+  snapshot: rasterStateDocument,
+});
+apply_painter_group_structure_command(slot, rasterStateDocumentId, {
+  kind: 'set_group_raster_state',
+  group_id: rasterStateGroupId,
+  breath: 0,
+  voxels: [create_painter_voxel_record({
+    x: 1,
+    y: 1,
+    z: 0,
+    char: ' ',
+    graphic: { graphic_id: 'atlas:terrain.rock', view_direction: 'south', weight_index: 1 },
+    appearance_slots: { 1: { kind: 'flat_rgb', rgb: { r: 90, g: 80, b: 70 } } },
+    materials: { 1: 'STONE_PALE' },
+    rgb: { r: 90, g: 80, b: 70 },
+    weight_index: 1,
+  })],
+});
+runtime = normalize_painter_document_runtime(get_or_create_painter_document_snapshot(slot, rasterStateDocumentId).snapshot);
+const rasterStateVoxel = get_painter_group_raster_state_at_breath(runtime.document.groups[rasterStateGroupId]!, 0)?.content[0] ?? null;
+assert(rasterStateVoxel?.graphic?.graphic_id === 'atlas:terrain.rock', 'set_group_raster_state should preserve graphic payload');
+assert(rasterStateVoxel?.appearance_slots?.[1]?.kind === 'flat_rgb', 'set_group_raster_state should preserve appearance slots');
+assert(rasterStateVoxel?.materials?.[1] === 'STONE_PALE', 'set_group_raster_state should preserve materials');
 
 const singleGroupDocumentId = `painter_store_single_group_${Date.now()}`;
 save_painter_document_snapshot(slot, {

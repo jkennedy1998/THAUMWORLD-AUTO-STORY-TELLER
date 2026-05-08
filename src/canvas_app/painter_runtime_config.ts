@@ -47,22 +47,32 @@ export const PAINTER_APP_CONFIG = {
   grid_height: 50,
   api_base_url: PAINTER_TRANSPORT.api_base_url,
   bridge_ws_base_url: PAINTER_TRANSPORT.bridge_ws_base_url,
+  multiplayer_transport_kind: PAINTER_TRANSPORT.transport_kind,
+  relay_room_id: null as string | null,
+  relay_attach_token: null as string | null,
   selected_data_slot: resolve_painter_data_slot(),
   reconnect_token_storage_key: resolve_painter_reconnect_token_storage_key(),
 } as const;
 
-export function apply_painter_multiplayer_transport_config(transport: Pick<MultiplayerTransportConfig, 'api_base_url' | 'bridge_ws_base_url'> & { host_input?: string | null }): void {
+export function apply_painter_multiplayer_transport_config(transport: Pick<MultiplayerTransportConfig, 'api_base_url' | 'bridge_ws_base_url' | 'transport_kind' | 'room_id' | 'attach_token'> & { host_input?: string | null }): void {
   (PAINTER_APP_CONFIG as any).api_base_url = String(transport.api_base_url ?? '').trim() || PAINTER_APP_CONFIG.api_base_url;
   (PAINTER_APP_CONFIG as any).bridge_ws_base_url = String(transport.bridge_ws_base_url ?? '').trim() || PAINTER_APP_CONFIG.bridge_ws_base_url;
+  (PAINTER_APP_CONFIG as any).multiplayer_transport_kind = transport.transport_kind ?? (PAINTER_APP_CONFIG as any).multiplayer_transport_kind ?? PAINTER_TRANSPORT.transport_kind;
+  if (transport.room_id !== undefined) (PAINTER_APP_CONFIG as any).relay_room_id = String(transport.room_id ?? '').trim() || null;
+  if (transport.attach_token !== undefined) (PAINTER_APP_CONFIG as any).relay_attach_token = String(transport.attach_token ?? '').trim() || null;
   console.log('[PAINTER_RUNTIME_CONFIG]', JSON.stringify({
     event: 'apply_transport',
     boot_role: String((window as Window).electronAPI?.bootRole ?? '').trim().toLowerCase() || null,
     host_input: String(transport.host_input ?? '').trim() || null,
+    transport_kind: (PAINTER_APP_CONFIG as any).multiplayer_transport_kind,
+    room_id: (PAINTER_APP_CONFIG as any).relay_room_id,
     api_base_url: (PAINTER_APP_CONFIG as any).api_base_url,
     bridge_ws_base_url: (PAINTER_APP_CONFIG as any).bridge_ws_base_url,
   }));
   try {
     const host_input = String(transport.host_input ?? '').trim();
+    const transport_kind = String(transport.transport_kind ?? '').trim();
+    if (transport_kind === 'relay_ws_tunnel') return;
     if (!host_input || /^local(host)?$/i.test(host_input) || /^127\.0\.0\.1$/i.test(host_input) || /^::1$/i.test(host_input)) return;
     window.localStorage.setItem('thaumworld_manual_join_host', host_input);
   } catch {

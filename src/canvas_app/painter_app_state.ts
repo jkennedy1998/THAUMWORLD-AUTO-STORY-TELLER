@@ -8,9 +8,9 @@
 import type { Canvas, Module, PointerEvent, Rect, Rgb } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import type { Grid, Brush, ToolEditTarget, ToolType, GridCell } from '../ascii_painter/types.js';
-import { createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
+import { clone_appearance_slot_assignments, createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
 import { createHistoryManager, logCellAction, logGroupAction, clearHistory, canUndoGroup, canRedoGroup, getGroupHistoryState, popRedoGroupAction, popUndoGroupAction, type HistoryAction, type HistoryManager } from '../ascii_painter/history.js';
-import { get_color_by_name } from '../mono_ui/colors.js';
+import { get_color_by_name, nearest_indexed_lerp_rgb } from '../mono_ui/colors.js';
 import type { SelectionMode } from '../ascii_painter/selection.js';
 import { clearSelection, createSelectionBitmap, invertSelection, isSelected, selectAll, setSelected, type SelectionBitmap } from '../ascii_painter/selection.js';
 import { make_painter_canvas_module, type PainterInteractionAnchor } from '../mono_ui/modules/painter_canvas_module.js';
@@ -78,7 +78,7 @@ import {
 } from '../ascii_painter/voxel_space.js';
 import { makeGroupsModule, resolve_groups_timeline_visible_span, type GroupListItem } from '../mono_ui/modules/groups_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
-import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, type PainterDocument } from '../ascii_painter/painter_document.js';
+import { clone_painter_voxel_record, create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, type PainterDocument, type PainterVoxelRecord } from '../ascii_painter/painter_document.js';
 import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_raster_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_move_block, resolve_nearest_painter_group_raster_state, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
 import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_authored_breath_bounds, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
 import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
@@ -315,7 +315,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   if (is_tai_fresh_state_enabled()) {
     clearAutoSave();
     clearToolProperties();
-    resetPainterCameraConfig();
+    void reset_camera_settings(PAINTER_APP_CONFIG.selected_data_slot, 'thaum_painter', active_profile_scope).catch(() => null);
     clearModulePositions();
     try {
       window.localStorage.removeItem('thaumworld_ascii_painter_last_file_path');
@@ -710,8 +710,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     split_breath?: number;
     length_breaths?: number;
     breath?: number;
-    voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
-    value?: { kind: 'raster'; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> } | { kind: 'vec3'; x: number; y: number; z: number } | { kind: 'scalar'; value: number };
+    voxels?: PainterVoxelRecord[];
+    value?: { kind: 'raster'; voxels: PainterVoxelRecord[] } | { kind: 'vec3'; x: number; y: number; z: number } | { kind: 'scalar'; value: number };
     target_breath?: number;
     edge?: 'start' | 'end';
     direction?: 'left' | 'right';
@@ -761,11 +761,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         x: change.worldX,
         y: change.worldY,
         z: change.worldZ,
-        cell: {
-          char: change.newCell.char,
-          rgb: { ...change.newCell.rgb },
-          weight_index: change.newCell.weight_index,
-        },
+        cell: make_history_cell_from_runtime_record(change.newCell),
       }))).catch((error) => {
         diag_log('painter', 'important', 'PAINTER', 'failed to submit active-group clear command', {
           error: error instanceof Error ? error.message : String(error),
@@ -1000,12 +996,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     };
   }
 
-  function make_history_cell_from_runtime_record(record: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } | null | undefined): { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } {
-    if (!record) return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+  function make_history_cell_from_runtime_record(record: GridCell | null | undefined): GridCell {
+    if (!record) return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
     return {
       char: record.char,
+      graphic: record.graphic ? { ...record.graphic } : undefined,
+      appearance_slots: clone_appearance_slot_assignments(record.appearance_slots),
+      materials: record.materials ? { ...record.materials } : undefined,
       rgb: { ...record.rgb },
       weight_index: record.weight_index,
+      render_index: record.render_index,
     };
   }
 
@@ -1013,7 +1013,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     worldX: number;
     worldY: number;
     worldZ: number;
-    newCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+    newCell: GridCell;
   }>, options?: { log_history?: boolean }): boolean {
     const active_group_id = resolve_current_runtime_group_id();
     if (!active_group_id) {
@@ -1130,7 +1130,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const groupIndex = painter_document_runtime.group_voxel_index.get(active_group_id);
     if (!groupIndex) return null;
     const active_group_selection = get_active_group_selection();
-    const points: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }> = [];
+    const points: Array<{ x: number; y: number; z: number; cell: GridCell }> = [];
     for (const key of active_group_selection.cells) {
       const point = parse_world_cell_key(key);
       const coordKey = `${point.x}:${point.y}:${point.z}`;
@@ -1140,11 +1140,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         x: point.x,
         y: point.y,
         z: point.z,
-        cell: {
-          char: record.char,
-          rgb: { ...record.rgb },
-          weight_index: record.weight_index,
-        },
+        cell: make_history_cell_from_runtime_record(record),
       });
     }
     if (points.length < 1) return null;
@@ -1164,22 +1160,18 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         dx: point.x - anchor.x,
         dy: point.y - anchor.y,
         dz: point.z - anchor.z,
-        cell: {
-          char: point.cell.char,
-          rgb: { ...point.cell.rgb },
-          weight_index: point.cell.weight_index,
-        },
+        cell: make_history_cell_from_runtime_record(point.cell),
       })),
     };
   }
 
-  function get_active_group_selected_world_voxels(): Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }> {
+  function get_active_group_selected_world_voxels(): Array<{ x: number; y: number; z: number; cell: GridCell }> {
     const active_group_id = resolve_current_runtime_group_id();
     if (!active_group_id) return [];
     const groupIndex = painter_document_runtime.group_voxel_index.get(active_group_id);
     if (!groupIndex) return [];
     const selection = get_active_group_selection();
-    const out: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }> = [];
+    const out: Array<{ x: number; y: number; z: number; cell: GridCell }> = [];
     for (const key of selection.cells) {
       const point = parse_world_cell_key(key);
       const record = groupIndex.get(`${point.x}:${point.y}:${point.z}`);
@@ -1188,7 +1180,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         x: point.x,
         y: point.y,
         z: point.z,
-        cell: { char: record.char, rgb: { ...record.rgb }, weight_index: record.weight_index },
+        cell: make_history_cell_from_runtime_record(record),
       });
     }
     return out;
@@ -1439,15 +1431,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       kind: 'set_group_raster_state',
       group_id,
       breath: painter_current_breath,
-      voxels: resolved.content.map((voxel) => ({
-        key: voxel.key,
-        x: voxel.x,
-        y: voxel.y,
-        z: voxel.z,
-        char: voxel.char,
-        rgb: { ...voxel.rgb },
-        weight_index: voxel.weight_index,
-      })),
+      voxels: resolved.content.map(clone_painter_voxel_record),
     });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
@@ -1462,15 +1446,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       kind: 'set_group_raster_state',
       group_id,
       breath: painter_current_breath,
-      voxels: resolved.content.map((voxel) => ({
-        key: voxel.key,
-        x: voxel.x,
-        y: voxel.y,
-        z: voxel.z,
-        char: voxel.char,
-        rgb: { ...voxel.rgb },
-        weight_index: voxel.weight_index,
-      })),
+      voxels: resolved.content.map(clone_painter_voxel_record),
     });
     painterDiag('ensured editable content state for group', {
       group_id,
@@ -3030,6 +3006,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         y: change.worldY,
         z: change.worldZ,
         char: change.newCell.char,
+        graphic: change.newCell.graphic ? { ...change.newCell.graphic } : undefined,
+        appearance_slots: clone_appearance_slot_assignments(change.newCell.appearance_slots),
+        materials: change.newCell.materials ? { ...change.newCell.materials } : undefined,
         rgb: { ...change.newCell.rgb },
         weight_index: change.newCell.weight_index,
       });
@@ -3404,11 +3383,21 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   const left_brush: Brush = {
     char: saved_tool_props.left_brush_char ?? '█',
+    graphic: saved_tool_props.left_brush_graphic
+      ? { ...saved_tool_props.left_brush_graphic, weight_index: (saved_tool_props.left_brush_weight_index ?? 1) as 0 | 1 | 2 | 3 }
+      : undefined,
+    appearance_slots: clone_appearance_slot_assignments(saved_tool_props.left_brush_appearance_slots),
+    materials: saved_tool_props.left_brush_materials ? { ...saved_tool_props.left_brush_materials } : undefined,
     rgb: { ...saved_tool_props.left_brush_rgb },
     weight_index: saved_tool_props.left_brush_weight_index ?? 1,
   };
   const right_brush: Brush = {
     char: saved_tool_props.right_brush_char ?? '█',
+    graphic: saved_tool_props.right_brush_graphic
+      ? { ...saved_tool_props.right_brush_graphic, weight_index: (saved_tool_props.right_brush_weight_index ?? 1) as 0 | 1 | 2 | 3 }
+      : undefined,
+    appearance_slots: clone_appearance_slot_assignments(saved_tool_props.right_brush_appearance_slots),
+    materials: saved_tool_props.right_brush_materials ? { ...saved_tool_props.right_brush_materials } : undefined,
     rgb: { ...saved_tool_props.right_brush_rgb },
     weight_index: saved_tool_props.right_brush_weight_index ?? 1,
   };
@@ -3432,6 +3421,30 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function getBrushForSide(side: 'left' | 'right'): Brush {
     return side === 'right' ? right_brush : left_brush;
+  }
+
+  function syncBrushGraphicWeight(brush: Brush): void {
+    if (brush.graphic) brush.graphic = { ...brush.graphic, weight_index: brush.weight_index as 0 | 1 | 2 | 3 };
+  }
+
+  function applyBrushColor(brush: Brush, rgb: Rgb): void {
+    brush.rgb = { ...rgb };
+    if (brush.graphic) {
+      brush.appearance_slots = {
+        ...(brush.appearance_slots ?? {}),
+        1: { kind: 'flat_rgb', rgb: { ...rgb } },
+      };
+    }
+  }
+
+  function makeBrushAppearanceSlotsFromHands(): NonNullable<Brush['appearance_slots']> {
+    const left = { ...left_brush.rgb };
+    const right = { ...right_brush.rgb };
+    return {
+      1: { kind: 'flat_rgb', rgb: left },
+      2: { kind: 'flat_rgb', rgb: right },
+      3: { kind: 'flat_rgb', rgb: nearest_indexed_lerp_rgb(left, right, 0.5) },
+    };
   }
 
   function getBrushForButton(button: number): Brush {
@@ -3514,6 +3527,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       saveToolProperties({
         left_brush_char: brush.char,
         left_brush_rgb: { ...brush.rgb },
+        left_brush_graphic: brush.graphic ? { ...brush.graphic } : undefined,
+        left_brush_appearance_slots: clone_appearance_slot_assignments(brush.appearance_slots),
+        left_brush_materials: brush.materials ? { ...brush.materials } : undefined,
         left_brush_weight_index: brush.weight_index,
         left_brush_size,
         brush_size: left_brush_size,
@@ -3524,6 +3540,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     saveToolProperties({
       right_brush_char: brush.char,
       right_brush_rgb: { ...brush.rgb },
+      right_brush_graphic: brush.graphic ? { ...brush.graphic } : undefined,
+      right_brush_appearance_slots: clone_appearance_slot_assignments(brush.appearance_slots),
+      right_brush_materials: brush.materials ? { ...brush.materials } : undefined,
       right_brush_weight_index: brush.weight_index,
       right_brush_size,
       active_property_side: side,
@@ -3588,7 +3607,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     worldX: number;
     worldY: number;
     worldZ: number;
-    newCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+    newCell: GridCell;
   }> = [];
 
   function rememberLastUsedFilePath(filePath: string | null | undefined): void {
@@ -3866,22 +3885,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function cloneGridCellForPreview(cell: GridCell): GridCell {
-    return {
-      char: cell.char,
-      rgb: { ...cell.rgb },
-      weight_index: cell.weight_index,
-    };
+    return make_history_cell_from_runtime_record(cell);
   }
 
   function makeResolvedPreviewCell(winner: ReturnType<typeof resolve_painter_group_preview_winner>): GridCell {
     if (!winner.cell) {
-      return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+      return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
     }
-    return {
-      char: winner.cell.char,
-      rgb: { ...winner.cell.rgb },
-      weight_index: winner.cell.weight_index,
-    };
+    return make_history_cell_from_runtime_record(winner.cell);
   }
 
   function getPainterRenderScene(): PainterProjectedScene {
@@ -4383,7 +4394,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       worldX: number;
       worldY: number;
       worldZ: number;
-      newCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+      newCell: GridCell;
     }>;
     anchor_world: { x: number; y: number; z: number } | null;
     plane: number | null;
@@ -4392,11 +4403,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       worldX: change.worldX,
       worldY: change.worldY,
       worldZ: change.worldZ,
-      newCell: {
-        char: change.newCell.char,
-        rgb: { ...change.newCell.rgb },
-        weight_index: change.newCell.weight_index,
-      },
+      newCell: make_history_cell_from_runtime_record(change.newCell),
     }));
     const normalizedAnchor = args.anchor_world ? normalizePainterWorldTarget(args.anchor_world) : null;
     const painterView = getPainterCanvasViewInstance();
@@ -4448,24 +4455,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     get_world_cell: (world) => {
       const coordKey = `${Math.floor(world.x)}:${Math.floor(world.y)}:${Math.floor(world.z)}`;
       const resolved = painter_document_runtime.resolved_visible_index.get(coordKey) ?? null;
-      if (!resolved) return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
-      return {
-        char: resolved.cell.char,
-        rgb: { ...resolved.cell.rgb },
-        weight_index: resolved.cell.weight_index,
-      };
+      if (!resolved) return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+      return make_history_cell_from_runtime_record(resolved.cell);
     },
     get_active_group_world_cell: (world) => {
       const group_id = resolve_current_runtime_group_id();
-      if (!group_id) return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+      if (!group_id) return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
       const coordKey = `${Math.floor(world.x)}:${Math.floor(world.y)}:${Math.floor(world.z)}`;
       const record = painter_document_runtime.group_voxel_index.get(group_id)?.get(coordKey) ?? null;
-      if (!record) return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
-      return {
-        char: record.char,
-        rgb: { ...record.rgb },
-        weight_index: record.weight_index,
-      };
+      if (!record) return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+      return make_history_cell_from_runtime_record(record);
     },
     get_active_group_world_voxels: () => {
       const group_id = resolve_current_runtime_group_id();
@@ -4476,11 +4475,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         x: record.x,
         y: record.y,
         z: record.z,
-        cell: {
-          char: record.char,
-          rgb: { ...record.rgb },
-          weight_index: record.weight_index,
-        },
+        cell: make_history_cell_from_runtime_record(record),
       }));
     },
     get_active_group_world_bounds: () => get_active_group_world_bounds(),
@@ -4567,11 +4562,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           worldX: change.worldX,
           worldY: change.worldY,
           worldZ: change.worldZ,
-          newCell: {
-            char: change.newCell.char,
-            rgb: { ...change.newCell.rgb },
-            weight_index: change.newCell.weight_index,
-          },
+          newCell: make_history_cell_from_runtime_record(change.newCell),
         })),
         anchor_world,
         plane,
@@ -4582,11 +4573,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         worldX: change.worldX,
         worldY: change.worldY,
         worldZ: change.worldZ,
-        newCell: {
-          char: change.newCell.char,
-          rgb: { ...change.newCell.rgb },
-          weight_index: change.newCell.weight_index,
-        },
+        newCell: make_history_cell_from_runtime_record(change.newCell),
       })));
       if (applied_locally) {
         refreshPainterProjectionPreservingCurrentTarget();
@@ -4598,11 +4585,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         x: change.worldX,
         y: change.worldY,
         z: change.worldZ,
-        cell: {
-          char: change.newCell.char,
-          rgb: { ...change.newCell.rgb },
-          weight_index: change.newCell.weight_index,
-        },
+        cell: make_history_cell_from_runtime_record(change.newCell),
       }))).catch((error) => {
         diag_log('painter', 'important', 'PAINTER', 'failed to submit painter cell changes', {
           error: error instanceof Error ? error.message : String(error),
@@ -4619,9 +4602,23 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       const brush = getBrushForSide(target_side);
 
       const channels = resolve_edit_channels_with_modifiers(getEditChannelsForSide(clicked_side), sample);
-      if (channels.char) brush.char = cell.char;
-      if (channels.color) brush.rgb = { ...cell.rgb };
-      if (channels.weight) brush.weight_index = cell.weight_index;
+      if (channels.char) {
+        brush.char = cell.char;
+        brush.graphic = cell.graphic ? { ...cell.graphic } : undefined;
+        brush.materials = cell.materials ? { ...cell.materials } : undefined;
+        brush.appearance_slots = clone_appearance_slot_assignments(cell.appearance_slots);
+      }
+      if (channels.color) {
+        brush.rgb = { ...cell.rgb };
+        if (!channels.char) {
+          brush.materials = cell.materials ? { ...cell.materials } : brush.materials;
+          brush.appearance_slots = clone_appearance_slot_assignments(cell.appearance_slots) ?? brush.appearance_slots;
+        }
+      }
+      if (channels.weight) {
+        brush.weight_index = cell.weight_index;
+        if (brush.graphic) brush.graphic = { ...brush.graphic, weight_index: cell.weight_index as 0 | 1 | 2 | 3 };
+      }
 
       saveBrushState(target_side);
     },
@@ -4979,7 +4976,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       }
       if (helper === 'clear_painter_cells') {
         const cells = Array.isArray((payload as any)?.cells) ? (payload as any).cells : [];
-        const authored_changes: Array<{ worldX: number; worldY: number; worldZ: number; newCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } }> = [];
+        const authored_changes: Array<{ worldX: number; worldY: number; worldZ: number; newCell: GridCell }> = [];
         for (const cell of cells) {
           const x = Math.floor(Number(cell?.x));
           const y = Math.floor(Number(cell?.y));
@@ -5141,12 +5138,56 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       id: 'char_selector',
       rect: char_selector_rect,
       get_selected_char: () => getPreviewBrush().char,
+      get_selected_visual_key: () => getPreviewBrush().graphic ? `graphic:${getPreviewBrush().graphic!.graphic_id}` : `char:${getPreviewBrush().char}`,
       get_left_selected_char: () => left_brush.char,
       get_right_selected_char: () => right_brush.char,
+      get_left_selected_visual_key: () => left_brush.graphic ? `graphic:${left_brush.graphic.graphic_id}` : `char:${left_brush.char}`,
+      get_right_selected_visual_key: () => right_brush.graphic ? `graphic:${right_brush.graphic.graphic_id}` : `char:${right_brush.char}`,
       get_left_rgb: () => left_brush.rgb,
       get_right_rgb: () => right_brush.rgb,
       get_left_weight_index: () => left_brush.weight_index,
       get_right_weight_index: () => right_brush.weight_index,
+      get_gradiator_state: () => gradiator_state,
+      on_gradiator_slot_select: (slot) => {
+        setActiveGradiatorSlot(gradiator_state, slot);
+        saveGradiatorState(gradiator_state);
+        painterDiag('selected gradiator slot from visual picker', { slot });
+      },
+      on_gradiator_char_select: (slot, x) => {
+        selectGradiatorChar(gradiator_state, slot, x);
+        painterDiag('selected gradiator char position from visual picker', { slot, x });
+      },
+      on_gradiator_add_char: (slot) => {
+        addGradiatorChar(gradiator_state, slot);
+        saveGradiatorState(gradiator_state);
+        painterDiag('added gradiator char from visual picker', { slot });
+      },
+      on_gradiator_remove_char: (slot) => {
+        removeGradiatorChar(gradiator_state, slot);
+        saveGradiatorState(gradiator_state);
+        painterDiag('removed gradiator char from visual picker', { slot });
+      },
+      on_visual_select: (visual, button) => {
+        active_property_side = button === 2 ? 'right' : 'left';
+        const brush = getBrushForButton(button);
+        const current_weight = brush.weight_index;
+        const seededAppearanceSlots = makeBrushAppearanceSlotsFromHands();
+        brush.char = visual.char;
+        brush.graphic = visual.graphic
+          ? { ...visual.graphic, weight_index: current_weight as 0 | 1 | 2 | 3 }
+          : undefined;
+        brush.materials = undefined;
+        brush.appearance_slots = visual.graphic ? seededAppearanceSlots : clone_appearance_slot_assignments(visual.appearance_slots);
+        if (visual.graphic) {
+          brush.rgb = active_property_side === 'right' ? { ...right_brush.rgb } : { ...left_brush.rgb };
+          brush.weight_index = current_weight;
+        } else {
+          applyBrushColor(brush, visual.rgb);
+        }
+        syncBrushGraphicWeight(brush);
+        saveBrushState(active_property_side);
+        painterDiag('selected visual', { key: visual.key, graphic_id: visual.graphic?.graphic_id ?? null, char: visual.char, seeded_from_hands: !!visual.graphic, preserved_weight: current_weight });
+      },
       on_char_select: (char, button) => {
         // Check if we're editing a gradiator
         if (gradiator_state.isEditing && gradiator_state.editSlot !== null) {
@@ -5157,7 +5198,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         } else {
           // Normal brush character selection
           active_property_side = button === 2 ? 'right' : 'left';
-          getBrushForButton(button).char = char;
+          const brush = getBrushForButton(button);
+          brush.char = char;
+          brush.graphic = undefined;
+          brush.materials = undefined;
+          brush.appearance_slots = undefined;
           saveBrushState(active_property_side);
           painterDiag('selected character', { char });
         }
@@ -5236,7 +5281,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       get_right_rgb: () => right_brush.rgb,
       on_color_commit: (side, rgb) => {
         active_property_side = side;
-        getBrushForSide(side).rgb = { ...rgb };
+        applyBrushColor(getBrushForSide(side), rgb);
         saveBrushState(side);
         painterDiag('selected color from color block', { side, rgb });
       },
@@ -5444,7 +5489,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         show_value_label: false,
         on_change: (value, side) => {
           active_property_side = side;
-          getBrushForSide(side).weight_index = value;
+          const brush = getBrushForSide(side);
+          brush.weight_index = value;
+          syncBrushGraphicWeight(brush);
           saveBrushState(side);
         },
       });
@@ -5794,32 +5841,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         // We'll set a flag that the color selector will check
         (globalThis as any).__selecting_ignore_color = true;
         painterImportant('select a color from the color selector to ignore');
-      },
-      get_gradiator_state: () => gradiator_state,
-      on_gradiator_slot_select: (slot) => {
-        setActiveGradiatorSlot(gradiator_state, slot);
-        saveGradiatorState(gradiator_state);
-        painterDiag('selected gradiator slot', { slot });
-      },
-      on_gradiator_char_select: (slot, x) => {
-        selectGradiatorChar(gradiator_state, slot, x);
-        // Don't save on selection, only on actual changes
-        painterDiag('selected gradiator char position', { slot, x });
-      },
-      on_gradiator_add_char: (slot) => {
-        addGradiatorChar(gradiator_state, slot);
-        saveGradiatorState(gradiator_state);
-        painterDiag('added gradiator char', { slot });
-      },
-      on_gradiator_remove_char: (slot) => {
-        removeGradiatorChar(gradiator_state, slot);
-        saveGradiatorState(gradiator_state);
-        painterDiag('removed gradiator char', { slot });
-      },
-      on_gradiator_char_set: (slot, x, char) => {
-        setGradiatorChar(gradiator_state, slot, x, char);
-        saveGradiatorState(gradiator_state);
-        painterDiag('set gradiator char', { slot, x, char });
       },
       on_selection_clear: () => {
         (canvas_module as any).clearSelection?.();
@@ -6662,6 +6683,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       join_target_id: 'join_target_id' in intent ? intent.join_target_id : null,
       api_base_url: 'api_base_url' in intent ? intent.api_base_url ?? null : null,
       bridge_ws_base_url: 'bridge_ws_base_url' in intent ? intent.bridge_ws_base_url ?? null : null,
+      transport_kind: 'transport_kind' in intent ? intent.transport_kind ?? null : null,
+      room_id: 'relay_room_id' in intent ? intent.relay_room_id ?? null : null,
     }));
     const previousSuppress = suppress_recent_file_persistence;
     suppress_recent_file_persistence = intent.persist_recent === false;
@@ -6670,8 +6693,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         painter_sync.set_expect_local_host_boot(false);
         if (intent.api_base_url && intent.bridge_ws_base_url) {
           apply_painter_multiplayer_transport_config({
+            transport_kind: intent.transport_kind ?? 'direct_http_ws',
             api_base_url: intent.api_base_url,
             bridge_ws_base_url: intent.bridge_ws_base_url,
+            room_id: intent.relay_room_id ?? undefined,
+            attach_token: intent.relay_attach_token ?? undefined,
           });
         }
         current_session_role = 'participant';
@@ -6696,8 +6722,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       painter_sync.set_expect_local_host_boot(true);
       apply_painter_multiplayer_transport_config({
         host_input: 'local',
+        transport_kind: DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.transport_kind,
         api_base_url: DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.api_base_url,
         bridge_ws_base_url: DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.bridge_ws_base_url,
+        room_id: undefined,
+        attach_token: undefined,
       });
       const sync_state = await painter_sync.bootstrap(true);
       painterImportant('launch intent bootstrapped multiplayer state', {

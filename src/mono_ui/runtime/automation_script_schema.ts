@@ -1,4 +1,4 @@
-import type { ToolAssistedInputsScript } from './automation_interfaces.js';
+import type { ToolAssistedInputsScript, ToolAssistedInputsTimingProfile } from './automation_interfaces.js';
 import type { AutomationClockMode } from './automation_clock_types.js';
 
 export function parse_tool_assisted_inputs_script(raw: string): ToolAssistedInputsScript {
@@ -6,6 +6,10 @@ export function parse_tool_assisted_inputs_script(raw: string): ToolAssistedInpu
   if (!data || typeof data !== 'object') throw new Error('tool_assisted_inputs_invalid_script');
   if (!Array.isArray(data.actions)) throw new Error('tool_assisted_inputs_actions_missing');
   const clock_mode: AutomationClockMode = String((data as any).clock_mode ?? '').trim() === 'realtime_ms' ? 'realtime_ms' : 'breath';
+  const timing_profile_raw = String((data as any).timing_profile ?? '').trim().toLowerCase();
+  const timing_profile: ToolAssistedInputsTimingProfile | undefined = timing_profile_raw === 'fast' || timing_profile_raw === 'slow_debug' || timing_profile_raw === 'human'
+    ? timing_profile_raw
+    : undefined;
   const start_delay_ms = Math.max(0, Math.floor(Number(data.start_delay_ms) || 0));
   const end_delay_ms = Math.max(0, Math.floor(Number((data as any).end_delay_ms) || 0));
   if (typeof (data as any).end_delay_ms !== 'number') throw new Error('tool_assisted_inputs_missing_end_delay_ms');
@@ -42,12 +46,14 @@ export function parse_tool_assisted_inputs_script(raw: string): ToolAssistedInpu
       if (!source) throw new Error(`tool_assisted_inputs_missing_text_source:${index}`);
       return { at_breath, type, slot, source, field } as const;
     }
-    if (type === 'assert_text_value_literal') {
+    if (type === 'assert_text_value_literal' || type === 'wait_for_text_value_literal') {
       const source = String(action?.source ?? '').trim();
       const field = typeof action?.field === 'string' && action.field.trim().length > 0 ? action.field.trim() : undefined;
       const value = typeof action?.value === 'string' ? action.value : '';
+      const timeout_ms = type === 'wait_for_text_value_literal' && Number.isFinite(Number(action?.timeout_ms)) ? Math.max(0, Math.floor(Number(action.timeout_ms))) : undefined;
+      const poll_ms = type === 'wait_for_text_value_literal' && Number.isFinite(Number(action?.poll_ms)) ? Math.max(10, Math.floor(Number(action.poll_ms))) : undefined;
       if (!source) throw new Error(`tool_assisted_inputs_missing_text_source:${index}`);
-      return { at_breath, type, source, field, value } as const;
+      return { at_breath, type, source, field, value, timeout_ms, poll_ms } as const;
     }
     if (type === 'assert_painter_anchor_in_bounds') {
       const anchor_slot = typeof action?.anchor_slot === 'string' && action.anchor_slot.trim().length > 0 ? action.anchor_slot.trim() : undefined;
@@ -180,6 +186,7 @@ export function parse_tool_assisted_inputs_script(raw: string): ToolAssistedInpu
     description: typeof data.description === 'string' ? data.description.trim() || undefined : undefined,
     start_delay_ms,
     end_delay_ms,
+    timing_profile,
     stop_on_error: data.stop_on_error !== false,
     boot: data.boot && typeof data.boot === 'object' ? {
       auto_connect: data.boot.auto_connect !== false,

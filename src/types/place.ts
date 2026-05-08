@@ -12,7 +12,7 @@ import type { TagInstance } from "../tag_system/registry.js";
 import type { BodyModelVoxel } from "../shared/body_model.js";
 import type { PlaceCharacterPresenceBase } from "../shared/character_storage.js";
 import type { EntityRenderProfile, RenderShaderBindings } from "../render_shaders/definitions.js";
-import type { GraphicsModel, GroupRenderContext, InlineMaterialAssignments, MaterialOptionsBySlot, ViewDirection } from "../render_shaders/graphics_contract.js";
+import type { AppearanceSlotAssignments, GraphicsModel, GroupRenderContext, InlineMaterialAssignments, MaterialOptionsBySlot, ViewDirection } from "../render_shaders/graphics_contract.js";
 import type { Bounds3, Point2, Size3, Voxel3, WorldVoxel } from "../shared/coords.js";
 
 /**
@@ -97,6 +97,7 @@ export type PlaceStructureInstance = {
 
   // Optional arbitrary instance state (open/closed, growth stage, etc.).
   state?: Record<string, unknown>;
+  appearance_slots?: AppearanceSlotAssignments;
   materials?: InlineMaterialAssignments;
   part_role?: string;
   main_tile?: { x: number; y: number; z?: number };
@@ -147,6 +148,7 @@ export type PlaceTile = {
   render_shader?: RenderShaderBindings;
   graphics?: GraphicsModel;
   material_options?: MaterialOptionsBySlot;
+  appearance_slots?: AppearanceSlotAssignments;
   materials?: InlineMaterialAssignments;
   state?: Record<string, unknown>;
   facing?: ViewDirection | string;

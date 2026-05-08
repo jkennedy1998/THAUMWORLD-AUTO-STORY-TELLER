@@ -62,6 +62,9 @@ export function resolve_render(payload: DiscriminatedRenderPayload, ctx: RenderC
                 weight_index: effective.weight,
             };
         }
+        if (!layer.appearance_slots || Object.keys(layer.appearance_slots).length <= 0) {
+            layer.appearance_slots = effective.appearance_slots;
+        }
         if (!layer.materials || Object.keys(layer.materials).length <= 0) {
             layer.materials = effective.material_slots;
         }

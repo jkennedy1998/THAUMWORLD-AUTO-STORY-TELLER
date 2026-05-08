@@ -67,6 +67,9 @@ export function importFromText(text: string): Grid {
       const char = line[x] || ' ';
       row[x] = {
         char,
+        graphic: undefined,
+        appearance_slots: undefined,
+        materials: undefined,
         rgb: { r: 255, g: 255, b: 255 },
         weight_index: 2
       };

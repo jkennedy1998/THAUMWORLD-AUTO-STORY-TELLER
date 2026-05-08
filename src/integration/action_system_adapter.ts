@@ -206,7 +206,10 @@ export function createPipelineDependencies(): PipelineDependencies {
     // Get whose turn it is
     getCurrentActor: () => {
       const state = get_timed_event_state(data_slot_number);
-      return (state as any)?.current_actor || (state as any)?.current_turn || null;
+      if ((state as any)?.current_actor) return (state as any).current_actor;
+      const activeIndex = typeof state?.active_actor_index === "number" ? state.active_actor_index : null;
+      if (activeIndex === null) return null;
+      return state?.initiative_order?.[activeIndex]?.actor_ref ?? null;
     },
     
     // Logging

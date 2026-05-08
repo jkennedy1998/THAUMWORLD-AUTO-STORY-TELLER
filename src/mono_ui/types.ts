@@ -1,6 +1,6 @@
 // mono_ui core types (pure, no DOM / no Node)
 
-import type { ViewDirection } from "../render_shaders/graphics_contract.js";
+import type { AppearanceSlotAssignments, ViewDirection } from "../render_shaders/graphics_contract.js";
 
 export type Rgb = {
     r: number; // 0-255
@@ -24,6 +24,9 @@ export type Cell = {
         variant?: string;
         frame?: string;
     };
+
+    // Optional canonical per-cell appearance slot assignments.
+    appearance_slots?: AppearanceSlotAssignments;
 
     // Optional active material assignment slots for atlas rendering.
     materials?: Partial<Record<1 | 2 | 3, string>>;

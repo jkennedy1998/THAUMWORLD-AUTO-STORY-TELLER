@@ -113,6 +113,7 @@ import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/contr
 import { create_profile_scope, type ProfileScope } from '../user_profiles/profile_scope.js';
 import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
 import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT, build_api_url, type MultiplayerTransportConfig } from '../shared/multiplayer_transport.js';
+import { make_request_id } from '../shared/request_id.js';
 import { forget_manual_connection, mark_connection_connected, rename_manual_connection, save_manual_connection } from '../engine_multiplayer/connection_store.js';
 import type { EngineJoinSelection } from '../engine_multiplayer/connection_types.js';
 import type { TaiJoinRequest } from '../engine_launch/join_menu_types.js';
@@ -157,6 +158,9 @@ function apply_multiplayer_transport_config(transport: MultiplayerTransportConfi
     const api_base_url = transport.api_base_url.replace(/\/+$/, '');
     (APP_CONFIG as any).api_base_url = api_base_url;
     (APP_CONFIG as any).bridge_ws_base_url = transport.bridge_ws_base_url;
+    (APP_CONFIG as any).multiplayer_transport_kind = transport.transport_kind;
+    (APP_CONFIG as any).relay_room_id = transport.room_id ?? null;
+    (APP_CONFIG as any).relay_attach_token = transport.attach_token ?? null;
     (APP_CONFIG as any).action_input_endpoint = build_api_url(api_base_url, '/input');
     (APP_CONFIG as any).action_log_endpoint = build_api_url(api_base_url, '/log');
     (APP_CONFIG as any).action_status_endpoint = build_api_url(api_base_url, '/status');
@@ -294,6 +298,8 @@ export function create_app_state(): AppState {
     function resolve_tai_join_request(): TaiJoinRequest | null {
         if (!tai_boot_config?.enabled) return null;
         const preferred_host = String(tai_boot_config.joinPreferredHost ?? '').trim() || null;
+        const preferred_remote_join_code = String(tai_boot_config.joinCode ?? '').trim() || null;
+        const preferred_remote_relay_origin = String(tai_boot_config.joinRelayOrigin ?? (window as Window).electronAPI?.startupJoinConfig?.remoteRelayOrigin ?? '').trim() || null;
         if (preferred_host) {
             try {
                 save_manual_connection(preferred_host, preferred_host);
@@ -301,10 +307,14 @@ export function create_app_state(): AppState {
                 // ignore invalid host bootstrap input here; join flow will report it
             }
         }
+        const preferred_connection_kind = (String(tai_boot_config.joinPreferredConnectionKind ?? '').trim()
+            || (preferred_remote_join_code ? 'remote_join_code' : (preferred_host ? 'saved_manual' : 'local'))) as TaiJoinRequest['preferred_connection_kind'];
         return {
             preferred_connection_id: String(tai_boot_config.joinPreferredConnectionId ?? '').trim() || null,
-            preferred_connection_kind: (String(tai_boot_config.joinPreferredConnectionKind ?? '').trim() || (preferred_host ? 'saved_manual' : 'local')) as TaiJoinRequest['preferred_connection_kind'],
+            preferred_connection_kind,
             preferred_host,
+            preferred_remote_join_code,
+            preferred_remote_relay_origin,
             auto_join: tai_boot_config.joinAutoJoin !== false,
         };
     }
@@ -343,19 +353,25 @@ export function create_app_state(): AppState {
             if (multiplayer_session_bootstrap_promise) return multiplayer_session_bootstrap_promise;
         }
         const reconnect_token = get_or_create_reconnect_token();
+        const connect_request_id = make_request_id('join_connect');
+        const ws_attach_request_id = make_request_id('join_ws_attach');
         console.log('[JOIN_CONNECT]', JSON.stringify({
             event: 'connect_started',
             slot: APP_CONFIG.selected_data_slot,
             force,
+            method: String((APP_CONFIG as any).multiplayer_transport_kind ?? 'direct_http_ws'),
+            room_id: String((APP_CONFIG as any).relay_room_id ?? '').trim() || null,
             api_base_url: APP_CONFIG.api_base_url,
             bridge_ws_base_url: APP_CONFIG.bridge_ws_base_url,
             join_target_id: (APP_CONFIG as any).join_target_id ?? null,
             join_target_label: (APP_CONFIG as any).join_target_label ?? null,
             reconnect_token_present: Boolean(reconnect_token),
+            request_id: connect_request_id,
+            ws_request_id: ws_attach_request_id,
         }));
         multiplayer_session_bootstrap_promise = fetch(build_api_url(APP_CONFIG.api_base_url, '/connect'), {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', 'x-join-request-id': connect_request_id },
             body: JSON.stringify({
                 slot: APP_CONFIG.selected_data_slot,
                 reconnect_token,
@@ -367,9 +383,12 @@ export function create_app_state(): AppState {
                 console.warn('[JOIN_CONNECT]', JSON.stringify({
                     event: 'connect_failed',
                     slot: APP_CONFIG.selected_data_slot,
+                    method: String((APP_CONFIG as any).multiplayer_transport_kind ?? 'direct_http_ws'),
+                    room_id: String((APP_CONFIG as any).relay_room_id ?? '').trim() || null,
                     status: res.status,
                     api_base_url: APP_CONFIG.api_base_url,
                     error: data?.error ?? null,
+                    request_id: connect_request_id,
                 }));
                 throw new Error(String(data?.error ?? `connect_failed:${res.status}`));
             }
@@ -386,10 +405,15 @@ export function create_app_state(): AppState {
             console.log('[JOIN_CONNECT]', JSON.stringify({
                 event: 'connect_succeeded',
                 slot: APP_CONFIG.selected_data_slot,
+                method: String((APP_CONFIG as any).multiplayer_transport_kind ?? 'direct_http_ws'),
+                room_id: String((APP_CONFIG as any).relay_room_id ?? '').trim() || null,
                 api_base_url: APP_CONFIG.api_base_url,
                 bridge_ws_base_url: APP_CONFIG.bridge_ws_base_url,
+                session_id: String(data?.boot_session_id ?? '').trim() || null,
                 connection_id: String(data?.connection_id ?? '').trim() || null,
                 reconnect_token_reused: next_reconnect_token === reconnect_token,
+                request_id: connect_request_id,
+                ws_request_id: ws_attach_request_id,
             }));
             try {
                 window.localStorage.setItem(reconnect_token_storage_key, next_reconnect_token);
@@ -400,6 +424,9 @@ export function create_app_state(): AppState {
                 baseUrl: APP_CONFIG.bridge_ws_base_url,
                 sessionToken: next_session_token,
                 slot: APP_CONFIG.selected_data_slot,
+                roomId: String((APP_CONFIG as any).relay_room_id ?? '').trim() || null,
+                attachToken: String((APP_CONFIG as any).relay_attach_token ?? '').trim() || null,
+                requestId: ws_attach_request_id,
             });
             void wsClient;
         }).finally(() => {
@@ -438,6 +465,7 @@ export function create_app_state(): AppState {
         const api_base_url = String(entry.api_base_url ?? '').trim() || DEFAULT_APP_TRANSPORT.api_base_url;
         const bridge_ws_base_url = String(entry.bridge_ws_base_url ?? '').trim() || DEFAULT_APP_TRANSPORT.bridge_ws_base_url;
         apply_multiplayer_transport_config({
+            transport_kind: 'direct_http_ws',
             host_input: String(entry.host_origin ?? DEFAULT_APP_TRANSPORT.host_input),
             host_origin: String(entry.host_origin ?? DEFAULT_APP_TRANSPORT.host_origin),
             api_base_url,
@@ -461,11 +489,19 @@ export function create_app_state(): AppState {
             bridge_ws_base_url: selection.transport.bridge_ws_base_url,
         });
         apply_multiplayer_transport_config({
+            transport_kind: selection.transport.transport_kind,
             host_input: selection.connection.host,
-            host_origin: selection.connection.host === 'local' ? DEFAULT_APP_TRANSPORT.host_origin : selection.transport.api_base_url.replace(/\/api\/?$/, ''),
+            host_origin: selection.connection.host === 'local'
+                ? DEFAULT_APP_TRANSPORT.host_origin
+                : (selection.transport.relay_https_origin ?? selection.transport.api_base_url.replace(/\/api\/?$/, '')),
             api_base_url: selection.transport.api_base_url,
             bridge_http_url: DEFAULT_APP_TRANSPORT.bridge_http_url,
             bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+            relay_https_origin: selection.transport.relay_https_origin,
+            relay_wss_origin: selection.transport.relay_wss_origin,
+            room_id: selection.transport.room_id,
+            join_code: selection.transport.join_code,
+            attach_token: selection.transport.attach_token,
         }, {
             join_target_id: selection.connection.id,
             join_target_label: selection.connection.name,
@@ -749,11 +785,11 @@ export function create_app_state(): AppState {
             type: null as string | null,
             phase: null as string | null,
             trigger_kind: null as string | null,
-            current_turn: null as number | null,
             current_round: null as number | null,
+            active_actor_index: null as number | null,
             active_actor_ref: null as string | null,
-            turn_window_breaths: null as number | null,
-            turn_breaths_remaining: null as number | null,
+            world_sim_interstitial_total_breaths: null as number | null,
+            world_sim_interstitial_breaths_remaining: null as number | null,
             timed_event_world_breath_index: null as number | null,
             pending_communication_opportunities: [] as Array<{
                 opportunity_id: string;
@@ -763,7 +799,7 @@ export function create_app_state(): AppState {
                 queue_stable_order: number | null;
                 source_message_id: string;
                 trigger_context: string | null;
-                created_turn: number | null;
+                created_turn_position_in_round: number | null;
                 created_round: number | null;
                 status: string;
             }>,
@@ -2631,7 +2667,7 @@ export function create_app_state(): AppState {
         }
     }
 
-    async function advance_timed_event_turn_for_controlled_actor(): Promise<{ ok: boolean; error?: string; active_actor?: string; new_turn?: number }> {
+    async function advance_timed_event_turn_for_controlled_actor(): Promise<{ ok: boolean; error?: string; active_actor?: string | null; current_round?: number | null; active_actor_index?: number | null; turn_position_in_round?: number | null }> {
         try {
             const actor_ref = get_input_actor_ref();
             const session_token = get_session_token();
@@ -2653,7 +2689,13 @@ export function create_app_state(): AppState {
             if (!res.ok || !data?.ok) {
                 return { ok: false, error: String(data?.error ?? `HTTP ${res.status}`) };
             }
-            return { ok: true, active_actor: data.active_actor, new_turn: data.new_turn };
+            return {
+                ok: true,
+                active_actor: typeof data.active_actor === 'string' ? data.active_actor : null,
+                current_round: typeof data.current_round === 'number' ? data.current_round : null,
+                active_actor_index: typeof data.active_actor_index === 'number' ? data.active_actor_index : null,
+                turn_position_in_round: typeof data.turn_position_in_round === 'number' ? data.turn_position_in_round : null,
+            };
         } catch {
             return { ok: false, error: 'network_error' };
         }
@@ -2703,11 +2745,11 @@ export function create_app_state(): AppState {
         ui_state.timed_event_debug.type = data?.timed_event_type ?? null;
         ui_state.timed_event_debug.phase = typeof data?.timed_event_phase === 'string' ? data.timed_event_phase : null;
         ui_state.timed_event_debug.trigger_kind = data?.trigger?.kind ?? null;
-        ui_state.timed_event_debug.current_turn = typeof data?.current_turn === 'number' ? data.current_turn : null;
         ui_state.timed_event_debug.current_round = typeof data?.current_round === 'number' ? data.current_round : null;
+        ui_state.timed_event_debug.active_actor_index = typeof data?.active_actor_index === 'number' ? data.active_actor_index : null;
         ui_state.timed_event_debug.active_actor_ref = typeof data?.active_actor_ref === 'string' ? data.active_actor_ref : null;
-        ui_state.timed_event_debug.turn_window_breaths = typeof data?.turn_window_breaths === 'number' ? data.turn_window_breaths : null;
-        ui_state.timed_event_debug.turn_breaths_remaining = typeof data?.turn_breaths_remaining === 'number' ? data.turn_breaths_remaining : null;
+        ui_state.timed_event_debug.world_sim_interstitial_total_breaths = typeof data?.world_sim_interstitial_total_breaths === 'number' ? data.world_sim_interstitial_total_breaths : null;
+        ui_state.timed_event_debug.world_sim_interstitial_breaths_remaining = typeof data?.world_sim_interstitial_breaths_remaining === 'number' ? data.world_sim_interstitial_breaths_remaining : null;
         ui_state.timed_event_debug.timed_event_world_breath_index = typeof data?.timed_event_world_breath_index === 'number'
             ? data.timed_event_world_breath_index
             : null;
@@ -2720,7 +2762,7 @@ export function create_app_state(): AppState {
                 queue_stable_order: typeof opp?.queue_stable_order === 'number' ? opp.queue_stable_order : null,
                 source_message_id: String(opp?.source_message_id ?? ''),
                 trigger_context: typeof opp?.trigger_context === 'string' ? opp.trigger_context : null,
-                created_turn: typeof opp?.created_turn === 'number' ? opp.created_turn : null,
+                created_turn_position_in_round: typeof opp?.created_turn_position_in_round === 'number' ? opp.created_turn_position_in_round : null,
                 created_round: typeof opp?.created_round === 'number' ? opp.created_round : null,
                 status: String(opp?.status ?? 'unknown'),
             }))
@@ -2748,8 +2790,8 @@ export function create_app_state(): AppState {
             type: ui_state.timed_event_debug.type,
             phase: ui_state.timed_event_debug.phase,
             trigger_kind: ui_state.timed_event_debug.trigger_kind,
-            turn: ui_state.timed_event_debug.current_turn,
             round: ui_state.timed_event_debug.current_round,
+            active_actor_index: ui_state.timed_event_debug.active_actor_index,
             active_actor_ref: ui_state.timed_event_debug.active_actor_ref,
             world_breath_index: ui_state.timed_event_debug.timed_event_world_breath_index,
             initiative_count: ui_state.timed_event_debug.initiative_order.length,
@@ -2790,13 +2832,17 @@ export function create_app_state(): AppState {
     }
 
     function get_follow_camera_entity_ref(): string {
+        const controlled_actor_ref = get_input_actor_ref();
+        if (controlled_actor_ref) {
+            return controlled_actor_ref;
+        }
         if (ui_state.timed_event_debug.active && ui_state.timed_event_debug.phase === 'world_sim_interstitial') {
             return '';
         }
         if (ui_state.timed_event_debug.active && typeof ui_state.timed_event_debug.active_actor_ref === 'string' && ui_state.timed_event_debug.active_actor_ref.length > 0) {
             return ui_state.timed_event_debug.active_actor_ref;
         }
-        return get_input_actor_ref();
+        return '';
     }
 
     function find_entity_in_place(place: Place | null | undefined, entity_ref: string): any | null {
@@ -3563,6 +3609,7 @@ export function create_app_state(): AppState {
             make_toggle_action({ id: 'transcript', label: 'LOG', onPress: () => toggle('transcript'), is_active: () => module_registry.is_visible('transcript') }),
             make_toggle_action({ id: 'input', label: 'INPUT', onPress: () => toggle('input'), is_active: () => module_registry.is_visible('input') }),
             make_toggle_action({ id: 'roller', label: 'ROLL', onPress: () => toggle('roller'), is_active: () => module_registry.is_visible('roller') }),
+            make_toggle_action({ id: 'initiative', label: 'INIT', onPress: () => toggle('initiative'), is_active: () => module_registry.is_visible('initiative') }),
             make_toggle_action({ id: 'character', label: 'CHAR', onPress: () => toggle('character_module'), is_active: () => module_registry.is_visible('character_module') }),
         ];
         const system_items: ProgramNavAction[] = [
@@ -3678,12 +3725,6 @@ export function create_app_state(): AppState {
             on_paste_ignore_color_change: () => {},
             get_paste_ignore_color_rgb: () => ({ r: 255, g: 255, b: 255 }),
             on_paste_ignore_color_select: () => {},
-            get_gradiator_state: () => ({ slots: ['  ', '  ', '  '], activeSlot: 0, isEditing: false, editSlot: null, editCursorX: 0 }),
-            on_gradiator_slot_select: () => {},
-            on_gradiator_char_select: () => {},
-            on_gradiator_add_char: () => {},
-            on_gradiator_remove_char: () => {},
-            on_gradiator_char_set: () => {},
             property_rows: (): ToolPropertyRow[] => {
                 const left_tool = get_place_painter_tool_for_side('left');
                 const right_tool = get_place_painter_tool_for_side('right');
@@ -8425,7 +8466,7 @@ export function create_app_state(): AppState {
             const dbg: string[] = [];
             const movement_debug = get_movement_debug_snapshot();
             const current_place = get_current_place();
-            const current_actor = current_place?.contents?.actors_present?.[0] ?? null;
+            const current_actor = get_controlled_actor_snapshot(current_place) ?? current_place?.contents?.actors_present?.[0] ?? null;
             const current_actor_tile = current_actor?.tile_position ?? null;
             const current_actor_z = (typeof current_actor?.elevation === 'number' && Number.isFinite(current_actor.elevation))
                 ? Math.floor(current_actor.elevation)
@@ -8487,10 +8528,15 @@ export function create_app_state(): AppState {
             dbg.push(`[gate look] ${ins_gate.locked ? format_action_gate_reason(ins_gate.reason, ins_gate.action_cost) : `ok (${ins_gate.action_cost})`}`);
             const timed_event = ui_state.timed_event_debug;
             if (timed_event.active) {
-                dbg.push(`[timed_event] ${timed_event.type ?? 'active'} phase:${timed_event.phase ?? 'initiative_turn'} turn:${timed_event.current_turn ?? '?'} round:${timed_event.current_round ?? '?'} active:${timed_event.active_actor_ref ?? '(none)'}`);
-                dbg.push(`[turn_window] breaths:${timed_event.turn_breaths_remaining ?? '?'} / ${timed_event.turn_window_breaths ?? '?'}`);
+                const actorPos = typeof timed_event.active_actor_index === 'number'
+                    ? `${timed_event.active_actor_index + 1}/${timed_event.initiative_order.length}`
+                    : '?';
+                dbg.push(`[timed_event] ${timed_event.type ?? 'active'} phase:${timed_event.phase ?? 'initiative_turn'} round:${timed_event.current_round ?? '?'} actor:${actorPos} active:${timed_event.active_actor_ref ?? '(none)'}`);
                 if (timed_event.phase === 'world_sim_interstitial') {
+                    dbg.push(`[world_sim] breaths:${timed_event.world_sim_interstitial_breaths_remaining ?? '?'} / ${timed_event.world_sim_interstitial_total_breaths ?? '?'}`);
                     dbg.push(`[world_turn] breath:${timed_event.timed_event_world_breath_index ?? 0}`);
+                } else {
+                    dbg.push('[turn_window] frozen during initiative_turn');
                 }
                 const pending = Array.isArray(timed_event.pending_communication_opportunities)
                     ? timed_event.pending_communication_opportunities
@@ -8498,7 +8544,7 @@ export function create_app_state(): AppState {
                 dbg.push(`[comm_transport] ${pending.length} pending transport item(s)`);
                 for (const opp of pending.slice(0, 4)) {
                     const queue_label = opp.queue_entry_id ? `${opp.queue_entry_id.slice(0, 12)}@${opp.queue_stable_order ?? '?'}` : 'no_queue_entry';
-                    dbg.push(`[comm_transport] ${opp.npc_ref} ${opp.status} t${opp.created_turn ?? '?'} ${queue_label} src:${opp.source_message_id.slice(0, 12)}`);
+                    dbg.push(`[comm_transport] ${opp.npc_ref} ${opp.status} p${opp.created_turn_position_in_round ?? '?'} ${queue_label} src:${opp.source_message_id.slice(0, 12)}`);
                 }
             } else {
                 dbg.push('[timed_event] inactive');
@@ -9550,21 +9596,28 @@ export function create_app_state(): AppState {
         }
     });
     window.setTimeout(() => {
-        if (boot_mode !== 'manual_shell') {
-            close_world_shell_modules();
-        }
-        if (boot_mode === 'direct_runtime') {
-            void refresh_controlled_actor_binding(true, true);
-        } else if (boot_mode === 'tas_runtime') {
-            const taiJoinRequest = resolve_tai_join_request();
-            if (taiJoinRequest) {
-                ui_state.world_entry.is_visible = false;
-                ui_state.world_join.is_visible = true;
-                apply_runtime_module_visibility();
-                void world_join_controller.apply_tai_join_request(taiJoinRequest);
+        void (async () => {
+            if (boot_mode !== 'manual_shell') {
+                close_world_shell_modules();
             }
-        }
-        void tool_assisted_inputs_runtime.start_configured();
+            if (boot_mode === 'direct_runtime') {
+                await refresh_controlled_actor_binding(true, true);
+            } else if (boot_mode === 'tas_runtime') {
+                const taiJoinRequest = resolve_tai_join_request();
+                if (taiJoinRequest) {
+                    ui_state.world_entry.is_visible = false;
+                    ui_state.world_join.is_visible = true;
+                    apply_runtime_module_visibility();
+                    await world_join_controller.apply_tai_join_request(taiJoinRequest);
+                }
+            }
+            await tool_assisted_inputs_runtime.start_configured();
+        })().catch((error) => {
+            console.error('[TAI_BOOT]', JSON.stringify({
+                event: 'startup_sequence_failed',
+                message: error instanceof Error ? error.message : String(error),
+            }));
+        });
     }, 0);
 
     // Layout (grid: 0..grid_width-1, 0..grid_height-1). y grows upward.
@@ -11109,17 +11162,24 @@ export function create_app_state(): AppState {
                 active: ui_state.timed_event_debug.active,
                 type: ui_state.timed_event_debug.type,
                 phase: ui_state.timed_event_debug.phase,
-                current_turn: ui_state.timed_event_debug.current_turn,
                 current_round: ui_state.timed_event_debug.current_round,
+                active_actor_index: ui_state.timed_event_debug.active_actor_index,
                 active_actor_ref: ui_state.timed_event_debug.active_actor_ref,
+                active_actor_display_name: ui_state.timed_event_debug.active_actor_ref
+                    ? get_entity_display_name(ui_state.timed_event_debug.active_actor_ref, ui_state.timed_event_debug.active_actor_ref)
+                    : null,
                 controlled_actor_ref: get_input_actor_ref(),
-                turn_window_breaths: ui_state.timed_event_debug.turn_window_breaths,
-                turn_breaths_remaining: ui_state.timed_event_debug.turn_breaths_remaining,
+                world_sim_interstitial_total_breaths: ui_state.timed_event_debug.world_sim_interstitial_total_breaths,
+                world_sim_interstitial_breaths_remaining: ui_state.timed_event_debug.world_sim_interstitial_breaths_remaining,
                 timed_event_world_breath_index: ui_state.timed_event_debug.timed_event_world_breath_index,
                 initiative_order: ui_state.timed_event_debug.initiative_order.map((entry) => ({
                     actor_ref: entry.actor_ref,
+                    display_name: get_entity_display_name(entry.actor_ref, entry.actor_ref),
                     initiative_roll: entry.initiative_roll,
                     status: entry.status,
+                    actions_remaining: entry.actions_remaining,
+                    partial_actions_remaining: entry.partial_actions_remaining,
+                    movement_remaining: entry.movement_remaining,
                 })),
             }),
             on_close: () => {
@@ -11133,7 +11193,10 @@ export function create_app_state(): AppState {
                         flash_status([`End turn failed: ${result.error ?? 'unknown'}`], 1800);
                         return;
                     }
-                    flash_status([`Turn ${result.new_turn ?? '?'}`, `active: ${result.active_actor ?? '(none)'}`], 1500);
+                    flash_status([
+                        `Round ${result.current_round ?? '?'}`,
+                        `active: ${result.active_actor ?? '(none)'}`,
+                    ], 1500);
                     void refresh_timed_event_debug_state();
                 })();
             },

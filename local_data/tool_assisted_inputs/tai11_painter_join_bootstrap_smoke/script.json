@@ -2,14 +2,15 @@
   "id": "painter_join_bootstrap_smoke",
   "test_name": "painter_test_join_bootstrap_smoke",
   "clock_mode": "realtime_ms",
+  "timing_profile": "human",
   "open_ms": 22000,
   "description": "Engine join screen TAI smoke for local authoritative painter join and document bootstrap.",
-  "start_delay_ms": 2500,
-  "end_delay_ms": 0,
+  "start_delay_ms": 1200,
+  "end_delay_ms": 500,
   "actions": [
-    { "at_ms": 2500, "type": "assert_text_value_literal", "source": "session", "field": "authority_mode", "value": "authoritative_host" },
-    { "at_ms": 2500, "type": "assert_text_value_literal", "source": "session", "field": "session_lifecycle", "value": "ready" },
-    { "at_ms": 2500, "type": "assert_text_value_literal", "source": "session", "field": "supports_join", "value": "true" },
-    { "at_ms": 2500, "type": "assert_text_value_literal", "source": "runtime_value", "field": "authority_mode", "value": "authoritative_host" }
+    { "at_ms": 0, "type": "wait_for_text_value_literal", "source": "session", "field": "authority_mode", "value": "authoritative_host", "timeout_ms": 5000, "poll_ms": 50 },
+    { "at_ms": 0, "type": "wait_for_text_value_literal", "source": "session", "field": "session_lifecycle", "value": "ready", "timeout_ms": 5000, "poll_ms": 50 },
+    { "at_ms": 0, "type": "wait_for_text_value_literal", "source": "session", "field": "supports_join", "value": "true", "timeout_ms": 5000, "poll_ms": 50 },
+    { "at_ms": 0, "type": "assert_text_value_literal", "source": "runtime_value", "field": "authority_mode", "value": "authoritative_host" }
   ]
 }

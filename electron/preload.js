@@ -13,6 +13,7 @@ const clientInstanceId = process.env.THAUM_CLIENT_INSTANCE_ID || '';
 const startupJoinConfig = {
   preferredHost: process.env.THAUM_JOIN_PREFERRED_HOST || '',
   autoOpen: process.env.THAUM_JOIN_AUTO_OPEN === 'true',
+  remoteRelayOrigin: process.env.THAUM_REMOTE_RELAY_ORIGIN || '',
 };
 const joinAutoJoinEnv = String(process.env.THAUM_TAI_JOIN_AUTO_JOIN || '').trim().toLowerCase();
 const toolAssistedInputsBootConfig = {
@@ -28,6 +29,9 @@ const toolAssistedInputsBootConfig = {
   joinPreferredConnectionKind: process.env.THAUM_TAI_JOIN_CONNECTION_KIND || '',
   joinPreferredHost: process.env.THAUM_TAI_JOIN_HOST || '',
   joinAutoJoin: joinAutoJoinEnv ? joinAutoJoinEnv !== 'false' : true,
+  joinCode: process.env.THAUM_TAI_JOIN_CODE || '',
+  joinRelayOrigin: process.env.THAUM_TAI_JOIN_RELAY_ORIGIN || '',
+  timingProfile: process.env.THAUM_TAI_TIMING_PROFILE || '',
   gameActorId: process.env.THAUM_TAI_GAME_ACTOR_ID || '',
 };
 

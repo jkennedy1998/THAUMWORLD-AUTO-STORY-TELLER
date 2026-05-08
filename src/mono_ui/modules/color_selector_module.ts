@@ -6,15 +6,17 @@
  * using the selected weight and color.
  */
 
-import type { Canvas, Module, Rect, PointerEvent, DragEvent, WheelEvent } from '../types.js';
+import type { Canvas, Cell, Module, Rect, PointerEvent, WheelEvent } from '../types.js';
 import { get_color_by_name, INDEXED_COLORS } from '../colors.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 
+type PreviewBrush = Pick<Cell, 'char' | 'graphic' | 'appearance_slots' | 'materials' | 'rgb' | 'weight_index'>;
+
 export type ColorSelectorOptions = {
   id: string;
   rect: Rect;
-  get_brush: () => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+  get_brush: () => PreviewBrush;
   get_left_rgb?: () => { r: number; g: number; b: number };
   get_right_rgb?: () => { r: number; g: number; b: number };
   on_color_select: (rgb: { r: number; g: number; b: number }, button: number) => void;
@@ -24,6 +26,30 @@ export type ColorSelectorOptions = {
 
 function rgb_eq(a: { r: number; g: number; b: number } | undefined, b: { r: number; g: number; b: number } | undefined): boolean {
   return !!a && !!b && a.r === b.r && a.g === b.g && a.b === b.b;
+}
+
+function make_color_preview_cell(brush: PreviewBrush, rgb: { r: number; g: number; b: number }, flash_state: number): Partial<Cell> & { char: string } {
+  if (brush.graphic) {
+    const appearance_slots = brush.appearance_slots ? { ...brush.appearance_slots } : undefined;
+    if (appearance_slots?.[1]) {
+      appearance_slots[1] = { kind: 'flat_rgb', rgb: { ...rgb } };
+    }
+    return {
+      char: brush.char,
+      graphic: { ...brush.graphic },
+      appearance_slots,
+      materials: brush.materials ? { ...brush.materials } : undefined,
+      rgb,
+      style: 'regular',
+      weight_index: brush.weight_index,
+    };
+  }
+  return {
+    char: flash_state === 0 ? brush.char : '█',
+    rgb,
+    style: 'regular',
+    weight_index: brush.weight_index,
+  };
 }
 
 // Grid layout - responsive to module size
@@ -149,16 +175,7 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
           
           if (color_y <= rect.y0) continue;
           
-          // Flash between selected character and solid block
-          const display_char = flash_state === 0 ? brush.char : '█';
-          
-          // Draw color swatch
-          c.set(color_x, color_y, {
-            char: display_char,
-            rgb: color.rgb,
-            style: 'regular',
-            weight_index: brush.weight_index
-          });
+          c.set(color_x, color_y, make_color_preview_cell(brush, color.rgb, flash_state));
 
           const left_selected = rgb_eq(color.rgb, left_rgb);
           const right_selected = rgb_eq(color.rgb, right_rgb);

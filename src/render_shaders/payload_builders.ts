@@ -3,7 +3,7 @@ import type { ItemDefinition } from "../item_storage/store.js";
 import type { Rgb } from "../mono_ui/types.js";
 import type { DiscriminatedRenderPayload } from "./types.js";
 import type { EntityRenderProfile, RenderShaderBindings } from "./definitions.js";
-import type { GroupRenderContext, InlineMaterialAssignments, ViewDirection } from "./graphics_contract.js";
+import type { AppearanceSlotAssignments, GroupRenderContext, InlineMaterialAssignments, ViewDirection } from "./graphics_contract.js";
 
 export function pick_tags(instance: any, definition: any): any[] {
     const inst_tags = instance && Array.isArray(instance.tags) ? instance.tags : null;
@@ -25,6 +25,7 @@ export function make_item_payload(
         qty: instance.qty,
         display_char: (instance as any).display_char ?? (definition as any).display_char,
         graphics: (definition as any)?.graphics,
+        appearance_slots: (instance as any)?.appearance_slots ?? (definition as any)?.appearance_slots,
         materials: ((instance as any)?.materials ?? (definition as any)?.materials?.defaults) as InlineMaterialAssignments | undefined,
         state: (instance as any)?.state,
         facing: (instance as any)?.facing as ViewDirection | string | undefined,
@@ -40,6 +41,7 @@ export function make_item_like_payload(opts: {
     qty?: number;
     display_char?: string;
     graphics?: any;
+    appearance_slots?: AppearanceSlotAssignments;
     materials?: InlineMaterialAssignments;
     state?: Record<string, unknown>;
     facing?: ViewDirection | string;
@@ -55,6 +57,7 @@ export function make_item_like_payload(opts: {
         qty: opts.qty,
         display_char: typeof opts.display_char === 'string' ? String(opts.display_char).charAt(0) : undefined,
         graphics: opts.graphics,
+        appearance_slots: opts.appearance_slots,
         materials: opts.materials,
         state: opts.state,
         facing: opts.facing,
@@ -137,6 +140,7 @@ export function make_entity_payload(
         kind_id: opts?.kind_id,
         entity_render: opts?.entity_render,
         graphics: opts?.entity_render?.graphics,
+        appearance_slots: (opts?.entity_render as any)?.appearance_slots,
         materials: opts?.entity_render?.materials?.defaults,
         render_shader: opts?.render_shader,
     } as any;
@@ -168,6 +172,7 @@ export function make_simple_tile_payload(opts: {
     style?: any;
     render_shader?: RenderShaderBindings;
     graphics?: any;
+    appearance_slots?: AppearanceSlotAssignments;
     materials?: InlineMaterialAssignments;
     state?: Record<string, unknown>;
     facing?: ViewDirection | string;
@@ -181,6 +186,7 @@ export function make_simple_tile_payload(opts: {
         tags: Array.isArray(opts.tags) ? opts.tags : [],
         char: String(opts.char ?? ' ').charAt(0) || ' ',
         graphics: opts.graphics,
+        appearance_slots: opts.appearance_slots,
         materials: opts.materials,
         state: opts.state,
         facing: opts.facing,

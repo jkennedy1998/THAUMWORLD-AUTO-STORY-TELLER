@@ -5,7 +5,7 @@
  * Inspired by Blender's undo system.
  */
 
-import type { GridCell, HistorySnapshot } from './types.js';
+import { clone_appearance_slot_assignments, type GridCell, type HistorySnapshot } from './types.js';
 import { getOrCreateLayer, type VoxelSpace } from './voxel_space.js';
 import type { SelectionBitmap } from './selection.js';
 import { clone_painter_group, type PainterGroup } from './painter_document.js';
@@ -167,8 +167,12 @@ function generateActionId(): string {
 function cloneCell(cell: GridCell): GridCell {
   return {
     char: cell.char,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
     rgb: { ...cell.rgb },
-    weight_index: cell.weight_index
+    weight_index: cell.weight_index,
+    render_index: cell.render_index,
   };
 }
 

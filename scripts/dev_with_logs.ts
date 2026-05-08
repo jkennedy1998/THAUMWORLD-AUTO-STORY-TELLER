@@ -36,6 +36,12 @@ const startup_boot_mode = (boot_mode_arg ? String(boot_mode_arg.split("=")[1] ??
   : 'manual_shell';
 const tai_id_arg = args.find((arg) => arg.startsWith("--tai-id="));
 const tai_id = tai_id_arg ? String(tai_id_arg.split("=")[1] ?? "").trim() : "";
+const tai_timing_arg = args.find((arg) => arg.startsWith("--tai-timing="));
+const tai_timing_profile = (tai_timing_arg ? String(tai_timing_arg.split("=")[1] ?? "").trim().toLowerCase() : '') || '';
+const tai_join_code_arg = args.find((arg) => arg.startsWith("--tai-join-code="));
+const tai_join_code = tai_join_code_arg ? String(tai_join_code_arg.split("=")[1] ?? "").trim() : "";
+const tai_join_relay_origin_arg = args.find((arg) => arg.startsWith("--tai-relay-origin="));
+const tai_join_relay_origin = tai_join_relay_origin_arg ? String(tai_join_relay_origin_arg.split("=")[1] ?? "").trim() : "";
 const host_arg = args.find((arg) => arg.startsWith("--host="));
 const preferred_host = host_arg ? String(host_arg.split("=")[1] ?? "").trim() : "";
 const diag_profile_arg = args.find((arg) => arg.startsWith("--diag-profile="));
@@ -59,6 +65,13 @@ if (tai_entry) {
   console.log(`TAS open ms: ${tai_entry.openMs}`);
   console.log(`TAS end delay ms: ${tai_entry.endDelayMs}`);
   console.log(`TAS script: ${tai_entry.scriptPath}`);
+  if (tai_entry.lane) console.log(`TAS lane: ${tai_entry.lane}`);
+  if (tai_entry.status) console.log(`TAS status: ${tai_entry.status}`);
+  if (tai_entry.purpose) console.log(`TAS purpose: ${tai_entry.purpose}`);
+  if (tai_entry.notes) console.warn(`[TAI] ${tai_entry.notes}`);
+  if (tai_timing_profile) console.log(`TAS timing profile: ${tai_timing_profile}`);
+  if (tai_join_code) console.log(`TAS remote join code: ${tai_join_code}`);
+  if (tai_join_relay_origin) console.log(`TAS remote relay origin: ${tai_join_relay_origin}`);
 }
 console.log("");
 
@@ -140,6 +153,9 @@ appendToLog(formatLogEntry("LAUNCHER", "INFO", `dev_with_logs session ${JSON.str
   tai_end_delay_ms: tai_entry?.endDelayMs ?? null,
   tai_script_path: tai_entry?.scriptPath ?? null,
   tai_registry_path: tai_entry?.registryPath ?? null,
+  tai_lane: tai_entry?.lane ?? null,
+  tai_status: tai_entry?.status ?? null,
+  tai_purpose: tai_entry?.purpose ?? null,
 })}`));
 updateLatestSessionState(logDir, {
   sessionId,
@@ -249,6 +265,9 @@ function getClientEnv(): Record<string, string> {
       THAUM_TAI_OPEN_MS: String(tai_entry.openMs),
       THAUM_TAI_END_DELAY_MS: String(tai_entry.endDelayMs),
       THAUM_TAI_SCRIPT_PATH: tai_entry.scriptPath,
+      ...(tai_timing_profile ? { THAUM_TAI_TIMING_PROFILE: tai_timing_profile } : {}),
+      ...(tai_join_code ? { THAUM_TAI_JOIN_CODE: tai_join_code, THAUM_TAI_JOIN_CONNECTION_KIND: 'remote_join_code' } : {}),
+      ...(tai_join_relay_origin ? { THAUM_TAI_JOIN_RELAY_ORIGIN: tai_join_relay_origin } : {}),
     } : {}),
   };
 }

@@ -3,7 +3,7 @@ import type { EngineContentRef } from './content_refs.js';
 import { encode_content_ref_key, normalize_content_ref } from './content_refs.js';
 import { get_slot_json_file_path, read_slot_json_file, write_slot_json_file } from '../engine_persistence/slot_json_store.js';
 
-export type EngineTransportStrategy = 'direct' | 'overlay' | 'relay';
+export type EngineTransportStrategy = 'direct' | 'overlay' | 'relay' | 'remote_relay';
 
 export type EngineJoinPreferenceRecord = {
   content_ref: EngineContentRef;
@@ -49,12 +49,15 @@ function sanitize_app_metadata(value: Record<string, unknown> | null | undefined
 }
 
 function normalize_record(record: EngineJoinPreferenceRecord): EngineJoinPreferenceRecord {
+  const normalized_strategy = String(record.last_transport_strategy ?? '').trim();
   return {
     content_ref: normalize_content_ref(record.content_ref),
     preferred_connection_id: String(record.preferred_connection_id ?? '').trim() || null,
     preferred_host: String(record.preferred_host ?? '').trim() || null,
     preferred_connection_kind: record.preferred_connection_kind ?? null,
-    last_transport_strategy: record.last_transport_strategy,
+    last_transport_strategy: normalized_strategy === 'remote_relay' || normalized_strategy === 'overlay' || normalized_strategy === 'relay'
+      ? normalized_strategy as EngineTransportStrategy
+      : 'direct',
     last_connected_at_ms: Number.isFinite(Number(record.last_connected_at_ms)) ? Math.floor(Number(record.last_connected_at_ms)) : Date.now(),
     app_metadata: sanitize_app_metadata(record.app_metadata),
   };
@@ -211,7 +214,7 @@ export async function record_successful_connection_for_content(slot: number, arg
     connection_id: args.selection.connection.id,
     connection_host: args.selection.connection.host,
     connection_kind: args.selection.connection.kind,
-    transport_strategy: args.transport_strategy ?? 'direct',
+    transport_strategy: args.transport_strategy ?? (args.selection.method === 'remote_relay' ? 'remote_relay' : 'direct'),
     ...build_content_ref_log_fields(args.content_ref),
   });
   const record: EngineJoinPreferenceRecord = {
@@ -219,7 +222,7 @@ export async function record_successful_connection_for_content(slot: number, arg
     preferred_connection_id: args.selection.connection.id,
     preferred_host: args.selection.connection.host,
     preferred_connection_kind: args.selection.connection.kind,
-    last_transport_strategy: args.transport_strategy ?? 'direct',
+    last_transport_strategy: args.transport_strategy ?? (args.selection.method === 'remote_relay' ? 'remote_relay' : 'direct'),
     last_connected_at_ms: Date.now(),
     app_metadata: sanitize_app_metadata(args.app_metadata),
   };

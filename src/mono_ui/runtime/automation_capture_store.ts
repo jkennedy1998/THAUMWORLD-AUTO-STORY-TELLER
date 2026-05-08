@@ -1,3 +1,4 @@
+import { clone_appearance_slot_assignments } from '../../ascii_painter/types.js';
 import type {
   ToolAssistedInputsMovementTrace,
   ToolAssistedInputsPainterCell,
@@ -6,6 +7,22 @@ import type {
   ToolAssistedInputsTile,
   ToolAssistedInputsVisibleStep,
 } from './automation_interfaces.js';
+
+function clone_painter_cell(cell: ToolAssistedInputsPainterCell | null): ToolAssistedInputsPainterCell | null {
+  if (!cell) return null;
+  return {
+    x: cell.x,
+    y: cell.y,
+    z: cell.z,
+    char: cell.char,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
+    rgb: { ...cell.rgb },
+    weight_index: cell.weight_index,
+    render_index: cell.render_index,
+  };
+}
 
 export function create_tool_assisted_inputs_capture_store(): {
   reset: () => void;
@@ -66,8 +83,8 @@ export function create_tool_assisted_inputs_capture_store(): {
     set_painter_anchor(slot, anchor): void { painter_anchors[slot] = anchor; },
     get_painter_anchor(slot): ToolAssistedInputsPainterInteractionAnchor | null { return painter_anchors[slot] ?? null; },
     list_painter_anchor_slots(): string[] { return Object.keys(painter_anchors); },
-    set_painter_cell(slot, cell): void { painter_cells[slot] = cell; },
-    get_painter_cell(slot): ToolAssistedInputsPainterCell | null { return painter_cells[slot] ?? null; },
+    set_painter_cell(slot, cell): void { painter_cells[slot] = clone_painter_cell(cell); },
+    get_painter_cell(slot): ToolAssistedInputsPainterCell | null { return clone_painter_cell(painter_cells[slot] ?? null); },
     list_painter_cell_slots(): string[] { return Object.keys(painter_cells); },
   };
 }

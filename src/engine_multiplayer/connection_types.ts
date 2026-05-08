@@ -1,12 +1,20 @@
-export type EngineConnectionKind = 'local' | 'lan_discovered' | 'saved_manual';
+export type EngineConnectionKind = 'local' | 'lan_discovered' | 'saved_manual' | 'remote_join_code';
 
 export type { EngineContentRef, EngineContentRefKind } from './content_refs.js';
+
+export type EngineConnectionMethod = 'local' | 'direct' | 'remote_relay';
 
 export type EngineConnectionScope = 'local_machine' | 'lan' | 'wifi' | 'internet';
 
 export type EngineConnectionTransport = {
+  transport_kind?: 'direct_http_ws' | 'relay_ws_tunnel';
   api_base_url?: string;
   bridge_ws_base_url?: string;
+  relay_https_origin?: string;
+  relay_wss_origin?: string;
+  room_id?: string;
+  join_code?: string;
+  attach_token?: string;
   slot?: number;
 };
 
@@ -17,16 +25,27 @@ export type EngineConnectionHistory = {
   last_seen_online_at_ms?: number;
 };
 
+export type EngineRemoteSessionMetadata = {
+  room_id?: string;
+  session_id?: string;
+  join_code?: string;
+  relay_origin?: string;
+  visibility?: 'private' | 'shared' | 'public';
+  app_kind?: 'thaumworld' | 'ascii_painter' | 'unknown';
+};
+
 export type EngineConnectionEntry = {
   id: string;
   name: string;
   host: string;
   kind: EngineConnectionKind;
+  method?: EngineConnectionMethod;
   scope: EngineConnectionScope;
   transport?: EngineConnectionTransport;
   history?: EngineConnectionHistory;
   metadata?: {
     source_label?: string;
+    remote_session?: EngineRemoteSessionMetadata;
   };
 };
 
@@ -43,24 +62,38 @@ export type EngineConnectionProbeResult = {
   painter_document_id?: string | null;
   painter_display_name?: string | null;
   painter_file_backed?: boolean;
+  relay_https_origin?: string;
+  relay_wss_origin?: string;
+  room_id?: string;
+  join_code?: string;
+  attach_token?: string;
+  api_base_url?: string;
+  bridge_ws_base_url?: string;
   checked_at_ms: number;
 };
 
 export type EngineJoinSelection = {
   connection: EngineConnectionEntry;
+  method: EngineConnectionMethod;
   probe: EngineConnectionProbeResult | null;
   transport: {
+    transport_kind: 'direct_http_ws' | 'relay_ws_tunnel';
     api_base_url: string;
     bridge_ws_base_url: string;
+    relay_https_origin?: string;
+    relay_wss_origin?: string;
+    room_id?: string;
+    join_code?: string;
+    attach_token?: string;
   };
 };
 
 export function is_connection_removable(kind: EngineConnectionKind): boolean {
-  return kind === 'saved_manual';
+  return kind === 'saved_manual' || kind === 'remote_join_code';
 }
 
 export function is_connection_name_editable(kind: EngineConnectionKind): boolean {
-  return kind === 'saved_manual';
+  return kind === 'saved_manual' || kind === 'remote_join_code';
 }
 
 export function is_connection_host_editable(kind: EngineConnectionKind): boolean {

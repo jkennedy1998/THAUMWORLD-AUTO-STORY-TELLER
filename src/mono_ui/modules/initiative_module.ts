@@ -6,20 +6,25 @@ import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 
 export type InitiativeEntryView = {
   actor_ref: string;
+  display_name: string;
   initiative_roll: number;
   status: string;
+  actions_remaining: number;
+  partial_actions_remaining: number;
+  movement_remaining: number;
 };
 
 export type InitiativeModuleState = {
   active: boolean;
   type: string | null;
   phase: string | null;
-  current_turn: number | null;
   current_round: number | null;
+  active_actor_index: number | null;
   active_actor_ref: string | null;
+  active_actor_display_name: string | null;
   controlled_actor_ref: string | null;
-  turn_window_breaths: number | null;
-  turn_breaths_remaining: number | null;
+  world_sim_interstitial_total_breaths: number | null;
+  world_sim_interstitial_breaths_remaining: number | null;
   timed_event_world_breath_index: number | null;
   initiative_order: InitiativeEntryView[];
 };
@@ -47,10 +52,13 @@ type Row =
       initiative_roll: number;
       label: string;
       status: string;
+      actions_remaining: number;
+      partial_actions_remaining: number;
+      movement_remaining: number;
       is_active: boolean;
     };
 
-const MIN_WIDTH = 26;
+const MIN_WIDTH = 36;
 const MAX_WIDTH = 72;
 const MIN_HEIGHT = 8;
 const MAX_HEIGHT = 36;
@@ -60,12 +68,6 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
-function format_ref_label(ref: string): string {
-  const raw = String(ref ?? '').replace(/^(actor|npc|item|tile)\./, '').trim();
-  const base = raw.length > 0 ? raw : 'unknown';
-  return base.replace(/[_\.]+/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase());
-}
-
 function abbreviate_status(status: string): string {
   const upper = String(status ?? '').toUpperCase();
   if (upper === 'ACTIVE') return 'ACT';
@@ -73,7 +75,13 @@ function abbreviate_status(status: string): string {
   if (upper === 'WAITING') return 'WAIT';
   if (upper === 'PENDING') return 'PEND';
   if (upper === 'DELAYED') return 'DELAY';
+  if (upper === 'PASSED') return 'PASS';
+  if (upper === 'LEFT_REGION') return 'LEFT';
   return upper.slice(0, 5) || 'UNK';
+}
+
+function format_budget_detail(entry: InitiativeEntryView): string {
+  return `A:${Math.max(0, Math.floor(Number(entry.actions_remaining ?? 0) || 0))} P:${Math.max(0, Math.floor(Number(entry.partial_actions_remaining ?? 0) || 0))} M:${Math.max(0, Math.floor(Number(entry.movement_remaining ?? 0) || 0))}`;
 }
 
 function build_rows(state: InitiativeModuleState): Row[] {
@@ -81,8 +89,8 @@ function build_rows(state: InitiativeModuleState): Row[] {
   if (!state.active) return rows;
 
   if (state.phase === 'world_sim_interstitial') {
-    const remaining = state.turn_breaths_remaining ?? 0;
-    const total = state.turn_window_breaths ?? 0;
+    const remaining = state.world_sim_interstitial_breaths_remaining ?? 0;
+    const total = state.world_sim_interstitial_total_breaths ?? 0;
     const breath_index = state.timed_event_world_breath_index ?? 0;
     rows.push({
       kind: 'world',
@@ -97,8 +105,11 @@ function build_rows(state: InitiativeModuleState): Row[] {
       kind: 'entry',
       actor_ref: entry.actor_ref,
       initiative_roll: Number(entry.initiative_roll ?? 0) || 0,
-      label: format_ref_label(entry.actor_ref),
+      label: String(entry.display_name ?? '').trim() || entry.actor_ref,
       status: abbreviate_status(entry.status),
+      actions_remaining: Number(entry.actions_remaining ?? 0) || 0,
+      partial_actions_remaining: Number(entry.partial_actions_remaining ?? 0) || 0,
+      movement_remaining: Number(entry.movement_remaining ?? 0) || 0,
       is_active: state.phase !== 'world_sim_interstitial' && entry.actor_ref === state.active_actor_ref,
     });
   }
@@ -178,8 +189,8 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
       const transition_key = [
         state.active ? '1' : '0',
         state.phase ?? '',
-        String(state.current_turn ?? ''),
         String(state.current_round ?? ''),
+        String(state.active_actor_index ?? ''),
         state.active_actor_ref ?? '',
       ].join('|');
       if (transition_key !== last_transition_key) {
@@ -195,13 +206,16 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
       const content_bottom_y = rect.y0 + 1;
       const inner_width = Math.max(1, rect.x1 - rect.x0 - 2);
 
+      const actor_position = typeof state.active_actor_index === 'number'
+        ? `${state.active_actor_index + 1}/${Math.max(1, state.initiative_order.length)}`
+        : '?';
       const summary = state.active
-        ? `${String(state.type ?? 'event').toUpperCase()}  R:${state.current_round ?? '?'} T:${state.current_turn ?? '?'}`
+        ? `${String(state.type ?? 'event').toUpperCase()}  R:${state.current_round ?? '?'} A:${actor_position}`
         : 'NO TIMED BASED EVENT';
       const detail = state.active
         ? (state.phase === 'world_sim_interstitial'
-          ? `WORLD PHASE  B:${state.turn_breaths_remaining ?? '?'} / ${state.turn_window_breaths ?? '?'}`
-          : `ACTIVE ${format_ref_label(state.active_actor_ref ?? '')}`)
+          ? `WORLD PHASE  B:${state.world_sim_interstitial_breaths_remaining ?? '?'} / ${state.world_sim_interstitial_total_breaths ?? '?'}  W:${state.timed_event_world_breath_index ?? '?'}`
+          : `ACTIVE ${(String(state.active_actor_display_name ?? '').trim() || state.active_actor_ref || '(none)')}`)
         : 'Waiting for a timed event to begin';
 
       const summary_text = summary.slice(0, inner_width);
@@ -292,8 +306,10 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
       const roll_width = 3;
       const marker_x = rect.x0 + 1;
       const roll_x = rect.x0 + 3;
-      const status_width = Math.min(5, Math.max(3, Math.floor(inner_width / 5)));
-      const status_x = Math.max(roll_x + roll_width + 2, rect.x1 - status_width - 1);
+      const budget_width = Math.min(14, Math.max(8, Math.floor(inner_width / 3)));
+      const status_width = Math.min(5, Math.max(4, Math.floor(inner_width / 6)));
+      const budget_x = Math.max(roll_x + roll_width + 8, rect.x1 - budget_width - 1);
+      const status_x = Math.max(roll_x + roll_width + 3, budget_x - status_width - 1);
       const name_x = roll_x + roll_width + 2;
       const name_width = Math.max(4, status_x - name_x - 1);
 
@@ -319,8 +335,8 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         });
 
         if (row.kind === 'world') {
-          const label = row.label.slice(0, Math.max(1, status_x - name_x - 1));
-          for (let j = 0; j < label.length && name_x + j < status_x; j += 1) {
+          const label = row.label.slice(0, Math.max(1, budget_x - name_x - 1));
+          for (let j = 0; j < label.length && name_x + j < budget_x; j += 1) {
             c.set(name_x + j, y, {
               char: label[j]!,
               rgb: row_rgb,
@@ -328,9 +344,9 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
               weight_index: 2,
             });
           }
-          const detail_text_world = row.detail.slice(0, Math.max(1, rect.x1 - status_x));
-          for (let j = 0; j < detail_text_world.length && status_x + j < rect.x1; j += 1) {
-            c.set(status_x + j, y, {
+          const detail_text_world = row.detail.slice(0, Math.max(1, rect.x1 - budget_x));
+          for (let j = 0; j < detail_text_world.length && budget_x + j < rect.x1; j += 1) {
+            c.set(budget_x + j, y, {
               char: detail_text_world[j]!,
               rgb: status_color(),
               style: 'regular',
@@ -361,12 +377,30 @@ export function make_initiative_module(opts: InitiativeModuleOptions): Module {
         }
 
         const status = row.status.slice(0, status_width);
-        for (let j = 0; j < status.length && status_x + j < rect.x1; j += 1) {
+        for (let j = 0; j < status.length && status_x + j < budget_x; j += 1) {
           c.set(status_x + j, y, {
             char: status[j]!,
             rgb: row.is_active ? row_rgb : status_color(),
             style: 'regular',
             weight_index: 2,
+          });
+        }
+
+        const budget = format_budget_detail({
+          actor_ref: row.actor_ref,
+          display_name: row.label,
+          initiative_roll: row.initiative_roll,
+          status: row.status,
+          actions_remaining: row.actions_remaining,
+          partial_actions_remaining: row.partial_actions_remaining,
+          movement_remaining: row.movement_remaining,
+        }).slice(0, Math.max(1, rect.x1 - budget_x));
+        for (let j = 0; j < budget.length && budget_x + j < rect.x1; j += 1) {
+          c.set(budget_x + j, y, {
+            char: budget[j]!,
+            rgb: row.is_active ? row_rgb : muted_color(),
+            style: 'regular',
+            weight_index: row.is_active ? 3 : 2,
           });
         }
       }

@@ -130,14 +130,14 @@ export function make_join_directory_module(opts: JoinDirectoryModuleConfig): Mod
         const namePrefix = editor.active_field === 'name' ? '>name: ' : ' name: ';
         const hostPrefix = editor.active_field === 'host' ? '>host: ' : ' host: ';
         const nameLine = trim_end(`${namePrefix}${editor.draft_name || 'New Connection'}`, innerWidth);
-        const hostLine = trim_end(`${hostPrefix}${editor.draft_host || (editor.mode === 'add' ? '192.168.1.50:8787' : '')}`, innerWidth);
+        const hostLine = trim_end(`${hostPrefix}${editor.draft_host || (editor.mode === 'add' ? '192.168.1.50:8787 or ABCD1234' : '')}`, innerWidth);
         draw_line(c, rect.x0 + 1, rect.y0 + 7, nameLine, get_color_by_name('off_white').rgb, 4);
         draw_line(c, rect.x0 + 1, rect.y0 + 6, hostLine, get_color_by_name('off_white').rgb, 4);
         button_hits.push({ x0: rect.x0 + 1, x1: rect.x0 + nameLine.length, y: rect.y0 + 7, action: 'field_name' });
         button_hits.push({ x0: rect.x0 + 1, x1: rect.x0 + hostLine.length, y: rect.y0 + 6, action: 'field_host' });
         draw_button(c, rect.x0 + 1, rect.y0 + 5, '[SAVE]', get_color_by_name('vivid_green').rgb, 'save');
         draw_button(c, rect.x0 + 10, rect.y0 + 5, '[CANCEL]', get_color_by_name('vivid_red').rgb, 'cancel');
-        const helper = editor.mode === 'add' ? 'tab switches field, host or host:port' : 'edit and press enter to save';
+        const helper = editor.mode === 'add' ? 'tab switches field, host:port or join_code[@relay]' : 'edit and press enter to save';
         draw_line(c, rect.x0 + 1, rect.y0 + 9, trim_end(helper, innerWidth), get_color_by_name('medium_gray').rgb, 3);
         if (editor.error) draw_line(c, rect.x0 + 1, rect.y0 + 10, trim_end(editor.error, innerWidth), get_color_by_name('vivid_red').rgb, 3);
       }

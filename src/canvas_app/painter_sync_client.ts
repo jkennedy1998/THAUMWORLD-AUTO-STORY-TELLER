@@ -1,5 +1,6 @@
 import { debug_warn } from '../shared/debug.js';
-import type { PainterPropertyKind, PainterPropertyValue } from '../ascii_painter/painter_document.js';
+import { clone_appearance_slot_assignments, type GridCell } from '../ascii_painter/types.js';
+import type { PainterPropertyKind, PainterPropertyValue, PainterVoxelRecord } from '../ascii_painter/painter_document.js';
 import type { PainterDocumentAuthorityMode, PainterDocumentBootstrap, PainterSelectionChannelSnapshot } from '../shared/painter_protocol.js';
 import { create_painter_multiplayer_session } from './painter_multiplayer_session.js';
 
@@ -32,7 +33,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
   bootstrap: (force?: boolean, document_id?: string | null) => Promise<PainterSyncState>;
   set_expect_local_host_boot: (expect: boolean) => void;
   submit_selection: (args: { document_id?: string | null; cells: Array<{ x: number; y: number; z: number }>; color_rgb: { r: number; g: number; b: number } }) => Promise<PainterSyncState>;
-  submit_cell_changes: (group_id: string, breath: number, auto_key: boolean, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>) => Promise<PainterSyncState>;
+  submit_cell_changes: (group_id: string, breath: number, auto_key: boolean, changes: Array<{ x: number; y: number; z: number; cell: GridCell }>) => Promise<PainterSyncState>;
   submit_group_command: (command: {
     kind: 'set_document_timing' | 'set_document_loop_window' | 'create_group' | 'offset_group_in_time' | 'set_group_timing' | 'set_group_breath_span' | 'set_group_property_block_length' | 'split_group_property_block' | 'swap_group_property_blocks' | 'blank_group_property_block' | 'trim_group_property_block_edge' | 'merge_group_blank_property_block' | 'compact_group_blank_property_block_left' | 'set_group_property_block_edge_destructive' | 'delete_group' | 'duplicate_group' | 'rename_group' | 'set_group_visibility' | 'set_group_locked' | 'set_group_raster_state' | 'set_group_property_block' | 'move_group_property_block' | 'reorder_groups' | 'reset_document' | 'undo_group' | 'redo_group';
     group_id?: string;
@@ -60,7 +61,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
     split_breath?: number;
     length_breaths?: number;
     breath?: number;
-    voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
+    voxels?: PainterVoxelRecord[];
     value?: PainterPropertyValue;
     target_breath?: number;
     edge?: 'start' | 'end';
@@ -290,7 +291,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       }));
       return state;
     },
-    async submit_cell_changes(group_id: string, breath: number, auto_key: boolean, changes: Array<{ x: number; y: number; z: number; cell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number; render_index?: number } }>): Promise<PainterSyncState> {
+    async submit_cell_changes(group_id: string, breath: number, auto_key: boolean, changes: Array<{ x: number; y: number; z: number; cell: GridCell }>): Promise<PainterSyncState> {
       const active = state.bootstrap;
       if (!active || state.authority_mode !== 'authoritative_host' || !active.session_token || !group_id || changes.length < 1) {
         return state;
@@ -314,6 +315,9 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
               y: change.y,
               z: change.z,
               char: change.cell.char,
+              graphic: change.cell.graphic ? { ...change.cell.graphic } : undefined,
+              appearance_slots: clone_appearance_slot_assignments(change.cell.appearance_slots),
+              materials: change.cell.materials ? { ...change.cell.materials } : undefined,
               rgb: { ...change.cell.rgb },
               weight_index: change.cell.weight_index,
               render_index: change.cell.render_index,
@@ -402,7 +406,7 @@ export function create_painter_sync_client(options: PainterSyncClientOptions): {
       split_breath?: number;
       length_breaths?: number;
       breath?: number;
-      voxels?: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }>;
+      voxels?: PainterVoxelRecord[];
       value?: PainterPropertyValue;
       target_breath?: number;
       edge?: 'start' | 'end';

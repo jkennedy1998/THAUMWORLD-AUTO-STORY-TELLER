@@ -1,4 +1,4 @@
-import type { GridCell } from './types.js';
+import { clone_appearance_slot_assignments, type GridCell } from './types.js';
 import type { PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
 
 export type WorldCellKey = `${number},${number},${number}`;
@@ -24,8 +24,12 @@ function cloneCell(cell: GridCell | null): GridCell | null {
   if (!cell) return null;
   return {
     char: cell.char,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
     rgb: { ...cell.rgb },
     weight_index: cell.weight_index,
+    render_index: cell.render_index,
   };
 }
 

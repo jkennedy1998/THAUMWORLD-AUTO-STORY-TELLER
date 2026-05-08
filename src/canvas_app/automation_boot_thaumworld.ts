@@ -33,11 +33,12 @@ export function create_thaumworld_bootstrap_adapter(options: ThaumworldBootstrap
       return options.get_current_context();
     },
     async ensure_ready(boot_options: ToolAssistedInputsBootOptions = {}): Promise<ToolAssistedInputsContext> {
-      if (boot_options.auto_connect !== false) {
+      let context = options.get_current_context();
+      if (boot_options.auto_connect !== false && !context.session_token) {
         await options.ensure_multiplayer_session_bootstrap(true);
       }
       await options.resolve_controlled_actor_binding(true);
-      let context = await wait_for_context(options.get_current_context, 1500);
+      context = await wait_for_context(options.get_current_context, 1500);
       if (context.session_token && context.actor_ref && context.place_id) return context;
 
       if (boot_options.auto_claim) {

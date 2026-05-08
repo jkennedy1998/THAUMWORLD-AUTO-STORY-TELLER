@@ -19,6 +19,7 @@ import { describe_light_mag } from "../mag/index.js";
 import { resolve_spoils_tag_config_from_states } from "../tag_system/spoils.js";
 import { get_tag_dim_mag, resolve_tag_states_from_instances, type ResolvedTagState } from "../tag_system/resolved.js";
 import type { Place, PlaceStructureInstance, PlaceTile, PlaceItem, PlaceActor, PlaceNPC } from "../types/place.js";
+import { apply_runtime_place_character_presence } from "../shared/place_character_presence.js";
 import type { InlineItem } from "../types/inline_item.js";
 import type { InspectionFeature, InspectionResult, InspectionTarget, InspectorData } from "./types.js";
 export type { InspectionFeature, InspectionResult, InspectionTarget, InspectorData } from "./types.js";
@@ -848,6 +849,7 @@ async function build_place_narration_context(inspector: InspectorData, target: I
   const place_res = load_place(slot, effective_place_id || '');
   if (!place_res.ok || !place_res.place) return undefined;
   const place = place_res.place as Place;
+  apply_runtime_place_character_presence(slot, place as any);
 
   if (target.type === 'place' || target.type === 'adjacent_place') {
     const overview = build_place_overview(place, slot, inspector.ref, target.type === 'adjacent_place');
@@ -1071,6 +1073,7 @@ export async function inspect_target(
       const slot = Math.max(0, Math.floor(Number(inspector.data_slot ?? 1)));
       const place_res = target.place_id ? load_place(slot, target.place_id) : { ok: false } as any;
       const place = place_res.ok ? place_res.place as Place : null;
+      if (place) apply_runtime_place_character_presence(slot, place as any);
       const world_z = Math.floor(Number(target.tile_position?.z ?? (place ? get_place_base_world_z(place) : 0)));
       const items = place && target.tile_position ? summarize_tile_items(place, slot, Math.floor(target.tile_position.x), Math.floor(target.tile_position.y), world_z) : [];
       result = build_item_pile_result(target, sense_result.clarity, sense_result.sense, distance, items);
@@ -1093,6 +1096,7 @@ export async function inspect_target(
           content: { short_description: 'You cannot make out the place clearly.', full_description: '', features: [], sensory_details: {} },
         };
       } else {
+        apply_runtime_place_character_presence(slot, place_res.place as any);
         result = build_place_result(target, sense_result.clarity, sense_result.sense, distance, place_res.place as Place, slot, inspector.ref, target.type === 'adjacent_place');
       }
       break;
@@ -1150,6 +1154,7 @@ async function inspect_tile(
     const place_res = load_place(slot, target.place_id);
     if (place_res.ok && place_res.place) {
       const place = place_res.place as Place;
+      apply_runtime_place_character_presence(slot, place as any);
       const world_z = Math.floor(Number(target.tile_position.z ?? get_place_base_world_z(place)));
       const tile_x = Math.floor(Number(target.tile_position.x));
       const tile_y = Math.floor(Number(target.tile_position.y));
@@ -1228,6 +1233,7 @@ async function inspect_tile(
     if (target.place_id) {
       const place_res = load_place(slot, target.place_id);
       if (place_res.ok && place_res.place) {
+        apply_runtime_place_character_presence(slot, place_res.place as any);
         return build_place_result({ ...target, type: 'place', ref: target.place_id }, clarity, sense_used, distance, place_res.place as Place, slot, inspector.ref, false);
       }
     }
@@ -1356,6 +1362,7 @@ async function inspect_tile(
     const place_res = load_place(slot, target.place_id);
     if (place_res.ok && place_res.place) {
       const place = place_res.place as Place;
+      apply_runtime_place_character_presence(slot, place as any);
       const world_z = Math.floor(Number(target.tile_position.z ?? get_place_base_world_z(place)));
       const tile_x = Math.floor(Number(target.tile_position.x));
       const tile_y = Math.floor(Number(target.tile_position.y));
@@ -1436,6 +1443,7 @@ async function inspect_structure(
   }
 
   const place = place_res.place as Place;
+  apply_runtime_place_character_presence(slot, place as any);
   const structure = get_structure_by_id(place, target.ref);
   if (!structure) {
     const fallbackTarget: InspectionTarget = { ...target, type: "tile", ref: "__scene__" };

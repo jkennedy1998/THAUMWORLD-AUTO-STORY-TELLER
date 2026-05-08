@@ -1055,6 +1055,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         row.push({
           char: c?.char ?? ' ',
           graphic: (c as any)?.graphic,
+          appearance_slots: (c as any)?.appearance_slots,
           materials: (c as any)?.materials,
           rgb: c?.rgb ?? { r: 0, g: 0, b: 0 },
           weight_index: (c as any)?.weight_index ?? 1,
@@ -1071,7 +1072,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     for (let y = 0; y < h; y++) {
       const row: GridCell[] = [];
       for (let x = 0; x < w; x++) {
-        row.push({ char: ' ', graphic: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 1, render_index: undefined });
+        row.push({ char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 1, render_index: undefined });
       }
       rows.push(row);
     }
@@ -1093,11 +1094,13 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
         const next_char = c?.char ?? ' ';
         const next_graphic = (c as any)?.graphic;
+        const next_appearance_slots = (c as any)?.appearance_slots;
         const next_materials = (c as any)?.materials;
         const next_rgb = c?.rgb ?? { r: 0, g: 0, b: 0 };
         const next_weight = (c as any)?.weight_index ?? 1;
         const next_render = (c as any)?.render_index;
         const same_graphic = JSON.stringify((dst as any).graphic ?? null) === JSON.stringify(next_graphic ?? null);
+        const same_appearance_slots = JSON.stringify((dst as any).appearance_slots ?? null) === JSON.stringify(next_appearance_slots ?? null);
         const same_materials = JSON.stringify((dst as any).materials ?? null) === JSON.stringify(next_materials ?? null);
 
         if (
@@ -1105,6 +1108,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           dst.weight_index !== next_weight ||
           (dst as any).render_index !== next_render ||
           !same_graphic ||
+          !same_appearance_slots ||
           !same_materials ||
           dst.rgb.r !== next_rgb.r ||
           dst.rgb.g !== next_rgb.g ||
@@ -1114,6 +1118,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           changed_cell_count += 1;
           dst.char = next_char;
           (dst as any).graphic = next_graphic;
+          (dst as any).appearance_slots = next_appearance_slots;
           (dst as any).materials = next_materials;
           dst.rgb = next_rgb;
           dst.weight_index = next_weight;
@@ -2520,6 +2525,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         def_id: String(tile.kind ?? ''),
         char: display.char,
         graphics: (tile as any).graphics,
+        appearance_slots: (tile as any).appearance_slots,
         materials: (tile as any).materials ?? (tile as any).material_options?.defaults,
         state: tile_state,
         facing: (tile as any).facing,
@@ -2562,6 +2568,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           def_id: String(tile.kind ?? ''),
           char: container_char,
           graphics: (tile as any).graphics,
+          appearance_slots: (tile as any).appearance_slots,
           materials: (tile as any).materials ?? (tile as any).material_options?.defaults,
           state: tile_state,
           facing: (tile as any).facing,
@@ -3365,6 +3372,10 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               def_id: String(def_id),
               char: display_char,
               tags,
+              graphics: (s as any).graphics,
+              appearance_slots: (s as any).appearance_slots,
+              materials: (s as any).materials ?? (s as any).material_options?.defaults,
+              facing: (s as any).facing,
               base_fg: hex_to_rgb(display_color),
               weight_index: 1,
               render_shader: (s as any).render_shader,
@@ -4758,8 +4769,11 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       (place as any).timed_event_world_breath_index = (typeof msg?.timed_event_world_breath_index === 'number' && Number.isFinite(msg.timed_event_world_breath_index))
         ? Math.floor(msg.timed_event_world_breath_index)
         : undefined;
-      (place as any).timed_event_turn_breaths_remaining = (typeof msg?.turn_breaths_remaining === 'number' && Number.isFinite(msg.turn_breaths_remaining))
-        ? Math.floor(msg.turn_breaths_remaining)
+      const interstitial_remaining = typeof msg?.world_sim_interstitial_breaths_remaining === 'number' && Number.isFinite(msg.world_sim_interstitial_breaths_remaining)
+        ? msg.world_sim_interstitial_breaths_remaining
+        : msg?.turn_breaths_remaining;
+      (place as any).timed_event_world_sim_interstitial_breaths_remaining = (typeof interstitial_remaining === 'number' && Number.isFinite(interstitial_remaining))
+        ? Math.floor(interstitial_remaining)
         : null;
       timed_event_breath_state_applied_count++;
       const nowMs = Date.now();
@@ -4770,7 +4784,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
               timed_event_active: !!(place as any).timed_event_active,
               timed_event_phase: (place as any).timed_event_phase ?? null,
               timed_event_world_breath_index: (place as any).timed_event_world_breath_index ?? null,
-              turn_breaths_remaining: (place as any).timed_event_turn_breaths_remaining ?? null,
+              world_sim_interstitial_breaths_remaining: (place as any).timed_event_world_sim_interstitial_breaths_remaining ?? null,
               applied_count: timed_event_breath_state_applied_count,
               delta_ms: last_timed_event_breath_state_ms > 0 ? Math.max(0, nowMs - last_timed_event_breath_state_ms) : 0,
             })

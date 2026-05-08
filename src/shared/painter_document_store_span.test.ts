@@ -196,4 +196,31 @@ const moveContentBlocksAfterOverwrite = moveBlocksAfterOverwrite.filter((block) 
 assert(moveContentBlocksAfterOverwrite.length === 1, 'move_group_property_block should destructively resolve occupied move targets without leaving overlapping content blocks');
 assert(moveContentBlocksAfterOverwrite[0]!.start === 7 && moveContentBlocksAfterOverwrite[0]!.end === 7, 'destructive move overwrite should place the moved move block at the requested target span');
 
+const richRasterOverwrite = apply_painter_group_structure_change(slot, document_id, {
+  kind: 'set_group_property_block',
+  group_id: base_group_id,
+  property_kind: 'raster',
+  property_id: rasterPropertyId,
+  breath: 6,
+  value: {
+    kind: 'raster',
+    voxels: [create_painter_voxel_record({
+      x: 2,
+      y: 1,
+      z: 0,
+      char: ' ',
+      graphic: { graphic_id: 'atlas:terrain.tree', view_direction: 'south', weight_index: 2 },
+      appearance_slots: { 1: { kind: 'flat_rgb', rgb: { r: 10, g: 20, b: 30 } } },
+      materials: { 1: 'STONE_PALE' },
+      rgb: { r: 10, g: 20, b: 30 },
+      weight_index: 2,
+    })],
+  },
+});
+runtime = normalize_painter_document_runtime(richRasterOverwrite.snapshot);
+const richRasterAt6 = get_painter_group_raster_state_at_breath(runtime.document.groups[base_group_id]!, 6)?.content[0] ?? null;
+assert(richRasterAt6?.graphic?.graphic_id === 'atlas:terrain.tree', 'set_group_property_block raster overwrite should preserve graphic payload');
+assert(richRasterAt6?.appearance_slots?.[1]?.kind === 'flat_rgb', 'set_group_property_block raster overwrite should preserve appearance slots');
+assert(richRasterAt6?.materials?.[1] === 'STONE_PALE', 'set_group_property_block raster overwrite should preserve materials');
+
 console.log('painter_document_store_span tests passed');

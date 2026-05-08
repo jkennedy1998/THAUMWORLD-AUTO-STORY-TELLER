@@ -1021,9 +1021,10 @@ export class CanvasRuntime {
                 cells_scanned += 1;
                 const cell = c.get(x, y);
                 if (!cell) continue;
-                if (cell.char === ' ') continue;
+                const has_graphic = !!(cell as any).graphic;
+                if (cell.char === ' ' && !has_graphic) continue;
                 non_empty_cells += 1;
-                if ((cell as any).graphic) graphic_cells += 1;
+                if (has_graphic) graphic_cells += 1;
 
                 const canvas_y = (c.height - 1 - y) * tile_h;
 

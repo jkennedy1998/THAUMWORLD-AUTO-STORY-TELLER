@@ -51,6 +51,10 @@ export function resolveToolAssistedInputsEntry(baseDir, taiId) {
   if (typeof scriptData?.end_delay_ms !== 'number') {
     throw new Error(`Tool assisted inputs script for id ${normalizedId} is missing end_delay_ms: ${scriptPath}`);
   }
+  const lane = typeof entry.lane === 'string' ? entry.lane.trim() || null : null;
+  const status = typeof entry.status === 'string' ? entry.status.trim() || null : null;
+  const purpose = typeof entry.purpose === 'string' ? entry.purpose.trim() || null : null;
+  const notes = typeof entry.notes === 'string' ? entry.notes.trim() || null : null;
   return {
     id: normalizedId,
     testName,
@@ -59,5 +63,9 @@ export function resolveToolAssistedInputsEntry(baseDir, taiId) {
     scriptPath,
     relativePath,
     registryPath,
+    lane,
+    status,
+    purpose,
+    notes,
   };
 }

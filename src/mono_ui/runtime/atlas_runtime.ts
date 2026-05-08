@@ -1,4 +1,4 @@
-import type { InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from '../../render_shaders/graphics_contract.js';
+import type { AppearanceSlotAssignments, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from '../../render_shaders/graphics_contract.js';
 import { get_brightest_indexed_rgb, get_darkest_indexed_rgb, nearest_indexed_rgb } from '../colors.js';
 import { resolve_material_rgb } from './material_registry.js';
 import { project_lit_semantic_value, resolve_light_mag, type SemanticValue } from '../../mag/light.js';
@@ -330,17 +330,26 @@ function blend_channel(a: number, b: number, mix: number): number {
   return Math.max(0, Math.min(255, Math.round((a * (1 - mix)) + (b * mix))));
 }
 
-function resolve_decoded_band_rgb(decoded: Extract<DecodedSpritePixel, { kind: 'band' | 'interpolated_band' }>, materials: InlineMaterialAssignments, light_mag: number) {
-  const material_id = materials[decoded.band] ?? materials[1];
-  if (decoded.kind === 'band') {
-    const lit_value = project_lit_semantic_value(decoded.value, light_mag);
-    const resolved = resolve_material_rgb(material_id, lit_value);
+function resolve_slot_rgb(slot: 1 | 2 | 3, semantic_value: SemanticValue, materials: InlineMaterialAssignments, appearance_slots: AppearanceSlotAssignments | undefined, light_mag: number) {
+  const appearance = appearance_slots?.[slot] ?? appearance_slots?.[1];
+  if (appearance?.kind === 'flat_rgb') return nearest_indexed_rgb(appearance.rgb);
+  if (appearance?.kind === 'material') {
+    const lit_value = project_lit_semantic_value(semantic_value, light_mag);
+    const resolved = resolve_material_rgb(appearance.material_id, lit_value);
     return resolved ? nearest_indexed_rgb(resolved) : null;
   }
-  const lower_value = project_lit_semantic_value(decoded.lower, light_mag);
-  const upper_value = project_lit_semantic_value(decoded.upper, light_mag);
-  const lower_rgb = resolve_material_rgb(material_id, lower_value);
-  const upper_rgb = resolve_material_rgb(material_id, upper_value);
+  const material_id = materials[slot] ?? materials[1];
+  const lit_value = project_lit_semantic_value(semantic_value, light_mag);
+  const resolved = resolve_material_rgb(material_id, lit_value);
+  return resolved ? nearest_indexed_rgb(resolved) : null;
+}
+
+function resolve_decoded_band_rgb(decoded: Extract<DecodedSpritePixel, { kind: 'band' | 'interpolated_band' }>, materials: InlineMaterialAssignments, appearance_slots: AppearanceSlotAssignments | undefined, light_mag: number) {
+  if (decoded.kind === 'band') {
+    return resolve_slot_rgb(decoded.band, decoded.value, materials, appearance_slots, light_mag);
+  }
+  const lower_rgb = resolve_slot_rgb(decoded.band, decoded.lower, materials, appearance_slots, light_mag);
+  const upper_rgb = resolve_slot_rgb(decoded.band, decoded.upper, materials, appearance_slots, light_mag);
   if (!lower_rgb || !upper_rgb) return null;
   return nearest_indexed_rgb({
     r: blend_channel(lower_rgb.r, upper_rgb.r, decoded.mix),
@@ -349,9 +358,9 @@ function resolve_decoded_band_rgb(decoded: Extract<DecodedSpritePixel, { kind: '
   });
 }
 
-function render_tinted_frame(sheet: LoadedSheet, frame: AtlasWeightFrameRef, graphic: RenderGraphicRef, materials: InlineMaterialAssignments, family: AtlasFamilyManifest, light_mag?: number): HTMLCanvasElement {
+function render_tinted_frame(sheet: LoadedSheet, frame: AtlasWeightFrameRef, graphic: RenderGraphicRef, materials: InlineMaterialAssignments, appearance_slots: AppearanceSlotAssignments | undefined, family: AtlasFamilyManifest, light_mag?: number): HTMLCanvasElement {
   const resolved_light_mag = resolve_light_mag(light_mag);
-  const cache_key = JSON.stringify([frame.sheet, frame.x, frame.y, graphic.graphic_id, graphic.weight_index, graphic.view_direction, materials, resolved_light_mag]);
+  const cache_key = JSON.stringify([frame.sheet, frame.x, frame.y, graphic.graphic_id, graphic.weight_index, graphic.view_direction, materials, appearance_slots ?? null, resolved_light_mag]);
   const cached = tintedFrameCache.get(cache_key);
   if (cached) return cached;
 
@@ -390,7 +399,7 @@ function render_tinted_frame(sheet: LoadedSheet, frame: AtlasWeightFrameRef, gra
       data[i + 2] = override_rgb.b;
       continue;
     }
-    const resolved = resolve_decoded_band_rgb(decoded, materials, resolved_light_mag);
+    const resolved = resolve_decoded_band_rgb(decoded, materials, appearance_slots, resolved_light_mag);
     if (!resolved) continue;
     data[i] = resolved.r;
     data[i + 1] = resolved.g;
@@ -407,12 +416,12 @@ export type ResolvedAtlasFrame = {
   image: HTMLCanvasElement;
 };
 
-function make_resolved_frame_key(graphic: RenderGraphicRef, materials: InlineMaterialAssignments, light_mag?: number): string {
-  return JSON.stringify([graphic.graphic_id, graphic.weight_index, graphic.view_direction, graphic.facing ?? null, materials, resolve_light_mag(light_mag)]);
+function make_resolved_frame_key(graphic: RenderGraphicRef, materials: InlineMaterialAssignments, appearance_slots?: AppearanceSlotAssignments, light_mag?: number): string {
+  return JSON.stringify([graphic.graphic_id, graphic.weight_index, graphic.view_direction, graphic.facing ?? null, materials, appearance_slots ?? null, resolve_light_mag(light_mag)]);
 }
 
-export async function load_resolved_atlas_frame(graphic: RenderGraphicRef, materials: InlineMaterialAssignments, light_mag?: number): Promise<ResolvedAtlasFrame | null> {
-  const cache_key = make_resolved_frame_key(graphic, materials, light_mag);
+export async function load_resolved_atlas_frame(graphic: RenderGraphicRef, materials: InlineMaterialAssignments, appearance_slots?: AppearanceSlotAssignments, light_mag?: number): Promise<ResolvedAtlasFrame | null> {
+  const cache_key = make_resolved_frame_key(graphic, materials, appearance_slots, light_mag);
   const cached = resolvedFrameCache.get(cache_key);
   if (cached !== undefined) return cached;
   const pending = resolvedFramePromiseCache.get(cache_key);
@@ -431,7 +440,7 @@ export async function load_resolved_atlas_frame(graphic: RenderGraphicRef, mater
   if (!sheet_ref) return null;
   const loaded = await ensure_sheet_loaded(sheet_ref.src);
   if (!loaded) return null;
-  const image = render_tinted_frame(loaded, frame, graphic, { ...tile.material_slots, ...materials }, family, light_mag);
+  const image = render_tinted_frame(loaded, frame, graphic, { ...tile.material_slots, ...materials }, appearance_slots, family, light_mag);
     return { family, frame, image };
   })();
 
@@ -442,10 +451,33 @@ export async function load_resolved_atlas_frame(graphic: RenderGraphicRef, mater
   return resolved;
 }
 
-export function get_cached_resolved_atlas_frame(graphic: RenderGraphicRef, materials: InlineMaterialAssignments, light_mag?: number): ResolvedAtlasFrame | null | undefined {
-  return resolvedFrameCache.get(make_resolved_frame_key(graphic, materials, light_mag));
+export function get_cached_resolved_atlas_frame(graphic: RenderGraphicRef, materials: InlineMaterialAssignments, appearance_slots?: AppearanceSlotAssignments, light_mag?: number): ResolvedAtlasFrame | null | undefined {
+  return resolvedFrameCache.get(make_resolved_frame_key(graphic, materials, appearance_slots, light_mag));
 }
 
 export function get_known_atlas_family_ids(): string[] {
   return Array.from(FAMILY_BY_NAME.keys());
+}
+
+export type AtlasGraphicCatalogEntry = {
+  family: string;
+  graphic_id: string;
+  material_slots?: Partial<Record<1 | 2 | 3, string>>;
+};
+
+export function get_atlas_graphic_catalog(): AtlasGraphicCatalogEntry[] {
+  const entries: AtlasGraphicCatalogEntry[] = [];
+  for (const [family, manifest] of FAMILY_BY_NAME.entries()) {
+    for (const [graphic_id, tile] of Object.entries(manifest.tiles)) {
+      entries.push({
+        family,
+        graphic_id,
+        material_slots: tile.material_slots ? { ...tile.material_slots } : undefined,
+      });
+    }
+  }
+  entries.sort((a, b) => a.family === b.family
+    ? a.graphic_id.localeCompare(b.graphic_id)
+    : a.family.localeCompare(b.family));
+  return entries;
 }

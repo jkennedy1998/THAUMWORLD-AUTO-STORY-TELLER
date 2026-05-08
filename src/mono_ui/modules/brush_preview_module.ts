@@ -6,16 +6,18 @@
  * Acts like a "swatch" showing what you're about to draw with.
  */
 
-import type { Canvas, Module, Rect } from '../types.js';
+import type { Canvas, Cell, Module, Rect } from '../types.js';
 import { get_color_by_name } from '../colors.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 
+type PreviewBrush = Pick<Cell, 'char' | 'graphic' | 'appearance_slots' | 'materials' | 'rgb' | 'weight_index'>;
+
 export type BrushPreviewOptions = {
   id: string;
   rect: Rect;
-  get_left_brush: () => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
-  get_right_brush: () => { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+  get_left_brush: () => PreviewBrush;
+  get_right_brush: () => PreviewBrush;
   get_left_brush_size?: () => number;
   get_right_brush_size?: () => number;
   get_active_side?: () => 'left' | 'right';
@@ -53,12 +55,18 @@ export function make_brush_preview_module(opts: BrushPreviewOptions): Module {
 
       c.set(left_x, center_y, {
         char: left.char,
+        graphic: left.graphic ? { ...left.graphic } : undefined,
+        appearance_slots: left.appearance_slots,
+        materials: left.materials,
         rgb: left.rgb,
         style: 'regular',
         weight_index: left.weight_index
       });
       c.set(right_x, center_y, {
         char: right.char,
+        graphic: right.graphic ? { ...right.graphic } : undefined,
+        appearance_slots: right.appearance_slots,
+        materials: right.materials,
         rgb: right.rgb,
         style: 'regular',
         weight_index: right.weight_index

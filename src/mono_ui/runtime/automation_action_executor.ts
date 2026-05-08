@@ -4,6 +4,7 @@ import type {
   AutomationRuntimeProbe,
   ToolAssistedInputsContext,
   ToolAssistedInputsScriptAction,
+  ToolAssistedInputsTimingProfile,
 } from './automation_interfaces.js';
 
 type ActionExecutorOptions = {
@@ -19,10 +20,39 @@ type ActionExecutorOptions = {
   diagnostic_report: ReturnType<typeof import('./automation_diagnostic_report.js').create_tool_assisted_inputs_diagnostic_report>;
   emit: (event: 'action_fired' | 'action_failed', payload: Record<string, unknown>) => void;
   mark_action_completed: () => void;
+  timing_profile: ToolAssistedInputsTimingProfile;
 };
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function get_timing_profile_settings(timing_profile: ToolAssistedInputsTimingProfile): { text_char_delay_ms: number; key_tap_hold_ms: number } {
+  if (timing_profile === 'fast') return { text_char_delay_ms: 0, key_tap_hold_ms: 0 };
+  if (timing_profile === 'slow_debug') return { text_char_delay_ms: 80, key_tap_hold_ms: 60 };
+  return { text_char_delay_ms: 35, key_tap_hold_ms: 30 };
+}
+
+async function wait_for_text_value(options: {
+  runtime_probe: AutomationRuntimeProbe;
+  source: string;
+  field?: string | null;
+  expected_value: string;
+  timeout_ms: number;
+  poll_ms: number;
+}): Promise<{ ok: boolean; actual: string | null }> {
+  const started = Date.now();
+  let actual = options.runtime_probe.get_text_value?.(options.source, options.field ?? null) ?? null;
+  while (actual !== options.expected_value && (Date.now() - started) < options.timeout_ms) {
+    await sleep(options.poll_ms);
+    actual = options.runtime_probe.get_text_value?.(options.source, options.field ?? null) ?? null;
+  }
+  return { ok: actual === options.expected_value, actual };
+}
+
 export async function execute_tool_assisted_inputs_action(options: ActionExecutorOptions): Promise<boolean> {
-  const { action, action_index, current_tick, target_breath, context, runtime_probe, keyboard_driver, pointer_driver, capture_store, diagnostic_report, emit, mark_action_completed } = options;
+  const { action, action_index, current_tick, target_breath, context, runtime_probe, keyboard_driver, pointer_driver, capture_store, diagnostic_report, emit, mark_action_completed, timing_profile } = options;
+  const timing = get_timing_profile_settings(timing_profile);
   try {
     if (action.type === 'assert_context_ready') {
       const ready = Boolean(context.session_token && context.actor_ref && context.place_id);
@@ -196,6 +226,23 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), source: action.source, field: action.field ?? null, actual_text: actual });
       mark_action_completed();
       return true;
+    } else if (action.type === 'wait_for_text_value_literal') {
+      const result = await wait_for_text_value({
+        runtime_probe,
+        source: action.source,
+        field: action.field ?? null,
+        expected_value: action.value,
+        timeout_ms: action.timeout_ms ?? 4000,
+        poll_ms: action.poll_ms ?? 50,
+      });
+      if (!result.ok) {
+        diagnostic_report.record_failure({ action_index, action_type: action.type, source: action.source, field: action.field ?? null, expected_text: action.value, actual_text: result.actual, timeout_ms: action.timeout_ms ?? 4000 });
+        emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: 'tool_assisted_inputs_wait_for_text_value_literal_timeout', source: action.source, field: action.field ?? null, expected_text: action.value, actual_text: result.actual, timeout_ms: action.timeout_ms ?? 4000, nonfatal: true });
+        return true;
+      }
+      emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), source: action.source, field: action.field ?? null, actual_text: result.actual, timeout_ms: action.timeout_ms ?? 4000 });
+      mark_action_completed();
+      return true;
     } else if (action.type === 'assert_movement_trace_ready') {
       const trace = runtime_probe.get_movement_trace();
       if (!trace) {
@@ -289,12 +336,20 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       await Promise.resolve(keyboard_driver.send_keyup(action));
     } else if (action.type === 'key_tap') {
       await Promise.resolve(keyboard_driver.send_keydown(action));
-      if ((action.hold_ms ?? 0) > 0) {
-        await new Promise((resolve) => window.setTimeout(resolve, action.hold_ms ?? 0));
+      const hold_ms = action.hold_ms ?? timing.key_tap_hold_ms;
+      if (hold_ms > 0) {
+        await sleep(hold_ms);
       }
       await Promise.resolve(keyboard_driver.send_keyup(action));
     } else if (action.type === 'text_input') {
-      await Promise.resolve(keyboard_driver.send_text(action));
+      if (timing.text_char_delay_ms > 0 && action.text.length > 1) {
+        for (const char of action.text) {
+          await Promise.resolve(keyboard_driver.send_text({ text: char }));
+          await sleep(timing.text_char_delay_ms);
+        }
+      } else {
+        await Promise.resolve(keyboard_driver.send_text(action));
+      }
     } else if (action.type === 'pointer_move') {
       await Promise.resolve(pointer_driver.move(action));
     } else if (action.type === 'pointer_down') {

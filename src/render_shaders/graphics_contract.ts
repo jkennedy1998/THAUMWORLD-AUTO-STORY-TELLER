@@ -3,6 +3,18 @@ export type CardinalDirection = 'north' | 'east' | 'south' | 'west';
 
 export type GraphicId = string;
 
+export type AppearanceSlotRgb = {
+  r: number;
+  g: number;
+  b: number;
+};
+
+export type AppearanceSlotValue =
+  | { kind: 'material'; material_id: string }
+  | { kind: 'flat_rgb'; rgb: AppearanceSlotRgb };
+
+export type AppearanceSlotAssignments = Partial<Record<1 | 2 | 3, AppearanceSlotValue>>;
+
 export type StateMatch = {
   path: string;
   equals?: string | number | boolean;
@@ -95,6 +107,7 @@ export type EffectiveRenderState = {
   graphic_id: GraphicId;
   weight: 0 | 1 | 2 | 3;
   material_slots: InlineMaterialAssignments;
+  appearance_slots?: AppearanceSlotAssignments;
   view_direction: ViewDirection;
   facing?: ViewDirection;
   part_role?: string;

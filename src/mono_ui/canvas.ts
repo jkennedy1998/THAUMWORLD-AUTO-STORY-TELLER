@@ -36,6 +36,7 @@ function normalize_cell(partial: Partial<Cell> & { char: string }): Cell {
     return {
         char,
         graphic: partial.graphic,
+        appearance_slots: partial.appearance_slots,
         materials: partial.materials,
         rgb,
         style,
@@ -48,6 +49,7 @@ function normalize_cell(partial: Partial<Cell> & { char: string }): Cell {
 function assign_cell(dst: Cell, src: Cell): void {
     dst.char = src.char;
     dst.graphic = src.graphic;
+    dst.appearance_slots = src.appearance_slots;
     dst.materials = src.materials;
     dst.rgb = src.rgb;
     dst.style = src.style;

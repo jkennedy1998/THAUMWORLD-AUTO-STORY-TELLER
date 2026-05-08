@@ -1,0 +1,21 @@
+{
+  "id": "game_join_session_baseline",
+  "test_name": "game_test_join_session_baseline",
+  "clock_mode": "breath",
+  "timing_profile": "human",
+  "open_ms": 22000,
+  "description": "Canonical THAUMWORLD multiplayer baseline: validate local join probe, connect, websocket/session readiness with no actor-claim requirement.",
+  "start_delay_ms": 1200,
+  "end_delay_ms": 1200,
+  "boot": {
+    "auto_connect": true,
+    "auto_claim": false
+  },
+  "actions": [
+    { "at_breath": 0, "type": "wait_for_text_value_literal", "source": "join", "field": "selected_connection_kind", "value": "local", "timeout_ms": 4000, "poll_ms": 50 },
+    { "at_breath": 0, "type": "wait_for_text_value_literal", "source": "join", "field": "probe_status", "value": "online", "timeout_ms": 4000, "poll_ms": 50 },
+    { "at_breath": 0, "type": "wait_for_text_value_literal", "source": "join", "field": "supports_join", "value": "true", "timeout_ms": 4000, "poll_ms": 50 },
+    { "at_breath": 0, "type": "wait_for_text_value_literal", "source": "session", "field": "session_token_present", "value": "true", "timeout_ms": 4000, "poll_ms": 50 },
+    { "at_breath": 1, "type": "capture_join_snapshot", "slot": "join_snapshot" }
+  ]
+}

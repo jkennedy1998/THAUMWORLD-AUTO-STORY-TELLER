@@ -4,6 +4,7 @@ import {
   normalize_join_host_input,
 } from '../shared/multiplayer_transport.js';
 import type { EngineConnectionEntry } from './connection_types.js';
+import { list_recent_remote_connections } from './remote_connection_store.js';
 
 const STORAGE_KEY = 'thaumworld_saved_join_hosts';
 
@@ -75,6 +76,7 @@ function to_engine_connection(entry: StoredManualConnection): EngineConnectionEn
     name: entry.label,
     host: entry.host,
     kind: 'saved_manual',
+    method: 'direct',
     scope: 'wifi',
     transport: {
       api_base_url: transport.api_base_url,
@@ -106,6 +108,7 @@ export function get_builtin_local_connection(slot: number): EngineConnectionEntr
     name: 'Local',
     host: 'local',
     kind: 'local',
+    method: 'local',
     scope: 'local_machine',
     transport: {
       api_base_url: DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT.api_base_url,
@@ -123,7 +126,7 @@ export function list_saved_manual_connections(): EngineConnectionEntry[] {
 }
 
 export function list_engine_connections(slot: number): EngineConnectionEntry[] {
-  return [get_builtin_local_connection(slot), ...list_saved_manual_connections()];
+  return [get_builtin_local_connection(slot), ...list_recent_remote_connections(), ...list_saved_manual_connections()];
 }
 
 export function save_manual_connection(host: string, name?: string): EngineConnectionEntry {

@@ -8,7 +8,8 @@ import { has_awareness_entry } from "../shared/awareness.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { getAvailableTargets } from "../action_system/target_resolution.js";
 import { debug_log, debug_warn } from "../shared/debug.js";
-import { can_actor_afford_action_cost, can_actor_afford_movement_cost, consume_actor_action_cost, consume_actor_movement_cost, finalize_timed_event_turn_if_exhausted, get_active_actor_ref, is_timed_event_active } from "../world_storage/store.js";
+import { can_actor_afford_action_cost, can_actor_afford_movement_cost, consume_actor_action_cost, consume_actor_movement_cost, get_active_actor_ref, is_timed_event_active } from "../world_storage/store.js";
+import { finalize_timed_event_turn_if_exhausted } from "../timed_events/runtime.js";
 
 let pipeline: ActionPipeline | null = null;
 

@@ -44,6 +44,7 @@ interface ElectronAPI {
   startupJoinConfig?: {
     preferredHost?: string;
     autoOpen?: boolean;
+    remoteRelayOrigin?: string;
   };
   toolAssistedInputsBootConfig?: {
     enabled?: boolean;
@@ -55,9 +56,12 @@ interface ElectronAPI {
     scriptPath?: string;
     painterBootFilePath?: string;
     joinPreferredConnectionId?: string;
-    joinPreferredConnectionKind?: 'local' | 'saved_manual' | 'lan_discovered' | string;
+    joinPreferredConnectionKind?: 'local' | 'saved_manual' | 'lan_discovered' | 'remote_join_code' | string;
     joinPreferredHost?: string;
     joinAutoJoin?: boolean;
+    joinCode?: string;
+    joinRelayOrigin?: string;
+    timingProfile?: 'fast' | 'human' | 'slow_debug' | string;
     gameActorId?: string;
     actorId?: string;
   };

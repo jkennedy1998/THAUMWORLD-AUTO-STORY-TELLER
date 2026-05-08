@@ -27,6 +27,7 @@ export function reduce_layers_to_cell(layers: readonly RenderLayer[], opts?: Red
         return {
             char: ' ',
             graphic: undefined,
+            appearance_slots: undefined,
             materials: undefined,
             light_mag: opts?.light_mag,
             rgb: quantize ? nearest_indexed_rgb(fallback_rgb) : fallback_rgb,
@@ -52,6 +53,7 @@ export function reduce_layers_to_cell(layers: readonly RenderLayer[], opts?: Red
     return {
         char,
         graphic: top.graphic,
+        appearance_slots: top.appearance_slots,
         materials: top.materials,
         light_mag: opts?.light_mag,
         rgb: out_rgb,

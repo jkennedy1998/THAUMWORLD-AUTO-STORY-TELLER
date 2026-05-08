@@ -1,4 +1,4 @@
-import type { GridCell } from './types.js';
+import { clone_appearance_slot_assignments, type GridCell } from './types.js';
 import type { Grid } from './types.js';
 import type { PainterDocumentRuntime } from './painter_document_runtime.js';
 import { createVoxelSpace, getVoxel, type CameraConfig, type VoxelLayer, type VoxelSpace } from './voxel_space.js';
@@ -73,6 +73,7 @@ function make_empty_cell(): GridCell {
   return {
     char: ' ',
     graphic: undefined,
+    appearance_slots: undefined,
     materials: undefined,
     rgb: { r: 0, g: 0, b: 0 },
     weight_index: 1,
@@ -86,8 +87,9 @@ function make_empty_cells(width: number, height: number): GridCell[][] {
 function clone_cell(cell: GridCell): GridCell {
   return {
     char: cell.char,
-    graphic: cell.graphic,
-    materials: cell.materials,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
     rgb: { ...cell.rgb },
     weight_index: cell.weight_index,
     render_index: cell.render_index,
@@ -520,7 +522,7 @@ export function get_painter_world_content_bounds_center(source: VoxelSpace): { x
       if (!row) continue;
       for (let x = 0; x < source.bounds.width; x += 1) {
         const cell = row[x] ?? getVoxel(source, x, y, worldZ);
-        if (!cell || cell.char === ' ') continue;
+        if (!cell || (cell.char === ' ' && !cell.graphic)) continue;
         min_x = Math.min(min_x, x);
         min_y = Math.min(min_y, y);
         min_z = Math.min(min_z, worldZ);

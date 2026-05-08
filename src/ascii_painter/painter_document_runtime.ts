@@ -104,6 +104,9 @@ export type PainterPreviewCellChange = {
   y: number;
   z: number;
   char: string;
+  graphic?: PainterVoxelRecord['graphic'];
+  appearance_slots?: PainterVoxelRecord['appearance_slots'];
+  materials?: PainterVoxelRecord['materials'];
   rgb: { r: number; g: number; b: number };
   weight_index: number;
 };
@@ -1254,7 +1257,8 @@ export function resolve_painter_voxel_winner(runtime: PainterDocumentRuntime, co
 
 export function resolve_painter_group_preview_winner(runtime: PainterDocumentRuntime, groupId: string, change: PainterPreviewCellChange): ResolveVoxelWinnerResult {
   const coordKey = make_painter_coord_key(change.x, change.y, change.z);
-  const previewClearsCell = String(change.char ?? ' ') === ' ';
+  const nextGraphic = change.graphic ? { ...change.graphic } : undefined;
+  const previewClearsCell = String(change.char ?? ' ') === ' ' && !nextGraphic;
   const contributors = new Set(runtime.coordinate_group_index.get(coordKey) ?? []);
   if (previewClearsCell) contributors.delete(groupId);
   else contributors.add(groupId);
@@ -1274,6 +1278,9 @@ export function resolve_painter_group_preview_winner(runtime: PainterDocumentRun
           z: Math.floor(change.z),
           key: coordKey,
           char: String(change.char ?? ' ').charAt(0) || ' ',
+          graphic: nextGraphic,
+          appearance_slots: change.appearance_slots,
+          materials: change.materials,
           rgb: { ...change.rgb },
           weight_index: change.weight_index,
         }),

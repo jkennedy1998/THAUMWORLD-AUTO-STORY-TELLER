@@ -6,7 +6,7 @@ import { build_entity_value_mag_breakdown, type EntityValueMagBreakdown } from "
 import { tag_key } from "../tag_system/tag_key.js";
 import { load_master_item, type ItemDefinition } from "./store.js";
 import { debug_warn } from "../shared/debug.js";
-import type { GraphicsModel, InlineMaterialAssignments, MaterialOptionsBySlot, ViewDirection } from "../render_shaders/graphics_contract.js";
+import type { AppearanceSlotAssignments, GraphicsModel, InlineMaterialAssignments, MaterialOptionsBySlot, ViewDirection } from "../render_shaders/graphics_contract.js";
 
 const warned_legacy_item_ids = new Set<string>();
 
@@ -22,6 +22,7 @@ export type ResolvedItem = {
   max_stack_size: number;
   graphics?: GraphicsModel;
   material_options?: MaterialOptionsBySlot;
+  appearance_slots?: AppearanceSlotAssignments;
   materials?: InlineMaterialAssignments;
   state?: Record<string, unknown>;
   facing?: ViewDirection | string;
@@ -80,6 +81,7 @@ export function resolve_inline_item(def_id: string, item: InlineItem): ResolvedI
     max_stack_size: Number((def as any).max_stack_size ?? 1),
     graphics: def.graphics,
     material_options: def.materials,
+    appearance_slots: (item as any)?.appearance_slots,
     materials: (item as any)?.materials,
     state: (item as any)?.state,
     facing: (item as any)?.facing,

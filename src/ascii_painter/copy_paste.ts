@@ -11,7 +11,7 @@
  * 2. Special encoded format - preserves all attributes using character encoding
  */
 
-import type { Grid, GridCell } from './types.js';
+import { clone_appearance_slot_assignments, type Grid, type GridCell } from './types.js';
 import type { SelectionBitmap } from './selection.js';
 
 // ASCII art for encoding (using extended ASCII range for data storage)
@@ -30,6 +30,18 @@ export type EncodedData = {
   width: number;
   height: number;
 };
+
+function cloneGridCell(cell: GridCell): GridCell {
+  return {
+    char: cell.char,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
+    rgb: { ...cell.rgb },
+    weight_index: cell.weight_index,
+    render_index: cell.render_index,
+  };
+}
 
 // Encode copy data to special format
 export function encodeToSpecialFormat(data: CopyData): string {
@@ -93,6 +105,10 @@ export function encodeToSpecialFormat(data: CopyData): string {
   }
   lines.push('COLOR:');
   lines.push(...colorLines);
+
+  const payloadRows = data.cells.map((row) => row.map((cell) => cell ? cloneGridCell(cell) : null));
+  lines.push('PAYLOAD:');
+  lines.push(JSON.stringify(payloadRows));
   
   return lines.join('\n');
 }
@@ -136,7 +152,7 @@ export function decodeFromSpecialFormat(encoded: string): CopyData | null {
           // and should remain null so paste doesn't clear the target
           if (char !== ' ') {
             if (!cells[y]![x]) {
-              cells[y]![x] = { char, rgb: { r: 255, g: 255, b: 255 }, weight_index: 1 };
+              cells[y]![x] = { char, graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 255, g: 255, b: 255 }, weight_index: 1 };
               textCellsCreated++;
             } else {
               cells[y]![x]!.char = char;
@@ -202,6 +218,37 @@ export function decodeFromSpecialFormat(encoded: string): CopyData | null {
     }
     console.log(`DECODE: COLOR section - ${colorCellsUpdated} cells updated, ${whiteCellsFound} white cells`);
     
+    if (lines[lineIndex]?.trim() === 'PAYLOAD:') {
+      lineIndex++;
+      const payloadLine = lines[lineIndex] ?? '';
+      try {
+        const payloadRows = JSON.parse(payloadLine) as unknown;
+        if (Array.isArray(payloadRows)) {
+          for (let y = 0; y < height; y++) {
+            const row = Array.isArray(payloadRows[y]) ? payloadRows[y] as unknown[] : [];
+            for (let x = 0; x < width; x++) {
+              const value = row[x];
+              if (!value || typeof value !== 'object') continue;
+              const maybe = value as Record<string, any>;
+              cells[y]![x] = {
+                char: typeof maybe.char === 'string' && maybe.char.length > 0 ? maybe.char[0] : ' ',
+                graphic: maybe.graphic && typeof maybe.graphic === 'object' ? { ...maybe.graphic } : undefined,
+                appearance_slots: clone_appearance_slot_assignments(maybe.appearance_slots),
+                materials: maybe.materials && typeof maybe.materials === 'object' ? { ...maybe.materials } : undefined,
+                rgb: maybe.rgb && typeof maybe.rgb === 'object'
+                  ? { r: Number(maybe.rgb.r) || 0, g: Number(maybe.rgb.g) || 0, b: Number(maybe.rgb.b) || 0 }
+                  : { r: 255, g: 255, b: 255 },
+                weight_index: typeof maybe.weight_index === 'number' ? maybe.weight_index : 1,
+                render_index: typeof maybe.render_index === 'number' ? maybe.render_index : undefined,
+              };
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('DECODE: failed to parse PAYLOAD section, falling back to legacy sections', e);
+      }
+    }
+
     // Debug: Show first few cells
     for (let y = 0; y < Math.min(2, height); y++) {
       let row = '';
@@ -253,7 +300,7 @@ export function copyFromGrid(grid: Grid, selection: SelectionBitmap): CopyData |
             whiteCellCount++;
             console.log(`COPY: Found white cell at (${x},${y}) char='${cell.char}', weight=${cell.weight_index}`);
           }
-          row.push({ ...cell });
+          row.push(cloneGridCell(cell));
         } else {
           row.push(null);
         }
@@ -284,6 +331,9 @@ export function textToCopyData(text: string): CopyData {
       if (char !== ' ') {
         row.push({
           char,
+          graphic: undefined,
+          appearance_slots: undefined,
+          materials: undefined,
           rgb: { r: 255, g: 255, b: 255 },
           weight_index: 1
         });
@@ -333,11 +383,11 @@ export function pasteToGrid(
       }
       
       // Check if this is a space/empty cell
-      const isSpace = !cell || cell.char === ' ';
+      const isSpace = !cell || (cell.char === ' ' && !cell.graphic);
       
       if (cell && !isSpace) {
         // Non-space cell: always place it
-        grid.cells[targetY]![targetX] = { ...cell };
+        grid.cells[targetY]![targetX] = cloneGridCell(cell);
         placed++;
       } else if (isSpace) {
         // Space cell: handle based on spaceReplace setting
@@ -345,6 +395,9 @@ export function pasteToGrid(
           // Replace mode: clear the cell with a space
           grid.cells[targetY]![targetX] = {
             char: ' ',
+            graphic: undefined,
+            appearance_slots: undefined,
+            materials: undefined,
             rgb: { r: 0, g: 0, b: 0 },
             weight_index: 0
           };

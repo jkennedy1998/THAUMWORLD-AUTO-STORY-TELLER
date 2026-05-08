@@ -20,7 +20,7 @@ import {
 } from './voxel_space.js';
 
 function is_non_empty_cell(cell: GridCell | null | undefined): cell is GridCell {
-  return !!cell && cell.char !== ' ';
+  return !!cell && (cell.char !== ' ' || !!cell.graphic);
 }
 
 export function import_legacy_voxel_space_as_painter_document(legacy: VoxelSpace, opts?: {
@@ -60,6 +60,9 @@ export function import_legacy_voxel_space_as_painter_document(legacy: VoxelSpace
           y,
           z,
           char: cell.char,
+          graphic: cell.graphic ? { ...cell.graphic } : undefined,
+          appearance_slots: cell.appearance_slots,
+          materials: cell.materials ? { ...cell.materials } : undefined,
           rgb: { ...cell.rgb },
           weight_index: cell.weight_index,
         }));
@@ -102,6 +105,9 @@ export function build_legacy_voxel_space_from_painter_runtime(runtime: PainterDo
     layer.visible = true;
     setVoxel(legacy, resolved.x - document.bounds.minX, resolved.y - document.bounds.minY, resolved.z, {
       char: resolved.cell.char,
+      graphic: resolved.cell.graphic ? { ...resolved.cell.graphic } : undefined,
+      appearance_slots: resolved.cell.appearance_slots,
+      materials: resolved.cell.materials ? { ...resolved.cell.materials } : undefined,
       rgb: { ...resolved.cell.rgb },
       weight_index: resolved.cell.weight_index,
     });
@@ -124,6 +130,9 @@ export function build_projection_source_voxel_space_from_painter_runtime(runtime
   for (const resolved of runtime.resolved_visible_index.values()) {
     setVoxel(source, resolved.x - runtime.document.bounds.minX, resolved.y - runtime.document.bounds.minY, resolved.z, {
       char: resolved.cell.char,
+      graphic: resolved.cell.graphic ? { ...resolved.cell.graphic } : undefined,
+      appearance_slots: resolved.cell.appearance_slots,
+      materials: resolved.cell.materials ? { ...resolved.cell.materials } : undefined,
       rgb: { ...resolved.cell.rgb },
       weight_index: resolved.cell.weight_index,
     });

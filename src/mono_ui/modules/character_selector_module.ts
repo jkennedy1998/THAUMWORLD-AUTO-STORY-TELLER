@@ -9,6 +9,10 @@
 import type { Canvas, Module, Rect, PointerEvent, WheelEvent, Rgb } from '../types.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
+import type { GradiatorState, GradiatorSlot } from '../../ascii_painter/gradiator.js';
+import { getSafeGradiatorSlot } from '../../ascii_painter/gradiator.js';
+import type { AppearanceSlotAssignments, InlineMaterialAssignments, RenderGraphicRef } from '../../render_shaders/graphics_contract.js';
+import { get_atlas_graphic_catalog, type AtlasGraphicCatalogEntry } from '../runtime/atlas_runtime.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 
 export type CharacterSelectorOptions = {
@@ -16,12 +20,21 @@ export type CharacterSelectorOptions = {
   rect: Rect;
   selected_char?: string;
   get_selected_char?: () => string;
+  get_selected_visual_key?: () => string;
   get_left_selected_char?: () => string;
   get_right_selected_char?: () => string;
+  get_left_selected_visual_key?: () => string;
+  get_right_selected_visual_key?: () => string;
   get_left_rgb?: () => Rgb;
   get_right_rgb?: () => Rgb;
   get_left_weight_index?: () => number;
   get_right_weight_index?: () => number;
+  get_gradiator_state?: () => GradiatorState;
+  on_gradiator_slot_select?: (slot: GradiatorSlot) => void;
+  on_gradiator_char_select?: (slot: GradiatorSlot, x: number) => void;
+  on_gradiator_add_char?: (slot: GradiatorSlot) => void;
+  on_gradiator_remove_char?: (slot: GradiatorSlot) => void;
+  on_visual_select?: (visual: VisualPickerEntry, button: number) => void;
   on_char_select: (char: string, button: number) => void;
   on_move?: (new_rect: Rect) => void;
   on_close?: () => void;
@@ -41,16 +54,30 @@ type ShowcaseGroup = {
   chars: string[];
 };
 
+export type VisualPickerEntry = {
+  key: string;
+  label: string;
+  char: string;
+  rgb: Rgb;
+  weight_index: number;
+  graphic?: RenderGraphicRef;
+  appearance_slots?: AppearanceSlotAssignments;
+  materials?: InlineMaterialAssignments;
+};
+
 type SelectorRow =
   | { kind: 'text'; text: string; rgb: Rgb; weight_index: number }
-  | { kind: 'glyphs'; label: string; chars: string[]; style: 'compact' | 'recent' };
+  | { kind: 'glyphs'; label: string; chars: string[]; style: 'compact' | 'recent' }
+  | { kind: 'visuals'; label: string; entries: VisualPickerEntry[] }
+  | { kind: 'gradiator'; slot: GradiatorSlot };
 
-type GlyphHitbox = {
-  x0: number;
-  x1: number;
-  y: number;
-  char: string;
-};
+type SelectorHitbox =
+  | { kind: 'glyph'; x0: number; x1: number; y: number; char: string }
+  | { kind: 'visual'; x0: number; x1: number; y: number; entry: VisualPickerEntry }
+  | { kind: 'gradiator_slot'; x0: number; x1: number; y: number; slot: GradiatorSlot }
+  | { kind: 'gradiator_char'; x0: number; x1: number; y: number; slot: GradiatorSlot; char_x: number }
+  | { kind: 'gradiator_add'; x0: number; x1: number; y: number; slot: GradiatorSlot }
+  | { kind: 'gradiator_remove'; x0: number; x1: number; y: number; slot: GradiatorSlot };
 
 const GLYPH_CELL_WIDTH = 3;
 const RECENT_CELL_WIDTH = 5;
@@ -109,6 +136,38 @@ const BLOCK_SHOWCASE_GROUPS: ShowcaseGroup[] = [
   { label: 'SHAPES', chars: chars_from_string('■□▢▣▪▫▤▥▦▧▨▩▬▭▮▯▰▱◰◱◲◳◧◨◩◪◫◻◼◽◾⎺⎻⎼⎽∎') },
 ];
 
+function humanize_graphic_id(graphic_id: string): string {
+  const raw = graphic_id.replace(/^(tile|item|character|text)_/, '');
+  return raw
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.length <= 3 ? part.toUpperCase() : `${part[0]!.toUpperCase()}${part.slice(1)}`)
+    .join(' ');
+}
+
+function atlas_catalog_entry_to_visual(entry: AtlasGraphicCatalogEntry): VisualPickerEntry {
+  const materials = entry.material_slots ? { ...entry.material_slots } : undefined;
+  return {
+    key: `graphic:${entry.graphic_id}`,
+    label: humanize_graphic_id(entry.graphic_id),
+    char: ' ',
+    rgb: get_ui_semantic_rgb('medium'),
+    weight_index: 2,
+    graphic: { graphic_id: entry.graphic_id, view_direction: 'south', weight_index: 2 },
+    materials,
+  };
+}
+
+const GRAPHIC_CATALOG_BY_FAMILY = (() => {
+  const grouped = new Map<string, VisualPickerEntry[]>();
+  for (const entry of get_atlas_graphic_catalog()) {
+    const list = grouped.get(entry.family) ?? [];
+    list.push(atlas_catalog_entry_to_visual(entry));
+    grouped.set(entry.family, list);
+  }
+  return Array.from(grouped.entries()).map(([family, entries]) => ({ family, entries }));
+})();
+
 function get_content_bounds(rect: Rect): { top: number; bottom: number; visible_rows: number } {
   const top = rect.y1 - 2;
   const bottom = rect.y0 + 1;
@@ -160,12 +219,37 @@ function push_recent_rows(rows: SelectorRow[], recent_chars: string[], rect: Rec
   }
 }
 
-function build_selector_rows(rect: Rect, recent_chars: string[]): SelectorRow[] {
+function push_visual_rows(rows: SelectorRow[], label: string, entries: VisualPickerEntry[], rect: Rect): void {
+  const columns = get_glyph_columns(rect, label.length > 0);
+  for (let i = 0; i < entries.length; i += columns) {
+    rows.push({
+      kind: 'visuals',
+      label: i === 0 ? label : '',
+      entries: entries.slice(i, i + columns),
+    });
+  }
+}
+
+function build_selector_rows(rect: Rect, recent_chars: string[], gradiator_state?: GradiatorState | null): SelectorRow[] {
   const rows: SelectorRow[] = [];
   const bg = get_ui_semantic_rgb('background');
   const medium = get_ui_semantic_rgb('medium');
   const bright = get_ui_semantic_rgb('bright');
   const vivid = get_ui_semantic_rgb('vivid');
+  if (gradiator_state) {
+    rows.push({ kind: 'text', text: '[GRADIATOR]', rgb: bright, weight_index: 5 });
+    rows.push({ kind: 'text', text: 'ramps for paste/convert', rgb: medium, weight_index: 2 });
+    rows.push({ kind: 'gradiator', slot: 0 });
+    rows.push({ kind: 'gradiator', slot: 1 });
+    rows.push({ kind: 'gradiator', slot: 2 });
+    rows.push({ kind: 'text', text: '', rgb: bg, weight_index: 1 });
+  }
+  rows.push({ kind: 'text', text: '[ATLAS TILES]', rgb: bright, weight_index: 5 });
+  for (const family of GRAPHIC_CATALOG_BY_FAMILY) {
+    push_visual_rows(rows, family.family.toUpperCase(), family.entries, rect);
+  }
+  rows.push({ kind: 'text', text: '', rgb: bg, weight_index: 1 });
+
   if (recent_chars.length > 0) {
     push_recent_rows(rows, recent_chars, rect);
   }
@@ -197,6 +281,13 @@ function get_marker_char(char: string, left_char: string, right_char: string): s
   if (char === left_char && char === right_char) return 'B';
   if (char === left_char) return 'L';
   if (char === right_char) return 'R';
+  return ' ';
+}
+
+function get_marker_for_visual_key(key: string, left_key: string, right_key: string): string {
+  if (key === left_key && key === right_key) return 'B';
+  if (key === left_key) return 'L';
+  if (key === right_key) return 'R';
   return ' ';
 }
 
@@ -251,12 +342,13 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
 
   let scroll_offset = 0;
   let selected_char = opts.selected_char ?? opts.get_selected_char?.() ?? '█';
-  const recent_chars: string[] = [selected_char];
-  let last_hitboxes: GlyphHitbox[] = [];
+  let selected_visual_key = opts.get_selected_visual_key?.() ?? `char:${selected_char}`;
+  const recent_chars: string[] = selected_char === ' ' ? [] : [selected_char];
+  let last_hitboxes: SelectorHitbox[] = [];
   let last_selected_side: 'left' | 'right' = 'left';
 
   function get_rows(rect: Rect): SelectorRow[] {
-    return build_selector_rows(rect, recent_chars);
+    return build_selector_rows(rect, recent_chars, opts.get_gradiator_state?.() ?? null);
   }
 
   function clamp_scroll(rect: Rect): SelectorRow[] {
@@ -269,15 +361,25 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
 
   function select_char(char: string, button: number): void {
     selected_char = char;
+    selected_visual_key = `char:${char}`;
     last_selected_side = button === 2 ? 'right' : 'left';
     push_recent_char(recent_chars, char);
     opts.on_char_select(char, button);
   }
 
+  function select_visual(entry: VisualPickerEntry, button: number): void {
+    if (!entry.graphic) selected_char = entry.char;
+    selected_visual_key = entry.key;
+    last_selected_side = button === 2 ? 'right' : 'left';
+    if (!entry.graphic) push_recent_char(recent_chars, entry.char);
+    if (opts.on_visual_select) opts.on_visual_select(entry, button);
+    else opts.on_char_select(entry.char, button);
+  }
+
   return make_floating_panel_module({
     id: opts.id,
     rect: opts.rect,
-    title: 'CHARS',
+    title: 'VISUALS',
     gizmos: gizmo_config,
     resize: {
       min_width: MIN_WIDTH,
@@ -287,8 +389,11 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
     },
     draw_content(c: Canvas, rect: Rect): void {
       selected_char = opts.get_selected_char?.() ?? selected_char;
+      selected_visual_key = opts.get_selected_visual_key?.() ?? selected_visual_key;
       const left_selected_char = opts.get_left_selected_char?.() ?? selected_char;
       const right_selected_char = opts.get_right_selected_char?.() ?? selected_char;
+      const left_selected_visual_key = opts.get_left_selected_visual_key?.() ?? `char:${left_selected_char}`;
+      const right_selected_visual_key = opts.get_right_selected_visual_key?.() ?? `char:${right_selected_char}`;
       const left_rgb = opts.get_left_rgb?.() ?? get_ui_semantic_rgb('left_hand');
       const right_rgb = opts.get_right_rgb?.() ?? get_ui_semantic_rgb('right_hand');
       const left_weight_index = opts.get_left_weight_index?.() ?? 4;
@@ -319,6 +424,100 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
               style: 'regular',
               weight_index: row.weight_index,
             });
+          }
+          continue;
+        }
+
+        if (row.kind === 'visuals') {
+          const label_x = rect.x0 + 2;
+          if (row.label.length > 0) {
+            const label = row.label.padEnd(Math.max(0, LABEL_WIDTH - 1), ' ').slice(0, Math.max(0, LABEL_WIDTH - 1));
+            for (let i = 0; i < label.length && label_x + i < rect.x1; i += 1) {
+              c.set(label_x + i, y, {
+                char: label[i]!,
+                rgb: label_rgb,
+                style: 'regular',
+                weight_index: 3,
+              });
+            }
+          }
+
+          const glyph_start_x = rect.x0 + 2 + (row.label.length > 0 ? LABEL_WIDTH : 0);
+          for (let i = 0; i < row.entries.length; i += 1) {
+            const entry = row.entries[i]!;
+            const marker = get_marker_for_visual_key(entry.key, left_selected_visual_key, right_selected_visual_key);
+            const marker_rgb = marker === 'B'
+              ? marker_both_rgb
+              : marker === 'L'
+                ? marker_left_rgb
+                : marker === 'R'
+                  ? marker_right_rgb
+                  : label_rgb;
+            const is_selected = entry.key === selected_visual_key;
+            const x = glyph_start_x + (i * GLYPH_CELL_WIDTH);
+            if (x + 1 >= rect.x1) break;
+            c.set(x, y, {
+              char: marker,
+              rgb: marker_rgb,
+              style: 'regular',
+              weight_index: marker === ' ' ? 1 : 3,
+            });
+            c.set(x + 1, y, {
+              char: entry.char,
+              rgb: is_selected ? get_ui_semantic_rgb('bright') : entry.rgb,
+              style: 'regular',
+              weight_index: is_selected ? Math.max(3, entry.weight_index) : entry.weight_index,
+              graphic: entry.graphic ? { ...entry.graphic } : undefined,
+              appearance_slots: entry.appearance_slots,
+              materials: entry.materials,
+            });
+            last_hitboxes.push({ kind: 'visual', x0: x, x1: x + 1, y, entry });
+          }
+          continue;
+        }
+
+        if (row.kind === 'gradiator') {
+          const gradiator_state = opts.get_gradiator_state?.();
+          if (!gradiator_state) continue;
+          const slot = row.slot;
+          const gradiator = getSafeGradiatorSlot(gradiator_state, slot);
+          const is_active = slot === gradiator_state.activeSlot;
+          const active_rgb = get_ui_semantic_rgb('vivid');
+          const inactive_rgb = get_ui_semantic_rgb('medium');
+          const slot_x0 = rect.x0 + 2;
+          const slot_label = `G${slot + 1}`;
+          for (let i = 0; i < slot_label.length && slot_x0 + i < rect.x1; i += 1) {
+            c.set(slot_x0 + i, y, {
+              char: slot_label[i]!,
+              rgb: is_active ? active_rgb : inactive_rgb,
+              style: 'regular',
+              weight_index: is_active ? 3 : 2,
+            });
+          }
+          last_hitboxes.push({ kind: 'gradiator_slot', x0: slot_x0, x1: slot_x0 + Math.max(1, slot_label.length - 1), y, slot });
+          const open_x = rect.x0 + 5;
+          c.set(open_x, y, { char: '[', rgb: get_ui_semantic_rgb('bright'), style: 'regular', weight_index: 2 });
+          for (let x = 0; x < gradiator.length && x < 12; x += 1) {
+            const char = gradiator[x]!;
+            const is_selected = is_active && gradiator_state.isEditing && gradiator_state.editSlot === slot && x === gradiator_state.editCursorX;
+            const glyph_x = open_x + 1 + x;
+            c.set(glyph_x, y, {
+              char,
+              rgb: is_selected ? active_rgb : get_ui_semantic_rgb('bright'),
+              style: is_selected ? 'reverse' : 'regular',
+              weight_index: is_selected ? 3 : 2,
+            });
+            last_hitboxes.push({ kind: 'gradiator_char', x0: glyph_x, x1: glyph_x, y, slot, char_x: x });
+          }
+          const close_x = open_x + 1 + Math.min(gradiator.length, 12);
+          c.set(close_x, y, { char: ']', rgb: get_ui_semantic_rgb('bright'), style: 'regular', weight_index: 2 });
+          const add_x = close_x + 1;
+          c.set(add_x, y, { char: '+', rgb: get_ui_semantic_rgb('vivid'), style: 'regular', weight_index: 3 });
+          last_hitboxes.push({ kind: 'gradiator_add', x0: add_x, x1: add_x, y, slot });
+          if (gradiator.length > 2) {
+            const remove_x = add_x + 1;
+            c.set(remove_x, y, { char: '-', rgb: get_ui_semantic_rgb('right_hand'), style: 'regular', weight_index: 3 });
+            last_hitboxes.push({ kind: 'gradiator_remove', x0: remove_x, x1: remove_x, y, slot });
           }
           continue;
         }
@@ -387,7 +586,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
               style: 'regular',
               weight_index: char === selected_char ? 3 : 2,
             });
-            last_hitboxes.push({ x0: x, x1: x + 3, y, char });
+            last_hitboxes.push({ kind: 'glyph', x0: x, x1: x + 3, y, char });
             continue;
           }
 
@@ -405,7 +604,7 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
             style: 'regular',
             weight_index: glyph_style.weight_index,
           });
-          last_hitboxes.push({ x0: x, x1: x + 1, y, char });
+          last_hitboxes.push({ kind: 'glyph', x0: x, x1: x + 1, y, char });
         }
       }
 
@@ -424,7 +623,30 @@ export function make_character_selector_module(opts: CharacterSelectorOptions): 
     on_pointer_down_content(e: PointerEvent): void {
       const hit = last_hitboxes.find((entry) => entry.y === e.y && e.x >= entry.x0 && e.x <= entry.x1);
       if (!hit) return;
-      select_char(hit.char, e.button);
+      if (hit.kind === 'glyph') {
+        select_char(hit.char, e.button);
+        return;
+      }
+      if (hit.kind === 'visual') {
+        select_visual(hit.entry, e.button);
+        return;
+      }
+      if (hit.kind === 'gradiator_slot') {
+        opts.on_gradiator_slot_select?.(hit.slot);
+        return;
+      }
+      if (hit.kind === 'gradiator_char') {
+        opts.on_gradiator_char_select?.(hit.slot, hit.char_x);
+        return;
+      }
+      if (hit.kind === 'gradiator_add') {
+        opts.on_gradiator_add_char?.(hit.slot);
+        return;
+      }
+      if (hit.kind === 'gradiator_remove') {
+        opts.on_gradiator_remove_char?.(hit.slot);
+        return;
+      }
     },
     on_wheel_content(e: WheelEvent, rect: Rect): void {
       scroll_offset += e.delta_y > 0 ? WHEEL_ROWS : e.delta_y < 0 ? -WHEEL_ROWS : 0;

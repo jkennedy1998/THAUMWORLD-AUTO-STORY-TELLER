@@ -1,7 +1,9 @@
 import { THAUMWORLD_RENDER_THEME, resolve_render_backend, type RenderBackendKind } from './render_theme.js';
 import { clamp_weight_index } from '../weight_system.js';
 import { get_cached_resolved_atlas_frame, load_resolved_atlas_frame } from './atlas_runtime.js';
-import type { InlineMaterialAssignments, RenderGraphicRef } from '../../render_shaders/graphics_contract.js';
+import type { AppearanceSlotAssignments, InlineMaterialAssignments, RenderGraphicRef } from '../../render_shaders/graphics_contract.js';
+import { resolve_material_rgb } from './material_registry.js';
+import { project_lit_semantic_value, resolve_light_mag } from '../../mag/light.js';
 import { diag_log } from '../../shared/diagnostics.js';
 
 type RenderableCell = {
@@ -9,6 +11,7 @@ type RenderableCell = {
   rgb: { r: number; g: number; b: number };
   weight_index?: number;
   graphic?: RenderGraphicRef;
+  appearance_slots?: AppearanceSlotAssignments;
   materials?: InlineMaterialAssignments;
   light_mag?: number;
 };
@@ -45,11 +48,23 @@ let loggedAtlasBackend = false;
 const loggedAtlasGraphics = new Set<string>();
 const loggedAtlasOutcomes = new Set<string>();
 
+function resolve_font_cell_rgb(cell: RenderableCell): { r: number; g: number; b: number } {
+  const slot_1 = cell.appearance_slots?.[1];
+  if (slot_1?.kind === 'flat_rgb') return slot_1.rgb;
+  if (slot_1?.kind === 'material') {
+    const lit_value = project_lit_semantic_value('2nd_lightest', resolve_light_mag(cell.light_mag));
+    const resolved = resolve_material_rgb(slot_1.material_id, lit_value);
+    if (resolved) return resolved;
+  }
+  return cell.rgb;
+}
+
 function draw_font_cell(opts: DrawCellOpts, cache?: FontDrawStateCache): void {
   const weight_index = clamp_weight_index(opts.cell.weight_index);
   const css_weight = opts.weight_index_to_css[weight_index] ?? 400;
   const next_font = `${css_weight} ${opts.font_size_px}px ${opts.font_family}`;
-  const next_fill_style = `rgb(${opts.cell.rgb.r},${opts.cell.rgb.g},${opts.cell.rgb.b})`;
+  const resolved_rgb = resolve_font_cell_rgb(opts.cell);
+  const next_fill_style = `rgb(${resolved_rgb.r},${resolved_rgb.g},${resolved_rgb.b})`;
   if (!cache || cache.ctx !== opts.ctx) {
     opts.ctx.font = next_font;
     opts.ctx.fillStyle = next_fill_style;
@@ -80,11 +95,13 @@ function draw_atlas_cell(opts: DrawCellOpts): AtlasDrawResult {
       graphic_id: graphic.graphic_id,
       view_direction: graphic.view_direction,
       weight_index: graphic.weight_index,
+      appearance_slots: opts.cell.appearance_slots ?? {},
       materials: opts.cell.materials ?? {},
     });
   }
   const materials = opts.cell.materials ?? {};
-  const cached = get_cached_resolved_atlas_frame(graphic, materials, opts.cell.light_mag);
+  const appearance_slots = opts.cell.appearance_slots;
+  const cached = get_cached_resolved_atlas_frame(graphic, materials, appearance_slots, opts.cell.light_mag);
   if (cached) {
     const drawnKey = `drawn:${graphic.graphic_id}`;
     if (!loggedAtlasOutcomes.has(drawnKey)) {
@@ -105,7 +122,7 @@ function draw_atlas_cell(opts: DrawCellOpts): AtlasDrawResult {
     );
     return 'drawn';
   }
-  const key = JSON.stringify([graphic.graphic_id, graphic.weight_index, graphic.view_direction, graphic.facing, materials, opts.cell.light_mag ?? null]);
+  const key = JSON.stringify([graphic.graphic_id, graphic.weight_index, graphic.view_direction, graphic.facing, materials, appearance_slots ?? null, opts.cell.light_mag ?? null]);
   if (!pending_atlas_loads.has(key)) {
     const pendingKey = `pending:${graphic.graphic_id}`;
     if (!loggedAtlasOutcomes.has(pendingKey)) {
@@ -114,12 +131,13 @@ function draw_atlas_cell(opts: DrawCellOpts): AtlasDrawResult {
         graphic_id: graphic.graphic_id,
         view_direction: graphic.view_direction,
         weight_index: graphic.weight_index,
+        appearance_slots: appearance_slots ?? null,
         materials,
         light_mag: opts.cell.light_mag ?? null,
       }));
     }
     pending_atlas_loads.add(key);
-    void load_resolved_atlas_frame(graphic, materials, opts.cell.light_mag).finally(() => {
+    void load_resolved_atlas_frame(graphic, materials, appearance_slots, opts.cell.light_mag).finally(() => {
       pending_atlas_loads.delete(key);
       try {
         window.dispatchEvent(new CustomEvent('thaumworld_atlas_frame_ready', {

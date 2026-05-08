@@ -40,6 +40,7 @@ import type {
   PainterSessionGroupCommand,
   PainterSessionState,
 } from './painter_session_types.js';
+import { clone_appearance_slot_assignments, type GridCell } from './types.js';
 
 function painter_timeline_session_log(event: string, payload?: Record<string, unknown>): void {
   try {
@@ -84,13 +85,21 @@ function build_group_plane_registry(state: PainterSessionState, preserve_existin
   };
 }
 
-function make_history_cell_from_runtime_record(record: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } | null | undefined): { char: string; rgb: { r: number; g: number; b: number }; weight_index: number } {
-  if (!record) return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+function clone_history_cell(cell: GridCell): GridCell {
   return {
-    char: record.char,
-    rgb: { ...record.rgb },
-    weight_index: record.weight_index,
+    char: cell.char,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
+    rgb: { ...cell.rgb },
+    weight_index: cell.weight_index,
+    render_index: cell.render_index,
   };
+}
+
+function make_history_cell_from_runtime_record(record: GridCell | null | undefined): GridCell {
+  if (!record) return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+  return clone_history_cell(record);
 }
 
 export type PainterSessionCore = {
@@ -281,12 +290,18 @@ export function create_painter_session_core(initial_document: PainterDocument): 
       const coordKey = `${Math.floor(change.worldX)}:${Math.floor(change.worldY)}:${Math.floor(change.worldZ)}`;
       const prior = state.runtime.group_voxel_index.get(group_id)?.get(coordKey) ?? null;
       const oldCell = make_history_cell_from_runtime_record(prior);
+      const nextGraphic = change.newCell.graphic ? { ...change.newCell.graphic } : undefined;
       const nextCell = make_history_cell_from_runtime_record({
         char: nextChar,
+        graphic: nextGraphic,
+        appearance_slots: clone_appearance_slot_assignments(change.newCell.appearance_slots),
+        materials: change.newCell.materials ? { ...change.newCell.materials } : undefined,
         rgb: { ...change.newCell.rgb },
         weight_index: change.newCell.weight_index,
+        render_index: change.newCell.render_index,
       });
-      if (nextChar === ' ') {
+      const shouldErase = nextChar === ' ' && !nextGraphic;
+      if (shouldErase) {
         const erased = erase_group_voxel_at_breath(state.runtime, group_id, targetBreath, coordKey);
         if (!erased.applied) return { applied: false, history_changes: [], rejected_reason: erased.reason };
       } else {
@@ -295,6 +310,9 @@ export function create_painter_session_core(initial_document: PainterDocument): 
           y: change.worldY,
           z: change.worldZ,
           char: nextChar,
+          graphic: change.newCell.graphic ? { ...change.newCell.graphic } : undefined,
+          appearance_slots: clone_appearance_slot_assignments(change.newCell.appearance_slots),
+          materials: change.newCell.materials ? { ...change.newCell.materials } : undefined,
           rgb: { ...change.newCell.rgb },
           weight_index: change.newCell.weight_index,
         }), { auto_key: options?.auto_key });

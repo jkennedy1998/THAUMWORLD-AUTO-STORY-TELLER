@@ -10,6 +10,7 @@ import { apply_painter_multiplayer_transport_config } from './painter_runtime_co
 import { create_launch_controller } from '../engine_launch/controller.js';
 import { create_join_controller } from '../engine_launch/join_controller.js';
 import { save_manual_connection } from '../engine_multiplayer/connection_store.js';
+import { remember_remote_join_code } from '../engine_multiplayer/remote_connection_store.js';
 import { record_successful_connection_for_content, resolve_preferred_join_record_for_content_refs } from '../engine_multiplayer/join_preference_store.js';
 import { create_painter_launch_adapter, resolve_painter_tai_boot_intent, resolve_painter_tai_join_request } from './painter_launch_adapter.js';
 import { create_painter_file_content_ref, create_painter_remote_document_content_ref } from './painter_content_refs.js';
@@ -115,8 +116,11 @@ if (IS_PAINTER_MODE) {
         painter_tai_join_snapshot = painter_join_controller?.get_tai_join_snapshot() ?? painter_tai_join_snapshot;
         apply_painter_multiplayer_transport_config({
             host_input: selection.connection.host,
+            transport_kind: selection.transport.transport_kind,
             api_base_url: selection.transport.api_base_url,
             bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+            room_id: selection.transport.room_id ?? undefined,
+            attach_token: selection.transport.attach_token ?? undefined,
         });
         const document_id = String(selection.probe?.painter_document_id ?? '').trim();
         if (!document_id) {
@@ -125,6 +129,8 @@ if (IS_PAINTER_MODE) {
         console.log('[PAINTER_JOIN]', JSON.stringify({
             connection_id: selection.connection.id,
             connection_name: selection.connection.name,
+            method: selection.method,
+            room_id: selection.transport.room_id ?? null,
             host: selection.connection.host,
             api_base_url: selection.transport.api_base_url,
             bridge_ws_base_url: selection.transport.bridge_ws_base_url,
@@ -141,15 +147,31 @@ if (IS_PAINTER_MODE) {
             join_target_id: selection.connection.id,
             api_base_url: selection.transport.api_base_url,
             bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+            transport_kind: selection.transport.transport_kind,
+            relay_room_id: selection.transport.room_id ?? null,
+            relay_attach_token: selection.transport.attach_token ?? null,
             persist_recent: false,
         });
+        if (selection.method === 'remote_relay') {
+            const relay_origin = String(selection.transport.relay_https_origin ?? '').trim();
+            const join_code = String(selection.transport.join_code ?? selection.connection.host ?? '').trim();
+            if (relay_origin && join_code) {
+                remember_remote_join_code({
+                    join_code,
+                    label: String(selection.probe?.painter_display_name ?? selection.connection.name ?? join_code),
+                    relay_origin,
+                    room_id: selection.transport.room_id ?? null,
+                    app_kind: 'ascii_painter',
+                });
+            }
+        }
         const active_content_refs = get_active_join_content_refs();
         const file_content_ref = active_content_refs.find((ref) => ref.kind === 'file') ?? null;
         if (file_content_ref?.value) {
             await record_successful_connection_for_content(PAINTER_CONFIG.selected_data_slot, {
                 content_ref: file_content_ref,
                 selection,
-                transport_strategy: 'direct',
+                transport_strategy: selection.method === 'remote_relay' ? 'remote_relay' : 'direct',
                 app_metadata: {
                     path: String(file_content_ref.value),
                     document_id,
@@ -162,7 +184,7 @@ if (IS_PAINTER_MODE) {
                 document_id,
             ),
             selection,
-            transport_strategy: 'direct',
+            transport_strategy: selection.method === 'remote_relay' ? 'remote_relay' : 'direct',
             app_metadata: {
                 document_id,
                 display_name: String(selection.probe?.painter_display_name ?? selection.connection.name ?? 'untitled'),

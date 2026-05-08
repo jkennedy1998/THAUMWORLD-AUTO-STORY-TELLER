@@ -157,6 +157,9 @@ export async function imageToAscii(
       
       row.push({
         char,
+        graphic: undefined,
+        appearance_slots: undefined,
+        materials: undefined,
         rgb: finalRgb,
         weight_index: 2
       });

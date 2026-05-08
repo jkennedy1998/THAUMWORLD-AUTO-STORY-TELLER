@@ -1,4 +1,7 @@
 import type { Rgb } from '../mono_ui/types.js';
+import type { InlineMaterialAssignments, RenderGraphicRef } from '../render_shaders/graphics_contract.js';
+import type { AppearanceSlotAssignments } from './types.js';
+import { clone_appearance_slot_assignments } from './types.js';
 import type { CameraConfig } from './voxel_space.js';
 
 export type PainterCoordKey = string;
@@ -38,6 +41,9 @@ export type PainterVoxelRecord = {
   y: number;
   z: number;
   char: string;
+  graphic?: RenderGraphicRef;
+  appearance_slots?: AppearanceSlotAssignments;
+  materials?: InlineMaterialAssignments;
   rgb: Rgb;
   weight_index: number;
 };
@@ -130,7 +136,7 @@ export type PainterGroup = {
 };
 
 export type PainterDocument = {
-  version: 5;
+  version: 6;
   bounds: {
     minX: number;
     minY: number;
@@ -375,6 +381,9 @@ export function create_painter_voxel_record(args: {
   y: number;
   z: number;
   char: string;
+  graphic?: RenderGraphicRef;
+  appearance_slots?: AppearanceSlotAssignments;
+  materials?: InlineMaterialAssignments;
   rgb: Rgb;
   weight_index: number;
 }): PainterVoxelRecord {
@@ -387,6 +396,9 @@ export function create_painter_voxel_record(args: {
     y,
     z,
     char: String(args.char ?? ' ').slice(0, 1) || ' ',
+    graphic: args.graphic ? { ...args.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(args.appearance_slots),
+    materials: args.materials ? { ...args.materials } : undefined,
     rgb: { ...args.rgb },
     weight_index: Math.max(0, Math.min(3, Math.floor(args.weight_index))),
   };
@@ -399,6 +411,9 @@ export function clone_painter_voxel_record(voxel: PainterVoxelRecord): PainterVo
     y: Math.floor(voxel.y),
     z: Math.floor(voxel.z),
     char: String(voxel.char ?? ' ').slice(0, 1) || ' ',
+    graphic: voxel.graphic ? { ...voxel.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(voxel.appearance_slots),
+    materials: voxel.materials ? { ...voxel.materials } : undefined,
     rgb: { ...voxel.rgb },
     weight_index: Math.max(0, Math.min(3, Math.floor(voxel.weight_index))),
   };
@@ -531,7 +546,7 @@ export function create_painter_document(width: number, height: number, options?:
   });
   const now = new Date().toISOString();
   return {
-    version: 5,
+    version: 6,
     bounds: {
       minX,
       minY,
@@ -566,7 +581,7 @@ export function clone_painter_document(document: PainterDocument): PainterDocume
     maxZ: Math.floor(document.bounds.maxZ ?? 0),
   };
   return {
-    version: 5,
+    version: 6,
     bounds,
     occupied_bounds: document.occupied_bounds ? { ...document.occupied_bounds } : null,
     groups: Object.fromEntries(

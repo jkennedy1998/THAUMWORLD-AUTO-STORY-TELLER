@@ -1,4 +1,5 @@
 import type { AutomationClockMode, AutomationClockSource } from './automation_clock_types.js';
+import type { AppearanceSlotAssignments, GridCell } from '../../ascii_painter/types.js';
 export type { AutomationClockMode, AutomationClockSource };
 
 export type ToolAssistedInputsContext = {
@@ -27,6 +28,8 @@ export type ToolAssistedInputsJoinSnapshot = {
   bridge_ws_base_url: string | null;
   status_lines: string[];
 };
+
+export type ToolAssistedInputsTimingProfile = 'fast' | 'human' | 'slow_debug';
 
 export type ToolAssistedInputsTraceEvent =
   | 'run_header'
@@ -95,6 +98,9 @@ export type ToolAssistedInputsPainterCell = {
   y: number;
   z: number;
   char: string;
+  graphic?: GridCell['graphic'];
+  appearance_slots?: AppearanceSlotAssignments;
+  materials?: GridCell['materials'];
   rgb: { r: number; g: number; b: number };
   weight_index: number;
   render_index?: number;
@@ -152,6 +158,7 @@ export type ToolAssistedInputsScriptAction =
   | { at_breath: number; type: 'assert_text_value_equals'; slot: string; source: string; field?: string }
   | { at_breath: number; type: 'assert_text_value_changed'; slot: string; source: string; field?: string }
   | { at_breath: number; type: 'assert_text_value_literal'; source: string; field?: string; value: string }
+  | { at_breath: number; type: 'wait_for_text_value_literal'; source: string; field?: string; value: string; timeout_ms?: number; poll_ms?: number }
   | { at_breath: number; type: 'assert_painter_primary_tool'; tool: string }
   | { at_breath: number; type: 'assert_painter_secondary_tool'; tool: string }
   | { at_breath: number; type: 'assert_painter_focus_plane'; z: number }
@@ -178,6 +185,7 @@ export type ToolAssistedInputsScript = {
   description?: string;
   start_delay_ms: number;
   end_delay_ms: number;
+  timing_profile?: ToolAssistedInputsTimingProfile;
   stop_on_error?: boolean;
   boot?: ToolAssistedInputsBootOptions;
   actions: ToolAssistedInputsScriptAction[];

@@ -1,6 +1,6 @@
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
 import type { DiscriminatedRenderPayload, RenderContext, RenderLayer } from './types.js';
-import type { EffectiveRenderState, GraphicOverrideRule, GraphicsModel, StateMatch, ViewDirection } from './graphics_contract.js';
+import type { AppearanceSlotAssignments, EffectiveRenderState, GraphicOverrideRule, GraphicsModel, StateMatch, ViewDirection } from './graphics_contract.js';
 import { make_text_graphic_id } from './graphics_contract.js';
 import { resolve_connected_graphic_id } from './tile_connectivity.js';
 
@@ -42,6 +42,21 @@ function matches_tag_override(rule: Extract<GraphicOverrideRule, { kind: 'tags' 
   return true;
 }
 
+function merge_appearance_slots(payloadSlots: AppearanceSlotAssignments | undefined, layerSlots: AppearanceSlotAssignments | undefined): AppearanceSlotAssignments | undefined {
+  const merged = { ...(payloadSlots ?? {}), ...(layerSlots ?? {}) };
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+function derive_material_assignments_from_appearance_slots(appearance_slots: AppearanceSlotAssignments | undefined): Partial<Record<1 | 2 | 3, string>> {
+  const materials: Partial<Record<1 | 2 | 3, string>> = {};
+  if (!appearance_slots) return materials;
+  for (const slot of [1, 2, 3] as const) {
+    const value = appearance_slots[slot];
+    if (value?.kind === 'material' && value.material_id) materials[slot] = value.material_id;
+  }
+  return materials;
+}
+
 function apply_graphics_overrides(graphics: GraphicsModel | undefined, payload: DiscriminatedRenderPayload | undefined, baseWeight: 0 | 1 | 2 | 3, baseMaterials: Partial<Record<1 | 2 | 3, string>>): { graphic_id: string; weight: 0 | 1 | 2 | 3; materials: Partial<Record<1 | 2 | 3, string>> } | null {
   if (!graphics) return null;
   let graphic_id = graphics.base_graphic_id;
@@ -70,13 +85,20 @@ export function resolve_effective_render_state(layer: RenderLayer, ctx: RenderCo
   const view_direction = normalize_view_direction(layer.graphic?.view_direction ?? ctx.view_direction);
   const facing = layer.graphic?.facing ?? normalize_view_direction(payload?.facing ?? ctx.facing);
   const baseWeight = clamp_weight_index(layer.graphic?.weight_index ?? layer.weight_index ?? payload_graphics?.default_weight) as 0 | 1 | 2 | 3;
-  const baseMaterials = { ...(payload_graphics?.material_slots ?? {}), ...(payload?.materials ?? {}), ...(layer.materials ?? {}) } as Partial<Record<1 | 2 | 3, string>>;
+  const appearance_slots = merge_appearance_slots(payload?.appearance_slots, layer.appearance_slots);
+  const baseMaterials = {
+    ...(payload_graphics?.material_slots ?? {}),
+    ...(payload?.materials ?? {}),
+    ...(layer.materials ?? {}),
+    ...derive_material_assignments_from_appearance_slots(appearance_slots),
+  } as Partial<Record<1 | 2 | 3, string>>;
   const overridden = apply_graphics_overrides(payload_graphics, payload, baseWeight, baseMaterials);
   const baseGraphicId = layer.graphic?.graphic_id ?? overridden?.graphic_id ?? payload_graphics?.base_graphic_id ?? make_text_graphic_id(layer.char ?? ' ');
   return {
     graphic_id: resolve_connected_graphic_id(payload_graphics, payload, ctx, baseGraphicId),
     weight: overridden?.weight ?? baseWeight,
     material_slots: overridden?.materials ?? baseMaterials,
+    appearance_slots,
     view_direction,
     facing,
     part_role: payload?.group_context?.part_role ?? ctx.group_context?.part_role,

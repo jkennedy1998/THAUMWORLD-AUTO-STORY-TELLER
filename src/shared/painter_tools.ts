@@ -150,17 +150,73 @@ function get_volume_neighbor_offsets(allow_diagonal: boolean): Voxel3[] {
   return offsets;
 }
 
-export function cells_match_edit_channels<T extends { char: string; rgb: { r: number; g: number; b: number }; weight: number }>(
+type PainterMatchGraphic = {
+  graphic_id: string;
+  view_direction?: string;
+  facing?: string;
+  weight_index?: number;
+  variant?: string;
+  frame?: string;
+};
+
+type PainterMatchAppearanceSlot = {
+  kind: string;
+  material_id?: string;
+  rgb?: { r: number; g: number; b: number };
+};
+
+type PainterMatchCell = {
+  char: string;
+  rgb: { r: number; g: number; b: number };
+  weight: number;
+  graphic?: PainterMatchGraphic;
+  appearance_slots?: Record<number, PainterMatchAppearanceSlot>;
+  materials?: Record<number, string>;
+};
+
+function rgb_equal(a: { r: number; g: number; b: number }, b: { r: number; g: number; b: number }): boolean {
+  return a.r === b.r && a.g === b.g && a.b === b.b;
+}
+
+function graphics_equal(a: PainterMatchGraphic | undefined, b: PainterMatchGraphic | undefined): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function appearance_slots_equal(
+  a: Record<number, PainterMatchAppearanceSlot> | undefined,
+  b: Record<number, PainterMatchAppearanceSlot> | undefined,
+): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function materials_equal(a: Record<number, string> | undefined, b: Record<number, string> | undefined): boolean {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function cells_match_edit_channels<T extends PainterMatchCell>(
   candidate: T,
   target: T,
   channels: EditChannels,
 ): boolean {
-  if (channels.char && candidate.char !== target.char) return false;
-  if (channels.color && (
-    candidate.rgb.r !== target.rgb.r
-    || candidate.rgb.g !== target.rgb.g
-    || candidate.rgb.b !== target.rgb.b
-  )) return false;
+  if (channels.char) {
+    if (candidate.char !== target.char) return false;
+    if (!graphics_equal(candidate.graphic, target.graphic)) return false;
+  }
+  if (channels.color) {
+    if (candidate.appearance_slots || target.appearance_slots) {
+      if (!appearance_slots_equal(candidate.appearance_slots, target.appearance_slots)) return false;
+    } else if (candidate.materials || target.materials) {
+      if (!materials_equal(candidate.materials, target.materials)) return false;
+    } else if (!rgb_equal(candidate.rgb, target.rgb)) {
+      return false;
+    }
+  }
   if (channels.weight && candidate.weight !== target.weight) return false;
   return true;
 }

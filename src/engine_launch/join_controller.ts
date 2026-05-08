@@ -1,6 +1,7 @@
 import type { Module, Rect } from '../mono_ui/types.js';
 import { build_join_directory, build_join_selection } from '../engine_multiplayer/join_directory.js';
-import { forget_manual_connection, rename_manual_connection, save_manual_connection, update_manual_connection_host } from '../engine_multiplayer/connection_store.js';
+import { forget_manual_connection, mark_connection_connected, rename_manual_connection, save_manual_connection, update_manual_connection_host } from '../engine_multiplayer/connection_store.js';
+import { forget_remote_connection, mark_remote_connection_connected, remember_remote_join_code, rename_remote_connection } from '../engine_multiplayer/remote_connection_store.js';
 import { is_connection_host_editable, is_connection_name_editable, is_connection_removable, type EngineJoinSelection } from '../engine_multiplayer/connection_types.js';
 import { make_join_directory_module } from '../mono_ui/modules/join_directory_module.js';
 import type { JoinMenuState, TaiJoinRequest, TaiJoinResolution, TaiJoinSnapshot } from './join_menu_types.js';
@@ -24,7 +25,7 @@ export function create_join_controller(args: {
   get_status_lines: () => string[];
   select_connection_by_id: (id: string) => boolean;
   select_connection_by_host: (host: string) => boolean;
-  select_first_connection_by_kind: (kind: 'local' | 'saved_manual' | 'lan_discovered') => boolean;
+  select_first_connection_by_kind: (kind: 'local' | 'saved_manual' | 'lan_discovered' | 'remote_join_code') => boolean;
   apply_tai_join_request: (request: TaiJoinRequest) => Promise<TaiJoinResolution>;
 } {
   let refresh_sequence = 0;
@@ -56,6 +57,29 @@ export function create_join_controller(args: {
 
   function get_selected_connection() {
     return state.connections.find((entry) => entry.id === state.selected_connection_id) ?? null;
+  }
+
+  const default_remote_relay_origin = String(window.electronAPI?.startupJoinConfig?.remoteRelayOrigin ?? '').trim();
+
+  function parse_add_connection_target(raw: string):
+    | { kind: 'manual_host'; host: string }
+    | { kind: 'remote_join_code'; join_code: string; relay_origin: string } {
+    const value = String(raw ?? '').trim();
+    if (!value) throw new Error('connection_target_required');
+    const relayDelimiterIndex = value.indexOf('@http');
+    if (relayDelimiterIndex > 0) {
+      const join_code = value.slice(0, relayDelimiterIndex).trim();
+      const relay_origin = value.slice(relayDelimiterIndex + 1).trim();
+      if (!join_code || !relay_origin) throw new Error('remote_join_code_format_invalid');
+      return { kind: 'remote_join_code', join_code, relay_origin };
+    }
+    const looks_like_manual_host = /[:./\\]/.test(value) || /^localhost$/i.test(value);
+    const looks_like_join_code = /^[a-z0-9_-]{4,32}$/i.test(value);
+    if (!looks_like_manual_host && looks_like_join_code) {
+      if (!default_remote_relay_origin) throw new Error('remote_relay_origin_missing');
+      return { kind: 'remote_join_code', join_code: value, relay_origin: default_remote_relay_origin };
+    }
+    return { kind: 'manual_host', host: value };
   }
 
   function get_tai_join_snapshot(): TaiJoinSnapshot {
@@ -106,14 +130,23 @@ export function create_join_controller(args: {
     };
   }
 
+  function format_editor_error(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message === 'remote_relay_origin_missing') return 'remote relay origin missing; use join_code@https://relay-host';
+    if (message === 'remote_join_code_format_invalid') return 'remote join format must be join_code@https://relay-host';
+    if (message === 'connection_target_required') return 'host address or join code required';
+    return message;
+  }
+
   function compute_status_lines(): string[] {
     const online = state.connections.filter((entry) => state.probes_by_connection_id[entry.id]?.status === 'online').length;
     const local = state.connections.filter((entry) => entry.kind === 'local').length;
     const saved = state.connections.filter((entry) => entry.kind === 'saved_manual').length;
+    const remote = state.connections.filter((entry) => entry.kind === 'remote_join_code').length;
     const selected = get_selected_connection();
     const selectedProbe = selected ? state.probes_by_connection_id[selected.id] : null;
     return selected
-      ? [`${online}/${state.connections.length} online | local ${local} | saved ${saved}`, selectedProbe?.status_message ?? selected.name]
+      ? [`${online}/${state.connections.length} online | local ${local} | saved ${saved} | remote ${remote}`, selectedProbe?.status_message ?? selected.name]
       : ['no connection selected'];
   }
 
@@ -161,7 +194,7 @@ export function create_join_controller(args: {
         error: null,
       },
       status_lines: mode === 'add'
-        ? ['add connection', 'enter a name and host']
+        ? ['add connection', 'enter host:port or join_code[@relay_origin]']
         : mode === 'rename'
           ? ['rename connection', 'press enter to save']
           : ['edit connection host', 'press enter to save'],
@@ -182,19 +215,49 @@ export function create_join_controller(args: {
       connection_id: connection.id,
       connection_host: connection.host,
       connection_kind: connection.kind,
+      method: selection.method,
+      connection_method: selection.method,
       probe_status: probe?.status ?? null,
       supports_join: Boolean(probe?.supports_join),
+      transport_kind: selection.transport.transport_kind,
       api_base_url: selection.transport.api_base_url,
       bridge_ws_base_url: selection.transport.bridge_ws_base_url,
+      relay_https_origin: selection.transport.relay_https_origin ?? null,
+      room_id: selection.transport.room_id ?? null,
+      join_code: selection.transport.join_code ?? null,
     });
     try {
       await args.on_join_selection(selection);
-      log_join_ui('join_completed', { trigger, connection_id: connection.id, connection_host: connection.host });
+      if (connection.kind === 'remote_join_code') {
+        const relay_origin = String(selection.transport.relay_https_origin ?? connection.metadata?.remote_session?.relay_origin ?? '').trim();
+        const join_code = String(selection.transport.join_code ?? connection.metadata?.remote_session?.join_code ?? connection.host).trim();
+        if (relay_origin && join_code) {
+          remember_remote_join_code({
+            join_code,
+            label: connection.name,
+            relay_origin,
+            room_id: selection.transport.room_id,
+            app_kind: connection.metadata?.remote_session?.app_kind ?? 'unknown',
+          });
+        }
+        mark_remote_connection_connected(connection.id);
+      } else if (connection.kind === 'saved_manual') {
+        mark_connection_connected(connection.id);
+      }
+      log_join_ui('join_completed', {
+        trigger,
+        connection_id: connection.id,
+        connection_host: connection.host,
+        method: selection.method,
+        room_id: selection.transport.room_id ?? null,
+      });
     } catch (err) {
       log_join_ui('join_failed', {
         trigger,
         connection_id: connection.id,
         connection_host: connection.host,
+        method: selection.method,
+        room_id: selection.transport.room_id ?? null,
         message: err instanceof Error ? err.message : String(err),
       });
       state = {
@@ -223,7 +286,7 @@ export function create_join_controller(args: {
     return select_connection(match.id);
   }
 
-  function select_first_connection_by_kind(kind: 'local' | 'saved_manual' | 'lan_discovered'): boolean {
+  function select_first_connection_by_kind(kind: 'local' | 'saved_manual' | 'lan_discovered' | 'remote_join_code'): boolean {
     const match = state.connections.find((entry) => entry.kind === kind);
     if (!match) return false;
     return select_connection(match.id);
@@ -234,18 +297,41 @@ export function create_join_controller(args: {
     const preferred_id = String(request.preferred_connection_id ?? '').trim();
     const preferred_host = String(request.preferred_host ?? '').trim();
     const preferred_kind = request.preferred_connection_kind ?? null;
+    const preferred_remote_join_code = String(request.preferred_remote_join_code ?? '').trim();
+    const preferred_remote_relay_origin = String(request.preferred_remote_relay_origin ?? default_remote_relay_origin ?? '').trim();
     let matched_by: TaiJoinResolution['matched_by'] = 'none';
     let selected_connection_id: string | null = null;
-    if (preferred_id && select_connection_by_id(preferred_id)) {
+    if (preferred_remote_join_code && preferred_remote_relay_origin) {
+      try {
+        const remembered = remember_remote_join_code({
+          join_code: preferred_remote_join_code,
+          label: preferred_remote_join_code,
+          relay_origin: preferred_remote_relay_origin,
+          app_kind: 'unknown',
+        });
+        await refresh('tai_remote_join_seed');
+        if (select_connection_by_id(remembered.id)) {
+          matched_by = 'remote_join_code';
+          selected_connection_id = state.selected_connection_id;
+        }
+      } catch (error) {
+        log_join_ui('tai_remote_join_seed_failed', {
+          join_code: preferred_remote_join_code,
+          relay_origin: preferred_remote_relay_origin,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (matched_by === 'none' && preferred_id && select_connection_by_id(preferred_id)) {
       matched_by = 'id';
       selected_connection_id = state.selected_connection_id;
-    } else if (preferred_host && select_connection_by_host(preferred_host)) {
+    } else if (matched_by === 'none' && preferred_host && select_connection_by_host(preferred_host)) {
       matched_by = 'host';
       selected_connection_id = state.selected_connection_id;
-    } else if (preferred_kind && select_first_connection_by_kind(preferred_kind)) {
+    } else if (matched_by === 'none' && preferred_kind && select_first_connection_by_kind(preferred_kind)) {
       matched_by = 'kind';
       selected_connection_id = state.selected_connection_id;
-    } else if (state.connections[0] && select_connection(state.connections[0].id)) {
+    } else if (matched_by === 'none' && state.connections[0] && select_connection(state.connections[0].id)) {
       matched_by = 'default';
       selected_connection_id = state.selected_connection_id;
     }
@@ -264,6 +350,8 @@ export function create_join_controller(args: {
     console.log('[JOIN_TAI]', JSON.stringify({
       request,
       matched_by,
+      preferred_remote_join_code: preferred_remote_join_code || null,
+      preferred_remote_relay_origin: preferred_remote_relay_origin || null,
       selected_connection_id,
       selected_connection_host: selected?.host ?? null,
       selected_connection_kind: selected?.kind ?? null,
@@ -308,17 +396,38 @@ export function create_join_controller(args: {
         draft_host: editor.draft_host,
       });
       if (editor.mode === 'add') {
-        const saved = save_manual_connection(editor.draft_host, editor.draft_name);
+        const target = parse_add_connection_target(editor.draft_host);
+        const saved = target.kind === 'remote_join_code'
+          ? remember_remote_join_code({
+              join_code: target.join_code,
+              relay_origin: target.relay_origin,
+              label: editor.draft_name,
+            })
+          : save_manual_connection(target.host, editor.draft_name);
         close_editor();
         await refresh('editor_add_saved');
-        state = { ...state, selected_connection_id: saved.id, status_lines: [`saved ${saved.name}`, `probing ${saved.host}...`] };
-        log_join_ui('editor_add_saved', { connection_id: saved.id, connection_host: saved.host });
+        state = {
+          ...state,
+          selected_connection_id: saved.id,
+          status_lines: target.kind === 'remote_join_code'
+            ? [`saved remote join ${saved.name}`, `probing ${saved.host} via relay...`]
+            : [`saved ${saved.name}`, `probing ${saved.host}...`],
+        };
+        log_join_ui('editor_add_saved', {
+          connection_id: saved.id,
+          connection_host: saved.host,
+          connection_kind: saved.kind,
+          relay_origin: target.kind === 'remote_join_code' ? target.relay_origin : null,
+        });
         await refresh('editor_probe_saved_host');
         return;
       }
       if (!editor.connection_id) throw new Error('connection_not_selected');
       if (editor.mode === 'rename') {
-        const saved = rename_manual_connection(editor.connection_id, editor.draft_name);
+        const selected = state.connections.find((entry) => entry.id === editor.connection_id) ?? null;
+        const saved = selected?.kind === 'remote_join_code'
+          ? rename_remote_connection(editor.connection_id, editor.draft_name)
+          : rename_manual_connection(editor.connection_id, editor.draft_name);
         close_editor();
         await refresh('editor_rename_saved');
         state = { ...state, selected_connection_id: saved.id, status_lines: [`renamed to ${saved.name}`] };
@@ -333,12 +442,13 @@ export function create_join_controller(args: {
         log_join_ui('editor_host_updated', { connection_id: saved.id, connection_host: saved.host });
       }
     } catch (err) {
-      log_join_ui('submit_editor_failed', { message: err instanceof Error ? err.message : String(err) });
+      const message = format_editor_error(err);
+      log_join_ui('submit_editor_failed', { message });
       state = {
         ...state,
         editor: {
           ...state.editor,
-          error: err instanceof Error ? err.message : String(err),
+          error: message,
         },
       };
     }
@@ -351,8 +461,12 @@ export function create_join_controller(args: {
       log_join_ui('forget_rejected', { selected_connection_id: selected?.id ?? null });
       return;
     }
-    log_join_ui('forget_selected', { connection_id: selected.id, connection_host: selected.host });
-    forget_manual_connection(selected.id);
+    log_join_ui('forget_selected', { connection_id: selected.id, connection_host: selected.host, connection_kind: selected.kind });
+    if (selected.kind === 'remote_join_code') {
+      forget_remote_connection(selected.id);
+    } else {
+      forget_manual_connection(selected.id);
+    }
     state = { ...state, status_lines: [`forgot ${selected.name}`] };
     await refresh('forget_selected');
   }

@@ -13,6 +13,7 @@ import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid 
 import type { PainterDocument } from './painter_document.js';
 import { clone_painter_document } from './painter_document.js';
 import type { ToolEditTarget, ToolType } from './types.js';
+import type { AppearanceSlotAssignments, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from '../render_shaders/graphics_contract.js';
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
 import { ALL_EDIT_CHANNELS, sanitize_edit_channels, type EditChannels } from './edit_mask.js';
 
@@ -41,6 +42,62 @@ function sanitize_rgb(value: unknown, fallback: { r: number; g: number; b: numbe
     g: clamp_integer(rgb.g, fallback.g, 0, 255),
     b: clamp_integer(rgb.b, fallback.b, 0, 255),
   };
+}
+
+const VALID_VIEW_DIRECTIONS: readonly ViewDirection[] = ['north', 'south', 'east', 'west', 'up', 'down'] as const;
+
+function sanitize_view_direction(value: unknown, fallback: ViewDirection): ViewDirection {
+  return typeof value === 'string' && VALID_VIEW_DIRECTIONS.includes(value as ViewDirection)
+    ? value as ViewDirection
+    : fallback;
+}
+
+function sanitize_render_graphic_ref(value: unknown): RenderGraphicRef | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const graphic = value as Record<string, unknown>;
+  const graphic_id = typeof graphic.graphic_id === 'string' && graphic.graphic_id.length > 0 ? graphic.graphic_id : null;
+  if (!graphic_id) return undefined;
+  const view_direction = sanitize_view_direction(graphic.view_direction, 'south');
+  const weight_index = clamp_weight_index(graphic.weight_index);
+  const facing = graphic.facing === undefined ? undefined : sanitize_view_direction(graphic.facing, 'south');
+  return {
+    graphic_id,
+    view_direction,
+    facing,
+    weight_index,
+    variant: typeof graphic.variant === 'string' && graphic.variant.length > 0 ? graphic.variant : undefined,
+    frame: typeof graphic.frame === 'string' && graphic.frame.length > 0 ? graphic.frame : undefined,
+  };
+}
+
+function sanitize_inline_material_assignments(value: unknown): InlineMaterialAssignments | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const sanitized: InlineMaterialAssignments = {};
+  for (const slot of [1, 2, 3] as const) {
+    const material_id = record[String(slot)];
+    if (typeof material_id === 'string' && material_id.length > 0) sanitized[slot] = material_id;
+  }
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
+function sanitize_appearance_slot_assignments(value: unknown): AppearanceSlotAssignments | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  const sanitized: AppearanceSlotAssignments = {};
+  for (const slot of [1, 2, 3] as const) {
+    const raw = record[String(slot)];
+    if (!raw || typeof raw !== 'object') continue;
+    const entry = raw as Record<string, unknown>;
+    if (entry.kind === 'material' && typeof entry.material_id === 'string' && entry.material_id.length > 0) {
+      sanitized[slot] = { kind: 'material', material_id: entry.material_id };
+      continue;
+    }
+    if (entry.kind === 'flat_rgb') {
+      sanitized[slot] = { kind: 'flat_rgb', rgb: sanitize_rgb(entry.rgb, { r: 255, g: 255, b: 255 }) };
+    }
+  }
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
 }
 
 function sanitize_tool_type(value: unknown, fallback: ToolType): ToolType {
@@ -230,7 +287,7 @@ export function exportPainterDocumentToJSON(document: PainterDocument): string {
 }
 
 function is_supported_painter_document_version(version: unknown): boolean {
-  return version === 3 || version === 4 || version === 5;
+  return version === 3 || version === 4 || version === 5 || version === 6;
 }
 
 function is_painter_document_like(parsed: any): boolean {
@@ -378,6 +435,12 @@ export interface ToolProperties {
   right_brush_char: string;
   left_brush_rgb: { r: number; g: number; b: number };
   right_brush_rgb: { r: number; g: number; b: number };
+  left_brush_graphic?: RenderGraphicRef;
+  right_brush_graphic?: RenderGraphicRef;
+  left_brush_appearance_slots?: AppearanceSlotAssignments;
+  right_brush_appearance_slots?: AppearanceSlotAssignments;
+  left_brush_materials?: InlineMaterialAssignments;
+  right_brush_materials?: InlineMaterialAssignments;
   left_brush_weight_index: number;
   right_brush_weight_index: number;
   left_brush_edit_channels: EditChannels;
@@ -439,6 +502,12 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   right_brush_char: '█',
   left_brush_rgb: { r: 255, g: 255, b: 255 },
   right_brush_rgb: { r: 255, g: 255, b: 255 },
+  left_brush_graphic: undefined,
+  right_brush_graphic: undefined,
+  left_brush_appearance_slots: undefined,
+  right_brush_appearance_slots: undefined,
+  left_brush_materials: undefined,
+  right_brush_materials: undefined,
   left_brush_weight_index: 1,
   right_brush_weight_index: 1,
   left_brush_edit_channels: { ...ALL_EDIT_CHANNELS },
@@ -513,6 +582,12 @@ export function loadToolProperties(): ToolProperties {
       right_brush_char: sanitize_char(parsed.right_brush_char, DEFAULT_TOOL_PROPERTIES.right_brush_char),
       left_brush_rgb: sanitize_rgb(parsed.left_brush_rgb, DEFAULT_TOOL_PROPERTIES.left_brush_rgb),
       right_brush_rgb: sanitize_rgb(parsed.right_brush_rgb, DEFAULT_TOOL_PROPERTIES.right_brush_rgb),
+      left_brush_graphic: sanitize_render_graphic_ref(parsed.left_brush_graphic),
+      right_brush_graphic: sanitize_render_graphic_ref(parsed.right_brush_graphic),
+      left_brush_appearance_slots: sanitize_appearance_slot_assignments(parsed.left_brush_appearance_slots),
+      right_brush_appearance_slots: sanitize_appearance_slot_assignments(parsed.right_brush_appearance_slots),
+      left_brush_materials: sanitize_inline_material_assignments(parsed.left_brush_materials),
+      right_brush_materials: sanitize_inline_material_assignments(parsed.right_brush_materials),
       left_brush_weight_index: clamp_weight_index(parsed.left_brush_weight_index),
       right_brush_weight_index: clamp_weight_index(parsed.right_brush_weight_index),
       left_brush_edit_channels: sanitize_edit_channels(parsed.left_brush_edit_channels, DEFAULT_TOOL_PROPERTIES.left_brush_edit_channels),

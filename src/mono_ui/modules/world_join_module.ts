@@ -18,7 +18,7 @@ export type JoinableWorldEntry = {
   description?: string;
   local?: boolean;
   online?: boolean;
-  source_kind?: 'local' | 'saved_remote';
+  source_kind?: 'local' | 'saved_remote' | 'remote_relay';
   host_address?: string;
   saved_host_id?: string;
   last_connected_at?: string;

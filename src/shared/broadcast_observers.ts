@@ -2,6 +2,7 @@ import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { get_place_entity_entry } from "../place_storage/entity_index.js";
+import { list_runtime_place_entity_refs } from "./place_character_presence.js";
 import { list_adjacent_place_ids_from_graph } from "../place_storage/region_place_graph.js";
 import { get_region_place_index_record } from "../place_storage/region_place_index.js";
 import { load_place } from "../place_storage/store.js";
@@ -99,9 +100,10 @@ function compute_place_envelope(slot: number, place_id: string): SenseEnvelope {
   const cached = place_envelope_cache.get(cache_key);
   if (cached && cached.source_last_updated === entry.last_updated) return cached;
 
+  const runtime_refs = list_runtime_place_entity_refs(slot, place_id);
   let max_light_sense = 0;
   let max_pressure_sense = 0;
-  for (const ref of [...entry.npcs, ...entry.actors]) {
+  for (const ref of [...runtime_refs.npcs, ...runtime_refs.actors]) {
     max_light_sense = Math.max(max_light_sense, get_observer_sense_mag(slot, ref, "light"));
     max_pressure_sense = Math.max(max_pressure_sense, get_observer_sense_mag(slot, ref, "pressure"));
   }
@@ -171,8 +173,7 @@ export function get_broadcast_observer_candidates(options: {
 
   const out: BroadcastObserverCandidate[] = [];
   for (const place_id of candidate_places) {
-    const entry = get_place_entity_entry(options.slot, place_id);
-    if (!entry) continue;
+    const entry = list_runtime_place_entity_refs(options.slot, place_id);
     for (const ref of [...entry.npcs, ...entry.actors]) {
       if (!ref || exclude.has(ref)) continue;
       const location = get_entity_world_location(options.slot, ref, place_id);

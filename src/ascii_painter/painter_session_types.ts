@@ -1,5 +1,6 @@
-import type { PainterDocument, PainterGroup, PainterPropertyKind, PainterPropertyValue } from './painter_document.js';
+import type { PainterDocument, PainterGroup, PainterPropertyKind, PainterPropertyValue, PainterVoxelRecord } from './painter_document.js';
 import type { PainterDocumentRuntime } from './painter_document_runtime.js';
+import type { GridCell } from './types.js';
 
 export type PainterGroupPlaneRegistry = {
   group_id_to_plane: Map<string, number>;
@@ -33,7 +34,7 @@ export type PainterSessionGroupCommand =
   | { kind: 'rename_group'; group_id: string; group_name: string }
   | { kind: 'set_group_visibility'; group_id: string; visible: boolean }
   | { kind: 'set_group_locked'; group_id: string; locked: boolean }
-  | { kind: 'set_group_raster_state'; group_id: string; breath: number; voxels: Array<{ key: string; x: number; y: number; z: number; char: string; rgb: { r: number; g: number; b: number }; weight_index: number }> }
+  | { kind: 'set_group_raster_state'; group_id: string; breath: number; voxels: PainterVoxelRecord[] }
   | { kind: 'add_group_property'; group_id: string; property_kind: Extract<PainterPropertyKind, 'raster' | 'move'>; after_property_id?: string | null; property_label?: string }
   | { kind: 'remove_group_property'; group_id: string; property_id: string }
   | { kind: 'reorder_group_properties'; group_id: string; next_property_order: string[] }
@@ -45,7 +46,7 @@ export type PainterSessionCellChangeInput = {
   worldX: number;
   worldY: number;
   worldZ: number;
-  newCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+  newCell: GridCell;
 };
 
 export type PainterSessionCellHistoryChange = {
@@ -55,8 +56,8 @@ export type PainterSessionCellHistoryChange = {
   worldY: number;
   worldZ: number;
   group_id: string;
-  oldCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
-  newCell: { char: string; rgb: { r: number; g: number; b: number }; weight_index: number };
+  oldCell: GridCell;
+  newCell: GridCell;
 };
 
 export type PainterAuthoritativeSnapshotMeta = {

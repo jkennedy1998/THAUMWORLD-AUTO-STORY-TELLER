@@ -22,8 +22,10 @@ export type JoinMenuState = {
 
 export type TaiJoinRequest = {
   preferred_connection_id?: string | null;
-  preferred_connection_kind?: 'local' | 'saved_manual' | 'lan_discovered' | null;
+  preferred_connection_kind?: 'local' | 'saved_manual' | 'lan_discovered' | 'remote_join_code' | null;
   preferred_host?: string | null;
+  preferred_remote_join_code?: string | null;
+  preferred_remote_relay_origin?: string | null;
   auto_join?: boolean;
 };
 
@@ -38,7 +40,7 @@ export type TaiJoinResolution = {
   painter_document_id?: string | null;
   api_base_url?: string | null;
   bridge_ws_base_url?: string | null;
-  matched_by: 'id' | 'kind' | 'host' | 'default' | 'none';
+  matched_by: 'id' | 'kind' | 'host' | 'remote_join_code' | 'default' | 'none';
   can_join: boolean;
   reason?: string;
 };

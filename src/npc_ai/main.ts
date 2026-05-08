@@ -28,7 +28,8 @@ import { summarize_for_npc, get_important_memories } from "../conversation_manag
 import { get_memories_about, remembers_entity, get_relationship_status, add_conversation_memory, get_formatted_memories } from "../npc_storage/memory.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { cancel_pending_communication_opportunity, complete_pending_communication_opportunity, get_active_actor_ref, get_timed_event_state, get_region_by_coords, is_timed_event_active, mark_actor_done, release_pending_communication_opportunity, sync_pending_communication_opportunities_with_queue } from "../world_storage/store.js";
+import { cancel_pending_communication_opportunity, complete_pending_communication_opportunity, get_active_actor_ref, get_timed_event_state, get_region_by_coords, is_timed_event_active, release_pending_communication_opportunity, sync_pending_communication_opportunities_with_queue } from "../world_storage/store.js";
+import { advance_active_timed_event_turn } from "../timed_events/runtime.js";
 import { load_place, save_place } from "../place_storage/store.js";
 import { consolidate_npc_memory_journal_if_needed, append_non_timed_conversation_journal } from "./timed_event_journal.js";
 import {
@@ -908,12 +909,15 @@ async function process_communication(
             mark_communication_event_evaluated(data_slot_number, communication_event.event_id);
         }
         if (forced_npc_id) {
-            const done_ok = mark_actor_done(data_slot_number, `npc.${forced_npc_id}`);
-            debug_pipeline("NPC_AI", `Marked forced timed-event actor done after forced observer miss for npc.${forced_npc_id}`, {
+            const advanced = advance_active_timed_event_turn(data_slot_number, `npc.${forced_npc_id}`, {
+                source: "npc_ai",
+                reason: "forced_observer_miss",
+            });
+            debug_pipeline("NPC_AI", `Advanced forced timed-event actor after forced observer miss for npc.${forced_npc_id}`, {
                 source_message_id: msg.id,
                 pending_opportunity_id: forced_pending_opportunity_id,
                 queue_entry_id: forced_queue_entry_id,
-                marked_done: done_ok,
+                advanced,
             });
         }
         return;
@@ -1123,12 +1127,15 @@ async function process_communication(
                     cancelled,
                 });
             }
-            const done_ok = mark_actor_done(data_slot_number, npc_ref);
-            debug_log("NPC_AI", "marked forced timed-event actor done because forced queue entry is missing", {
+            const advanced = advance_active_timed_event_turn(data_slot_number, npc_ref, {
+                source: "npc_ai",
+                reason: "missing_forced_queue_entry",
+            });
+            debug_log("NPC_AI", "advanced forced timed-event actor because forced queue entry is missing", {
                 npc_ref,
                 conversation_id,
                 queue_entry_id: forced_queue_entry_id,
-                marked_done: done_ok,
+                advanced,
             });
             continue;
         }
@@ -1703,12 +1710,15 @@ async function process_communication(
             const completed = forced_pending_opportunity_id
                 ? complete_pending_communication_opportunity(data_slot_number, forced_pending_opportunity_id)
                 : false;
-            const done_ok = mark_actor_done(data_slot_number, `npc.${npc_hit.id}`);
+            const advanced = advance_active_timed_event_turn(data_slot_number, `npc.${npc_hit.id}`, {
+                source: "npc_ai",
+                reason: "forced_communication_complete",
+            });
             debug_pipeline("NPC_AI", `Completed forced timed-event communication for npc.${npc_hit.id}`, {
                 source_message_id: msg.id,
                 pending_opportunity_id: forced_pending_opportunity_id,
                 completed,
-                marked_done: done_ok,
+                advanced,
             });
         }
 

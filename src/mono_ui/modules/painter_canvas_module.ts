@@ -12,7 +12,7 @@
 import type { Canvas, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent, Cell } from '../types.js';
 import type { Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.js';
 import type { ToolEditTarget } from '../../ascii_painter/types.js';
-import { createGrid, getCell, setCell } from '../../ascii_painter/types.js';
+import { clone_appearance_slot_assignments, createGrid, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditChannels } from '../../ascii_painter/edit_mask.js';
 import { logGroupCellAction, addToGroupBatch, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
@@ -96,7 +96,7 @@ export type PainterCanvasOptions = {
   preview_points: { x: number; y: number }[];
   on_edit_committed: () => void;
   on_live_stroke_preview?: (args: { changes: CellChange[]; anchor_world: { x: number; y: number; z: number } | null; plane: number | null }) => void;
-  on_sample_cell: (cell: { char: string; rgb: Rgb; weight_index: number }, sample: { button: number; shift: boolean; ctrl: boolean; alt: boolean; meta: boolean }) => void;
+  on_sample_cell: (cell: GridCell, sample: { button: number; shift: boolean; ctrl: boolean; alt: boolean; meta: boolean }) => void;
   get_left_click_tool: () => ToolType;
   get_right_click_tool: () => ToolType;
   get_tool_target_for_button?: (button: number, tool: ToolType) => ToolEditTarget;
@@ -165,6 +165,29 @@ export type RasterMoveChangeDescriptor = {
   newCell: GridCell;
 };
 
+function cloneRasterMoveCell(cell: GridCell): GridCell {
+  return {
+    char: cell.char,
+    graphic: cell.graphic ? { ...cell.graphic } : undefined,
+    appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+    materials: cell.materials ? { ...cell.materials } : undefined,
+    rgb: { ...cell.rgb },
+    weight_index: cell.weight_index,
+    render_index: cell.render_index,
+  };
+}
+
+function makeEmptyRasterMoveCell(): GridCell {
+  return {
+    char: ' ',
+    graphic: undefined,
+    appearance_slots: undefined,
+    materials: undefined,
+    rgb: { r: 0, g: 0, b: 0 },
+    weight_index: 0,
+  };
+}
+
 export function build_raster_move_change_descriptors(
   source: RasterMoveSourceVoxel[],
   delta: { x: number; y: number; z: number },
@@ -175,11 +198,7 @@ export function build_raster_move_change_descriptors(
     const world = { x: entry.x + delta.x, y: entry.y + delta.y, z: entry.z + delta.z };
     destinationByKey.set(`${world.x},${world.y},${world.z}`, {
       world,
-      cell: {
-        char: entry.cell.char,
-        rgb: { ...entry.cell.rgb },
-        weight_index: entry.cell.weight_index,
-      },
+      cell: cloneRasterMoveCell(entry.cell),
     });
   }
 
@@ -189,19 +208,15 @@ export function build_raster_move_change_descriptors(
     if (destinationByKey.has(`${world.x},${world.y},${world.z}`)) continue;
     changes.push({
       world,
-      oldCell: getCellAt(world),
-      newCell: { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 },
+      oldCell: cloneRasterMoveCell(getCellAt(world)),
+      newCell: makeEmptyRasterMoveCell(),
     });
   }
   for (const destination of destinationByKey.values()) {
     changes.push({
       world: destination.world,
-      oldCell: getCellAt(destination.world),
-      newCell: {
-        char: destination.cell.char,
-        rgb: { ...destination.cell.rgb },
-        weight_index: destination.cell.weight_index,
-      },
+      oldCell: cloneRasterMoveCell(getCellAt(destination.world)),
+      newCell: cloneRasterMoveCell(destination.cell),
     });
   }
   return changes;
@@ -636,18 +651,18 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function cloneGridCell(cell: GridCell): GridCell {
     return {
       char: cell.char,
+      graphic: cell.graphic ? { ...cell.graphic } : undefined,
+      appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+      materials: cell.materials ? { ...cell.materials } : undefined,
       rgb: { ...cell.rgb },
       weight_index: cell.weight_index,
+      render_index: cell.render_index,
     };
   }
 
   function gridCellsEqual(a: GridCell | null | undefined, b: GridCell | null | undefined): boolean {
     if (!a || !b) return false;
-    return a.char === b.char
-      && a.rgb.r === b.rgb.r
-      && a.rgb.g === b.rgb.g
-      && a.rgb.b === b.rgb.b
-      && a.weight_index === b.weight_index;
+    return JSON.stringify(a) === JSON.stringify(b);
   }
 
   function worldKey(world: { x: number; y: number; z: number }): string {
@@ -745,11 +760,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const world = getWorldPointForEditPlane(point.x, point.y, plane ?? opts.get_selected_z());
       if (!world) continue;
       const oldCell = cloneGridCell(getActiveGroupWorldCell(world));
-      const newCell: GridCell = {
-        char: brush.char,
-        rgb: { ...brush.rgb },
-        weight_index: brush.weight_index,
-      };
+      const newCell: GridCell = makeCellFromBrush(brush);
       if (gridCellsEqual(oldCell, newCell)) continue;
       changesByWorld.set(worldKey(world), buildChange(world, oldCell, newCell, { x: point.x, y: point.y }));
     }
@@ -932,13 +943,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         result.preserved += 1;
         continue;
       }
-      if (entry.cell && entry.cell.char !== ' ') {
+      if (entry.cell && (entry.cell.char !== ' ' || !!entry.cell.graphic)) {
         changesByWorld.set(worldKey(world), buildChange(world, oldCell, entry.cell, opts.get_grid_point_for_world?.(world) ?? null));
         result.placed += 1;
         continue;
       }
       if (opts.get_paste_space_replace()) {
-        if (options?.preview_only && oldCell.char === ' ') {
+        if (options?.preview_only && oldCell.char === ' ' && !oldCell.graphic) {
           result.preserved += 1;
           continue;
         }
@@ -972,7 +983,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           result.preserved += 1;
           continue;
         }
-        if (cell && cell.char !== ' ') {
+        if (cell && (cell.char !== ' ' || !!cell.graphic)) {
           changesByWorld.set(worldKey(world), buildChange(world, oldCell, cell, { x: gridX, y: gridY }));
           result.placed += 1;
           continue;
@@ -1332,7 +1343,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
   function commitPendingTextChanges(description: string = 'Type Text'): void {
     if (pending_changes.length < 1) return;
-    const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: { ...change.oldCell }, newCell: { ...change.newCell } }));
+    const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: cloneGridCell(change.oldCell), newCell: cloneGridCell(change.newCell) }));
     const active_group_id = requireActiveGroupId();
     logGroupCellAction(opts.history, 'draw_cells', description, { z: opts.get_selected_z(), group_id: active_group_id }, pending_changes);
     opts.on_commit_cell_changes?.({
@@ -1349,7 +1360,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
   function commitLoggedCellChanges(action_type: 'draw_cells' | 'erase_cells' | 'fill' | 'paste' | 'clear_canvas', description: string, z: number): void {
     if (pending_changes.length < 1) return;
-    const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: { ...change.oldCell }, newCell: { ...change.newCell } }));
+    const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: cloneGridCell(change.oldCell), newCell: cloneGridCell(change.newCell) }));
     const active_group_id = requireActiveGroupId();
     logGroupCellAction(opts.history, action_type, description, { z, group_id: active_group_id }, pending_changes);
     opts.on_commit_cell_changes?.({ action_type, description, z, group_id: active_group_id, changes: committed_changes });
@@ -1361,8 +1372,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function clonePendingChanges(): CellChange[] {
     return pending_changes.map((change) => ({
       ...change,
-      oldCell: { ...change.oldCell },
-      newCell: { ...change.newCell },
+      oldCell: cloneGridCell(change.oldCell),
+      newCell: cloneGridCell(change.newCell),
     }));
   }
 
@@ -1447,11 +1458,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       if (char === ' ') {
         if (opts.get_space_replace()) {
-          opts.grid.cells[text_cursor_y]![text_cursor_x] = {
-            char: ' ',
-            rgb: { ...text_brush.rgb },
-            weight_index: text_brush.weight_index,
-          };
+          opts.grid.cells[text_cursor_y]![text_cursor_x] = makeEmptyCell();
           const newCell = getGridCell(text_cursor_x, text_cursor_y);
           if (oldCell && newCell) {
             trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
@@ -1461,6 +1468,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       } else {
         opts.grid.cells[text_cursor_y]![text_cursor_x] = {
           char,
+          graphic: undefined,
+          appearance_slots: undefined,
+          materials: undefined,
           rgb: { ...text_brush.rgb },
           weight_index: text_brush.weight_index,
         };
@@ -1615,7 +1625,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function getGridCell(x: number, y: number): GridCell | null {
     if (x < 0 || x >= opts.grid.width || y < 0 || y >= opts.grid.height) return null;
     const cell = opts.grid.cells[y]?.[x];
-    return cell ? { ...cell } : null;
+    return cell ? cloneGridCell(cell) : null;
   }
 
   // Track a cell change for undo
@@ -1630,7 +1640,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     const existingIndex = pending_changes.findIndex(c => c.worldX === world.x && c.worldY === world.y && c.worldZ === world.z);
     if (existingIndex >= 0 && pending_changes[existingIndex]) {
       // Update newCell but keep original oldCell
-      pending_changes[existingIndex].newCell = newCell;
+      pending_changes[existingIndex].newCell = cloneGridCell(newCell);
     } else {
       const gridPoint = grid ?? opts.get_grid_point_for_world?.(world) ?? null;
       pending_changes.push({
@@ -1640,8 +1650,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         worldY: world.y,
         worldZ: world.z,
         group_id,
-        oldCell: { ...oldCell },
-        newCell: { ...newCell },
+        oldCell: cloneGridCell(oldCell),
+        newCell: cloneGridCell(newCell),
       });
     }
     
@@ -1663,45 +1673,76 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function makeEmptyCell(): GridCell {
-    return { char: ' ', rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+    return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
   }
 
   function isEmptyCell(cell: GridCell | null | undefined): boolean {
-    return !cell || cell.char === ' ';
+    return !cell || (cell.char === ' ' && !cell.graphic);
   }
 
   function cellsEqual(a: GridCell, b: GridCell): boolean {
-    return a.char === b.char
-      && a.rgb.r === b.rgb.r
-      && a.rgb.g === b.rgb.g
-      && a.rgb.b === b.rgb.b
-      && a.weight_index === b.weight_index;
+    return gridCellsEqual(a, b);
+  }
+
+  function makeCellFromBrush(brush: Brush): GridCell {
+    return {
+      char: brush.char,
+      graphic: brush.graphic ? { ...brush.graphic } : undefined,
+      appearance_slots: clone_appearance_slot_assignments(brush.appearance_slots),
+      materials: brush.materials ? { ...brush.materials } : undefined,
+      rgb: { ...brush.rgb },
+      weight_index: brush.weight_index,
+    };
   }
 
   function applyBrushEditToCell(cell: GridCell, brush: Brush, channels: EditChannels): GridCell {
-    const next: GridCell = { char: cell.char, rgb: { ...cell.rgb }, weight_index: cell.weight_index };
+    const next = cloneGridCell(cell);
     if (channels.char && channels.color && channels.weight) {
-      return { char: brush.char, rgb: { ...brush.rgb }, weight_index: brush.weight_index };
+      return makeCellFromBrush(brush);
     }
-    if (channels.char) next.char = brush.char;
-    if (channels.color) next.rgb = { ...brush.rgb };
-    if (channels.weight) next.weight_index = brush.weight_index;
+    if (channels.char) {
+      next.char = brush.char;
+      next.graphic = brush.graphic ? { ...brush.graphic } : undefined;
+      next.appearance_slots = clone_appearance_slot_assignments(brush.appearance_slots);
+      next.materials = brush.materials ? { ...brush.materials } : undefined;
+    }
+    if (channels.color) {
+      next.rgb = { ...brush.rgb };
+      if (!channels.char) {
+        next.appearance_slots = clone_appearance_slot_assignments(brush.appearance_slots) ?? next.appearance_slots;
+        next.materials = brush.materials ? { ...brush.materials } : next.materials;
+      }
+    }
+    if (channels.weight) {
+      next.weight_index = brush.weight_index;
+      if (next.graphic) next.graphic = { ...next.graphic, weight_index: brush.weight_index as 0 | 1 | 2 | 3 };
+    }
     return next;
   }
 
   function applyEraserEditToCell(cell: GridCell, channels: EditChannels): GridCell {
-    const next: GridCell = { char: cell.char, rgb: { ...cell.rgb }, weight_index: cell.weight_index };
-    if (channels.char) next.char = ' ';
-    if (channels.color) next.rgb = { r: 0, g: 0, b: 0 };
-    if (channels.weight) next.weight_index = 0;
+    const next = cloneGridCell(cell);
+    if (channels.char) {
+      next.char = ' ';
+      next.graphic = undefined;
+      next.appearance_slots = undefined;
+      next.materials = undefined;
+    }
+    if (channels.color) {
+      next.rgb = { r: 0, g: 0, b: 0 };
+      next.appearance_slots = undefined;
+      next.materials = undefined;
+    }
+    if (channels.weight) {
+      next.weight_index = 0;
+      if (next.graphic) next.graphic = { ...next.graphic, weight_index: 0 };
+    }
     return next;
   }
 
   function sampleActiveGroupWorldCell(world: { x: number; y: number; z: number }): GridCell {
     const cell = opts.get_active_group_world_cell?.(world) ?? opts.get_world_cell(world);
-    return cell
-      ? { char: cell.char, rgb: { ...cell.rgb }, weight_index: cell.weight_index }
-      : makeEmptyCell();
+    return cell ? cloneGridCell(cell) : makeEmptyCell();
   }
 
   function getActiveViewPlaneAxis(): 'x' | 'y' | 'z' {
@@ -1714,7 +1755,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       x: entry.x,
       y: entry.y,
       z: entry.z,
-      cell: { char: entry.cell.char, rgb: { ...entry.cell.rgb }, weight_index: entry.cell.weight_index },
+      cell: cloneGridCell(entry.cell),
     }));
   }
 
@@ -2054,7 +2095,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       sample: (world) => {
         if (!isWorldInsideBounds(world, bounds)) return null;
         const sampled = sampleActiveGroupWorldCell(world);
-        return { char: sampled.char, rgb: { ...sampled.rgb }, weight: sampled.weight_index };
+        return {
+          char: sampled.char,
+          graphic: sampled.graphic ? { ...sampled.graphic } : undefined,
+          appearance_slots: clone_appearance_slot_assignments(sampled.appearance_slots),
+          materials: sampled.materials ? { ...sampled.materials } : undefined,
+          rgb: { ...sampled.rgb },
+          weight: sampled.weight_index,
+        };
       },
       matches: (candidate, target) => cells_match_edit_channels(candidate, target, selectChannels),
       enumerate_domain: () => domain,
@@ -2087,7 +2135,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       sample: (world) => {
         if (!isWorldInsideBounds(world, bounds)) return null;
         const sampled = sampleActiveGroupWorldCell(world);
-        return { char: sampled.char, rgb: { ...sampled.rgb }, weight: sampled.weight_index };
+        return {
+          char: sampled.char,
+          graphic: sampled.graphic ? { ...sampled.graphic } : undefined,
+          appearance_slots: clone_appearance_slot_assignments(sampled.appearance_slots),
+          materials: sampled.materials ? { ...sampled.materials } : undefined,
+          rgb: { ...sampled.rgb },
+          weight: sampled.weight_index,
+        };
       },
       matches: (candidate, target) => cells_match_edit_channels(candidate, target, selectChannels),
       enumerate_domain: () => domain,
@@ -2101,7 +2156,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   }
 
   function isIgnoredPasteCell(cell: GridCell | null, ignoreColorRgb: { r: number; g: number; b: number }): boolean {
-    if (opts.get_paste_ignore_space() && (!cell || cell.char === ' ')) return true;
+    if (opts.get_paste_ignore_space() && (!cell || (cell.char === ' ' && !cell.graphic))) return true;
     if (!cell) return false;
     if (opts.get_paste_ignore_black() && cell.rgb.r === 0 && cell.rgb.g === 0 && cell.rgb.b === 0) return true;
     if (opts.get_paste_ignore_white() && cell.rgb.r === 255 && cell.rgb.g === 255 && cell.rgb.b === 255) return true;
@@ -2221,7 +2276,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       for (let x = startX; x <= endX; x++) {
         const cell = getGridCell(x, y);
         if (cell) {
-          region.set(`${x},${y}`, { ...cell });
+          region.set(`${x},${y}`, cloneGridCell(cell));
         }
       }
     }
@@ -2241,15 +2296,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const oldCell = before.get(key);
         const newCell = getGridCell(x, y);
         
-        if (oldCell && newCell) {
-          // Check if cell actually changed
-          if (oldCell.char !== newCell.char ||
-              oldCell.rgb.r !== newCell.rgb.r ||
-              oldCell.rgb.g !== newCell.rgb.g ||
-              oldCell.rgb.b !== newCell.rgb.b ||
-              oldCell.weight_index !== newCell.weight_index) {
-            trackChange(x, y, oldCell, newCell);
-          }
+        if (oldCell && newCell && !gridCellsEqual(oldCell, newCell)) {
+          trackChange(x, y, oldCell, newCell);
         }
       }
     }
@@ -2282,7 +2330,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               const newCell = getGridCell(draw_x, draw_y);
               if (newCell) {
                 if (!trackChange(draw_x, draw_y, oldCell, newCell)) {
-                  opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
+                  opts.grid.cells[draw_y]![draw_x] = cloneGridCell(oldCell);
                 }
               }
             }
@@ -2304,7 +2352,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (!cell || !oldCell) continue;
         const newCell = applyEraserEditToCell(cell, channels);
         if (cellsEqual(oldCell, newCell)) continue;
-        opts.grid.cells[draw_y]![draw_x] = { char: newCell.char, rgb: { ...newCell.rgb }, weight_index: newCell.weight_index };
+        opts.grid.cells[draw_y]![draw_x] = cloneGridCell(newCell);
         const committed = getGridCell(draw_x, draw_y);
         if (committed && !trackChange(draw_x, draw_y, oldCell, committed)) {
           opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
@@ -2334,69 +2382,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     // The pending_changes will be logged in OnPointerUp for continuous drawing
   }
 
-  function applyCharWithBrushSize(x: number, y: number, char: string, size: number): void {
-    const offset = Math.floor(size / 2);
-    for (let dy = 0; dy < size; dy++) {
-      for (let dx = 0; dx < size; dx++) {
-        const draw_x = x - offset + dx;
-        const draw_y = y - offset + dy;
-        if (draw_x >= 0 && draw_x < opts.grid.width && draw_y >= 0 && draw_y < opts.grid.height && canEditCell(draw_x, draw_y)) {
-          const oldCell = getGridCell(draw_x, draw_y);
-          const cell = getCell(opts.grid, draw_x, draw_y);
-          if (cell && cell.char !== ' ' && oldCell) {
-            cell.char = char;
-            const newCell = getGridCell(draw_x, draw_y);
-            if (newCell && !trackChange(draw_x, draw_y, oldCell, newCell)) {
-              opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
-            }
-          }
-        }
-      }
-    }
-  }
-
-  function applyCharAndColorWithBrushSize(x: number, y: number, brush: Brush, size: number): void {
-    const offset = Math.floor(size / 2);
-    for (let dy = 0; dy < size; dy++) {
-      for (let dx = 0; dx < size; dx++) {
-        const draw_x = x - offset + dx;
-        const draw_y = y - offset + dy;
-        if (draw_x >= 0 && draw_x < opts.grid.width && draw_y >= 0 && draw_y < opts.grid.height && canEditCell(draw_x, draw_y)) {
-          const oldCell = getGridCell(draw_x, draw_y);
-          const cell = getCell(opts.grid, draw_x, draw_y);
-          if (cell && cell.char !== ' ' && oldCell) {
-            cell.char = brush.char;
-            cell.rgb = { ...brush.rgb };
-            const newCell = getGridCell(draw_x, draw_y);
-            if (newCell && !trackChange(draw_x, draw_y, oldCell, newCell)) {
-              opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
-            }
-          }
-        }
-      }
-    }
-  }
-
   function applyBrushEditWithBrushSize(x: number, y: number, brush: Brush, size: number, channels: EditChannels): void {
     if (!has_any_edit_channel(channels)) return;
     if (channels.char && channels.color && channels.weight) {
       drawWithBrushSize(x, y, false, brush, size);
-      return;
-    }
-    if (channels.char && channels.color && !channels.weight) {
-      applyCharAndColorWithBrushSize(x, y, brush, size);
-      return;
-    }
-    if (channels.char && !channels.color && !channels.weight) {
-      applyCharWithBrushSize(x, y, brush.char, size);
-      return;
-    }
-    if (!channels.char && channels.color && !channels.weight) {
-      applyColorWithBrushSize(x, y, brush.rgb, size);
-      return;
-    }
-    if (!channels.char && !channels.color && channels.weight) {
-      applyWeightWithBrushSize(x, y, brush.weight_index, size);
       return;
     }
 
@@ -2408,13 +2397,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (draw_x < 0 || draw_x >= opts.grid.width || draw_y < 0 || draw_y >= opts.grid.height || !canEditCell(draw_x, draw_y)) continue;
         const oldCell = getGridCell(draw_x, draw_y);
         const cell = getCell(opts.grid, draw_x, draw_y);
-        if (!cell || !oldCell || cell.char === ' ') continue;
-        if (channels.char) cell.char = brush.char;
-        if (channels.color) cell.rgb = { ...brush.rgb };
-        if (channels.weight) cell.weight_index = brush.weight_index;
+        if (!cell || !oldCell || (cell.char === ' ' && !cell.graphic)) continue;
+        const editedCell = applyBrushEditToCell(cloneGridCell(cell), brush, channels);
+        opts.grid.cells[draw_y]![draw_x] = cloneGridCell(editedCell);
         const newCell = getGridCell(draw_x, draw_y);
         if (newCell && !trackChange(draw_x, draw_y, oldCell, newCell)) {
-          opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
+          opts.grid.cells[draw_y]![draw_x] = cloneGridCell(oldCell);
         }
       }
     }
@@ -2423,62 +2411,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function drawLineWithBrushEditChannels(x0: number, y0: number, x1: number, y1: number, brush: Brush, size: number, channels: EditChannels): void {
     for (const point of previewLine(x0, y0, x1, y1)) {
       applyBrushEditWithBrushSize(point.x, point.y, brush, size, channels);
-    }
-  }
-
-  // Apply weight to cells with brush size
-  function applyWeightWithBrushSize(x: number, y: number, weight_index: number, size: number): void {
-    const offset = Math.floor(size / 2);
-    
-    for (let dy = 0; dy < size; dy++) {
-      for (let dx = 0; dx < size; dx++) {
-        const draw_x = x - offset + dx;
-        const draw_y = y - offset + dy;
-        
-        if (draw_x >= 0 && draw_x < opts.grid.width &&
-            draw_y >= 0 && draw_y < opts.grid.height &&
-            canEditCell(draw_x, draw_y)) {
-          const oldCell = getGridCell(draw_x, draw_y);
-          const cell = getCell(opts.grid, draw_x, draw_y);
-          if (cell && cell.char !== ' ' && oldCell) {
-            cell.weight_index = weight_index;
-            const newCell = getGridCell(draw_x, draw_y);
-            if (newCell) {
-              if (!trackChange(draw_x, draw_y, oldCell, newCell)) {
-                opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Apply color to cells with brush size
-  function applyColorWithBrushSize(x: number, y: number, rgb: Rgb, size: number): void {
-    const offset = Math.floor(size / 2);
-    
-    for (let dy = 0; dy < size; dy++) {
-      for (let dx = 0; dx < size; dx++) {
-        const draw_x = x - offset + dx;
-        const draw_y = y - offset + dy;
-        
-        if (draw_x >= 0 && draw_x < opts.grid.width &&
-            draw_y >= 0 && draw_y < opts.grid.height &&
-            canEditCell(draw_x, draw_y)) {
-          const oldCell = getGridCell(draw_x, draw_y);
-          const cell = getCell(opts.grid, draw_x, draw_y);
-          if (cell && cell.char !== ' ' && oldCell) {
-            cell.rgb = { ...rgb };
-            const newCell = getGridCell(draw_x, draw_y);
-            if (newCell) {
-              if (!trackChange(draw_x, draw_y, oldCell, newCell)) {
-                opts.grid.cells[draw_y]![draw_x] = { ...oldCell };
-              }
-            }
-          }
-        }
-      }
     }
   }
 
@@ -3809,11 +3741,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
                 text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
               // Track the deletion for undo
               const oldCell = getGridCell(text_cursor_x, text_cursor_y);
-              opts.grid.cells[text_cursor_y]![text_cursor_x] = {
-                char: ' ',
-                rgb: { r: 0, g: 0, b: 0 },
-                weight_index: 0
-              };
+              opts.grid.cells[text_cursor_y]![text_cursor_x] = makeEmptyCell();
               const newCell = getGridCell(text_cursor_x, text_cursor_y);
               if (oldCell && newCell) {
                 trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
@@ -3830,11 +3758,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               text_cursor_y >= 0 && text_cursor_y < opts.grid.height) {
             // Track the deletion for undo
             const oldCell = getGridCell(text_cursor_x, text_cursor_y);
-            opts.grid.cells[text_cursor_y]![text_cursor_x] = {
-              char: ' ',
-              rgb: { r: 0, g: 0, b: 0 },
-              weight_index: 0
-            };
+            opts.grid.cells[text_cursor_y]![text_cursor_x] = makeEmptyCell();
             const newCell = getGridCell(text_cursor_x, text_cursor_y);
             if (oldCell && newCell) {
               trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
@@ -3873,11 +3797,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             const text_brush = getPreviewBrush();
             const oldCell = getGridCell(text_cursor_x, text_cursor_y);
             if (opts.get_space_replace()) {
-              opts.grid.cells[text_cursor_y]![text_cursor_x] = {
-                char: ' ',
-                rgb: { ...text_brush.rgb },
-                weight_index: text_brush.weight_index
-              };
+              opts.grid.cells[text_cursor_y]![text_cursor_x] = makeEmptyCell();
               const newCell = getGridCell(text_cursor_x, text_cursor_y);
               if (oldCell && newCell) {
                 trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);

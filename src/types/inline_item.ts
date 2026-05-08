@@ -2,6 +2,7 @@
 // Items stored directly in body_slots/ground as full objects (not IDs)
 
 import type { TagInstance } from "../tag_system/registry.js";
+import type { AppearanceSlotAssignments, InlineMaterialAssignments, ViewDirection } from "../render_shaders/graphics_contract.js";
 
 /**
  * Inline Item - Full item object stored directly in body_slots/ground
@@ -29,6 +30,10 @@ export interface InlineItem {
     resolved_tag_states?: unknown[];
     value_mag?: unknown;
     display_color?: string;        // Runtime color override (hex code)
+    appearance_slots?: AppearanceSlotAssignments;
+    materials?: InlineMaterialAssignments;
+    state?: Record<string, unknown>;
+    facing?: ViewDirection | string;
 }
 
 /**

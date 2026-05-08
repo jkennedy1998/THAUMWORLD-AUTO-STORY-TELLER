@@ -1,7 +1,7 @@
 import type { Rgb, StyleName } from "../mono_ui/types.js";
 import type { TagInstance } from "../tag_system/registry.js";
 import type { EntityRenderProfile, RenderShaderBindings } from "./definitions.js";
-import type { CardinalDirection, GraphicsModel, GroupRenderContext, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from "./graphics_contract.js";
+import type { AppearanceSlotAssignments, CardinalDirection, GraphicsModel, GroupRenderContext, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from "./graphics_contract.js";
 
 export type RenderKind = 'tile' | 'item' | 'pile' | 'actor' | 'npc' | 'particle' | 'ui';
 
@@ -25,6 +25,7 @@ export type RenderPayloadBase = {
     base_fg?: Rgb;
     render_shader?: RenderShaderBindings;
     graphics?: GraphicsModel;
+    appearance_slots?: AppearanceSlotAssignments;
     materials?: InlineMaterialAssignments;
     state?: Record<string, unknown>;
     facing?: ViewDirection | string;
@@ -147,6 +148,7 @@ export type RenderLayer = {
     style?: StyleName;
     weight_index?: number;
     flags?: string[];
+    appearance_slots?: AppearanceSlotAssignments;
     materials?: InlineMaterialAssignments;
 };
 
