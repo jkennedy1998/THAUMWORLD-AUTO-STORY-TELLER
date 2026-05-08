@@ -138,8 +138,14 @@ type SlotAssignments = Partial<Record<1 | 2 | 3, SlotValue>>;
 
 Important first-pass lighting rule:
 
-- material slot values are light-reactive
-- flat RGB slot values are direct color in first pass
+- material slot values are light-reactive when the chosen material definition opts into that behavior
+- flat RGB slot values are direct hard-set color in first pass
+
+Important near-term painter rule:
+
+- painter-facing slot authoring should begin with flat RGB assignment to slot 1 / 2 / 3
+- this validates the unified slot architecture without forcing early editable material-authoring complexity
+- richer material behavior should remain in material definitions and runtime material/shader policy, not in larger per-cell painter payloads
 
 ### 3) Weight
 
@@ -318,6 +324,12 @@ Examples:
 - paint all slots
 - lock shape while editing slots
 - lock slots while editing weight or graphic
+
+Current UX direction clarified after implementation work:
+
+- first-pass slot targeting should be a lightweight painter control rather than a separate material editor
+- a small `MAT` row with `1 2 3` hand-toggles is the preferred early shape
+- this should feel parallel to existing character/color/weight hand-target controls rather than like a separate tile-only workflow
 
 ## Scope Boundary
 
@@ -640,20 +652,30 @@ Completed work:
 
 Next work inside this phase:
 
+- add first-pass painter slot targeting so brush color edits can address slot 1 / 2 / 3 explicitly
+- start with flat RGB slot authoring rather than editable material definitions
 - make brush color and erase semantics increasingly slot-aware
 - continue sweeping `char === ' '` assumptions where graphic-only cells should count as occupied
 - clean up remaining move/text/helper paths that still reconstruct legacy text-only cells in low-traffic operations
 - expand regression coverage for graphic-only cells in authority, move, and property-raster operations
 
+Clarified implementation ordering inside this phase:
+
+1. simple slot targeting in painter UI (`MAT 1 2 3`)
+2. slot-aware brush / eyedropper / fill / erase semantics cleanup
+3. first-class material picking from a shared registry or swatch-like picker
+4. only later, richer material authoring workflows
+
 ### Phase F: Presentation/definition cleanup
 
-Status: planned after slot-behavior refinement and remaining legacy empty-path cleanup.
+Status: planned after slot-behavior refinement, first-pass slot-targeted painter UX, and remaining legacy empty-path cleanup.
 
 Goal:
 
 - formalize presentation selection more explicitly around graphic definitions
 - continue reducing backend- and prefix-driven authority assumptions
 - reconnect facing/view/neighbors/breath into one clearer presentation-selection surface
+- keep material complexity in shared reusable material definitions rather than leaking that complexity into painter cell payload shape
 
 ### Phase G: Legacy authority removal
 
@@ -686,6 +708,11 @@ Locked by Deep Dive 3:
   - flat RGB color
   - material reference
 
+Additional authoring direction now clarified:
+
+- near-term painter editing should primarily author `flat_rgb` slot values
+- semantic materials remain first-class in the architecture, but editable/custom material workflows are intentionally deferred
+
 ### 2) Compact id format
 
 Need to decide:
@@ -717,6 +744,15 @@ Need to decide the minimum neighbor information exposed to presentation selectio
 - graphic family/type hints
 - material/type hints
 - full neighboring rendered payload metadata
+
+### 6) Material picking and future material-authoring boundary
+
+Now directionally clarified:
+
+- first material-related painter UX should be slot-targeted flat color assignment
+- next material-related painter UX should be shared material picking from a registry / swatch-like surface
+- advanced editable material authoring (lighting ramps, position-reactive behavior, node-like workflows, procedural animation inputs) should remain a later system layered on top of the same slot architecture
+- runtime palette/index switching should remain an allowed future extension, but not a blocker for current slot-authoring work
 
 ## Acceptance Criteria For The Architecture
 

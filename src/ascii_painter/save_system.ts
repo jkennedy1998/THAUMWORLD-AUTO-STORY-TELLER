@@ -12,7 +12,7 @@ import type { VoxelSpace, VoxelSpaceExport } from './voxel_space.js';
 import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid } from './voxel_space.js';
 import type { PainterDocument } from './painter_document.js';
 import { clone_painter_document } from './painter_document.js';
-import type { ToolEditTarget, ToolType } from './types.js';
+import type { AppearanceSlotTargetMask, ToolEditTarget, ToolType } from './types.js';
 import type { AppearanceSlotAssignments, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from '../render_shaders/graphics_contract.js';
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
 import { ALL_EDIT_CHANNELS, sanitize_edit_channels, type EditChannels } from './edit_mask.js';
@@ -115,6 +115,15 @@ function sanitize_paste_angle_mode(value: unknown, fallback: 'relative' | 'absol
 
 function sanitize_boolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function sanitize_appearance_slot_target_mask(value: unknown, fallback: AppearanceSlotTargetMask): AppearanceSlotTargetMask {
+  const record = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    slot_1: sanitize_boolean(record.slot_1, fallback.slot_1),
+    slot_2: sanitize_boolean(record.slot_2, fallback.slot_2),
+    slot_3: sanitize_boolean(record.slot_3, fallback.slot_3),
+  };
 }
 
 /**
@@ -445,6 +454,8 @@ export interface ToolProperties {
   right_brush_weight_index: number;
   left_brush_edit_channels: EditChannels;
   right_brush_edit_channels: EditChannels;
+  left_brush_slot_targets: AppearanceSlotTargetMask;
+  right_brush_slot_targets: AppearanceSlotTargetMask;
   left_picker_edit_channels: EditChannels;
   right_picker_edit_channels: EditChannels;
   left_bucket_select_channels: EditChannels;
@@ -512,6 +523,8 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   right_brush_weight_index: 1,
   left_brush_edit_channels: { ...ALL_EDIT_CHANNELS },
   right_brush_edit_channels: { ...ALL_EDIT_CHANNELS },
+  left_brush_slot_targets: { slot_1: true, slot_2: false, slot_3: false },
+  right_brush_slot_targets: { slot_1: true, slot_2: false, slot_3: false },
   left_picker_edit_channels: { ...ALL_EDIT_CHANNELS },
   right_picker_edit_channels: { ...ALL_EDIT_CHANNELS },
   left_bucket_select_channels: { ...ALL_EDIT_CHANNELS },
@@ -592,6 +605,8 @@ export function loadToolProperties(): ToolProperties {
       right_brush_weight_index: clamp_weight_index(parsed.right_brush_weight_index),
       left_brush_edit_channels: sanitize_edit_channels(parsed.left_brush_edit_channels, DEFAULT_TOOL_PROPERTIES.left_brush_edit_channels),
       right_brush_edit_channels: sanitize_edit_channels(parsed.right_brush_edit_channels, DEFAULT_TOOL_PROPERTIES.right_brush_edit_channels),
+      left_brush_slot_targets: sanitize_appearance_slot_target_mask(parsed.left_brush_slot_targets, DEFAULT_TOOL_PROPERTIES.left_brush_slot_targets),
+      right_brush_slot_targets: sanitize_appearance_slot_target_mask(parsed.right_brush_slot_targets, DEFAULT_TOOL_PROPERTIES.right_brush_slot_targets),
       left_picker_edit_channels: sanitize_edit_channels(parsed.left_picker_edit_channels, DEFAULT_TOOL_PROPERTIES.left_picker_edit_channels),
       right_picker_edit_channels: sanitize_edit_channels(parsed.right_picker_edit_channels, DEFAULT_TOOL_PROPERTIES.right_picker_edit_channels),
       left_bucket_select_channels: sanitize_edit_channels(parsed.left_bucket_select_channels, DEFAULT_TOOL_PROPERTIES.left_bucket_select_channels),

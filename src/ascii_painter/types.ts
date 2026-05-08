@@ -11,6 +11,27 @@ import type { PlaneId, Point2 } from '../shared/coords.js';
 
 export type { AppearanceSlotAssignments, AppearanceSlotValue } from '../render_shaders/graphics_contract.js';
 
+export type AppearanceSlotTargetMask = {
+  slot_1: boolean;
+  slot_2: boolean;
+  slot_3: boolean;
+};
+
+export const DEFAULT_APPEARANCE_SLOT_TARGET_MASK: AppearanceSlotTargetMask = {
+  slot_1: true,
+  slot_2: false,
+  slot_3: false,
+};
+
+export function get_enabled_appearance_slots(mask: AppearanceSlotTargetMask | null | undefined): Array<1 | 2 | 3> {
+  const normalized = mask ?? DEFAULT_APPEARANCE_SLOT_TARGET_MASK;
+  const enabled: Array<1 | 2 | 3> = [];
+  if (normalized.slot_1) enabled.push(1);
+  if (normalized.slot_2) enabled.push(2);
+  if (normalized.slot_3) enabled.push(3);
+  return enabled.length > 0 ? enabled : [1];
+}
+
 function clone_appearance_slot_value(value: AppearanceSlotValue): AppearanceSlotValue {
   if (value.kind === 'material') return { kind: 'material', material_id: String(value.material_id ?? '') };
   return { kind: 'flat_rgb', rgb: { ...value.rgb } };

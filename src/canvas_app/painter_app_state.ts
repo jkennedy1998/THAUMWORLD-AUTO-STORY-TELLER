@@ -7,8 +7,8 @@
 
 import type { Canvas, Module, PointerEvent, Rect, Rgb } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
-import type { Grid, Brush, ToolEditTarget, ToolType, GridCell } from '../ascii_painter/types.js';
-import { clone_appearance_slot_assignments, createGrid, exportGrid, importGrid } from '../ascii_painter/types.js';
+import type { AppearanceSlotTargetMask, Grid, Brush, ToolEditTarget, ToolType, GridCell } from '../ascii_painter/types.js';
+import { clone_appearance_slot_assignments, createGrid, exportGrid, get_enabled_appearance_slots, importGrid } from '../ascii_painter/types.js';
 import { createHistoryManager, logCellAction, logGroupAction, clearHistory, canUndoGroup, canRedoGroup, getGroupHistoryState, popRedoGroupAction, popUndoGroupAction, type HistoryAction, type HistoryManager } from '../ascii_painter/history.js';
 import { get_color_by_name, nearest_indexed_lerp_rgb } from '../mono_ui/colors.js';
 import type { SelectionMode } from '../ascii_painter/selection.js';
@@ -3384,7 +3384,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const left_brush: Brush = {
     char: saved_tool_props.left_brush_char ?? '█',
     graphic: saved_tool_props.left_brush_graphic
-      ? { ...saved_tool_props.left_brush_graphic, weight_index: (saved_tool_props.left_brush_weight_index ?? 1) as 0 | 1 | 2 | 3 }
+      ? { ...saved_tool_props.left_brush_graphic, weight_index: mapBrushWeightToGraphicWeight(saved_tool_props.left_brush_weight_index ?? 1) }
       : undefined,
     appearance_slots: clone_appearance_slot_assignments(saved_tool_props.left_brush_appearance_slots),
     materials: saved_tool_props.left_brush_materials ? { ...saved_tool_props.left_brush_materials } : undefined,
@@ -3394,7 +3394,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const right_brush: Brush = {
     char: saved_tool_props.right_brush_char ?? '█',
     graphic: saved_tool_props.right_brush_graphic
-      ? { ...saved_tool_props.right_brush_graphic, weight_index: (saved_tool_props.right_brush_weight_index ?? 1) as 0 | 1 | 2 | 3 }
+      ? { ...saved_tool_props.right_brush_graphic, weight_index: mapBrushWeightToGraphicWeight(saved_tool_props.right_brush_weight_index ?? 1) }
       : undefined,
     appearance_slots: clone_appearance_slot_assignments(saved_tool_props.right_brush_appearance_slots),
     materials: saved_tool_props.right_brush_materials ? { ...saved_tool_props.right_brush_materials } : undefined,
@@ -3406,6 +3406,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let right_brush_size = saved_tool_props.right_brush_size ?? saved_tool_props.brush_size ?? 1;
   let left_edit_channels: EditChannels = { ...saved_tool_props.left_brush_edit_channels };
   let right_edit_channels: EditChannels = { ...saved_tool_props.right_brush_edit_channels };
+  let left_brush_slot_targets: AppearanceSlotTargetMask = { ...saved_tool_props.left_brush_slot_targets };
+  let right_brush_slot_targets: AppearanceSlotTargetMask = { ...saved_tool_props.right_brush_slot_targets };
   let left_select_channels: EditChannels = { ...saved_tool_props.left_bucket_select_channels };
   let right_select_channels: EditChannels = { ...saved_tool_props.right_bucket_select_channels };
   let bucket_continuous = saved_tool_props.bucket_continuous ?? true;
@@ -3423,18 +3425,49 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return side === 'right' ? right_brush : left_brush;
   }
 
-  function syncBrushGraphicWeight(brush: Brush): void {
-    if (brush.graphic) brush.graphic = { ...brush.graphic, weight_index: brush.weight_index as 0 | 1 | 2 | 3 };
+  function mapBrushWeightToGraphicWeight(weight_index: number): 0 | 1 | 2 | 3 {
+    const clamped = Math.max(0, Math.min(3, Math.floor(Number(weight_index) || 0)));
+    return (3 - clamped) as 0 | 1 | 2 | 3;
   }
 
-  function applyBrushColor(brush: Brush, rgb: Rgb): void {
+  function mapGraphicWeightToBrushWeight(weight_index: number): 0 | 1 | 2 | 3 {
+    const clamped = Math.max(0, Math.min(3, Math.floor(Number(weight_index) || 0)));
+    return (3 - clamped) as 0 | 1 | 2 | 3;
+  }
+
+  function syncBrushGraphicWeight(brush: Brush): void {
+    if (brush.graphic) brush.graphic = { ...brush.graphic, weight_index: mapBrushWeightToGraphicWeight(brush.weight_index) };
+  }
+
+  function getBrushSlotTargetsForSide(side: 'left' | 'right'): AppearanceSlotTargetMask {
+    return side === 'right' ? right_brush_slot_targets : left_brush_slot_targets;
+  }
+
+  function removeBrushMaterialSlots(materials: Brush['materials'], slots: Array<1 | 2 | 3>): Brush['materials'] {
+    if (!materials) return undefined;
+    const next = { ...materials };
+    for (const slot of slots) delete next[slot];
+    return Object.keys(next).length > 0 ? next : undefined;
+  }
+
+  function syncGraphicBrushAppearanceFromHands(brush: Brush): void {
+    if (!brush.graphic) return;
+    brush.appearance_slots = makeBrushAppearanceSlotsFromHands();
+    brush.materials = removeBrushMaterialSlots(brush.materials, [1, 2, 3]);
+  }
+
+  function syncAllGraphicBrushAppearancesFromHands(): void {
+    syncGraphicBrushAppearanceFromHands(left_brush);
+    syncGraphicBrushAppearanceFromHands(right_brush);
+  }
+
+  function applyBrushColor(brush: Brush, rgb: Rgb, slot_targets?: AppearanceSlotTargetMask): void {
     brush.rgb = { ...rgb };
     if (brush.graphic) {
-      brush.appearance_slots = {
-        ...(brush.appearance_slots ?? {}),
-        1: { kind: 'flat_rgb', rgb: { ...rgb } },
-      };
+      syncAllGraphicBrushAppearancesFromHands();
+      return;
     }
+    void slot_targets;
   }
 
   function makeBrushAppearanceSlotsFromHands(): NonNullable<Brush['appearance_slots']> {
@@ -3446,6 +3479,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       3: { kind: 'flat_rgb', rgb: nearest_indexed_lerp_rgb(left, right, 0.5) },
     };
   }
+
+  syncAllGraphicBrushAppearancesFromHands();
+  syncBrushGraphicWeight(left_brush);
+  syncBrushGraphicWeight(right_brush);
 
   function getBrushForButton(button: number): Brush {
     return getBrushForSide(button === 2 ? 'right' : 'left');
@@ -3461,6 +3498,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function getSelectChannelsForSide(side: 'left' | 'right'): EditChannels {
     return side === 'right' ? right_select_channels : left_select_channels;
+  }
+
+  function saveBrushSlotTargets(): void {
+    saveToolProperties({
+      left_brush_slot_targets: left_brush_slot_targets,
+      right_brush_slot_targets: right_brush_slot_targets,
+    });
   }
 
   function saveSharedEditChannels(): void {
@@ -4493,6 +4537,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     get_brush_for_button: (button) => getBrushForButton(button),
     get_tool_target_for_button: (button, tool) => getEffectiveToolTargetForButton(button, tool),
     get_brush_edit_channels_for_button: (button) => getEditChannelsForSide(button === 2 ? 'right' : 'left'),
+    get_appearance_slot_targets_for_button: (button) => getBrushSlotTargetsForSide(button === 2 ? 'right' : 'left'),
     get_bucket_select_channels_for_button: (button) => getSelectChannelsForSide(button === 2 ? 'right' : 'left'),
     get_brush_size: () => getBrushSizeForSide(active_property_side),
     get_brush_size_for_button: (button) => getBrushSizeForButton(button),
@@ -4609,15 +4654,28 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         brush.appearance_slots = clone_appearance_slot_assignments(cell.appearance_slots);
       }
       if (channels.color) {
-        brush.rgb = { ...cell.rgb };
+        const slot_targets = getBrushSlotTargetsForSide(target_side);
+        const enabled_slots = get_enabled_appearance_slots(slot_targets);
+        const sampled_slot = enabled_slots
+          .map((slot) => cell.appearance_slots?.[slot])
+          .find((value) => value?.kind === 'flat_rgb');
+        brush.rgb = sampled_slot?.kind === 'flat_rgb' ? { ...sampled_slot.rgb } : { ...cell.rgb };
         if (!channels.char) {
+          const next_slots = clone_appearance_slot_assignments(brush.appearance_slots) ?? {};
+          for (const slot of enabled_slots) {
+            const value = cell.appearance_slots?.[slot];
+            if (value) next_slots[slot] = value.kind === 'material'
+              ? { kind: 'material', material_id: value.material_id }
+              : { kind: 'flat_rgb', rgb: { ...value.rgb } };
+            else delete next_slots[slot];
+          }
           brush.materials = cell.materials ? { ...cell.materials } : brush.materials;
-          brush.appearance_slots = clone_appearance_slot_assignments(cell.appearance_slots) ?? brush.appearance_slots;
+          brush.appearance_slots = Object.keys(next_slots).length > 0 ? next_slots : undefined;
         }
       }
       if (channels.weight) {
-        brush.weight_index = cell.weight_index;
-        if (brush.graphic) brush.graphic = { ...brush.graphic, weight_index: cell.weight_index as 0 | 1 | 2 | 3 };
+        brush.weight_index = cell.graphic ? mapGraphicWeightToBrushWeight(cell.weight_index) : cell.weight_index;
+        syncBrushGraphicWeight(brush);
       }
 
       saveBrushState(target_side);
@@ -5247,6 +5305,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       get_brush: () => getPreviewBrush(),
       get_left_rgb: () => left_brush.rgb,
       get_right_rgb: () => right_brush.rgb,
+      get_slot_targets: () => getBrushSlotTargetsForSide(active_property_side),
       on_color_select: (rgb, button) => {
         // Check if we're selecting the ignore color
         if ((globalThis as any).__selecting_ignore_color) {
@@ -5256,9 +5315,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           painterDiag('set ignore color', { rgb });
         } else {
           active_property_side = button === 2 ? 'right' : 'left';
-          getBrushForButton(button).rgb = { ...rgb };
-          saveBrushState(active_property_side);
-          painterDiag('selected color', { rgb });
+          applyBrushColor(getBrushForButton(button), rgb, getBrushSlotTargetsForSide(active_property_side));
+          saveBrushState('left');
+          saveBrushState('right');
+          painterDiag('selected color', { rgb, side: active_property_side, hand_seeded_graphics: true });
         }
       },
       on_move: (new_rect) => {
@@ -5282,8 +5342,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       on_color_commit: (side, rgb) => {
         active_property_side = side;
         applyBrushColor(getBrushForSide(side), rgb);
-        saveBrushState(side);
-        painterDiag('selected color from color block', { side, rgb });
+        saveBrushState('left');
+        saveBrushState('right');
+        painterDiag('selected color from color block', { side, rgb, hand_seeded_graphics: true });
       },
       on_move: (new_rect) => {
         if (color_block_module) {
@@ -5379,12 +5440,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       return { left, right: true };
     }
 
-    function toggle_edit_channel_pair(
+    function toggle_edit_channel_pair<T extends Record<string, boolean>>(
       side: 'left' | 'right' | 'both',
-      channel: keyof EditChannels,
-      left_channels: EditChannels,
-      right_channels: EditChannels,
-      apply: (next_left: EditChannels, next_right: EditChannels) => void,
+      channel: keyof T,
+      left_channels: T,
+      right_channels: T,
+      apply: (next_left: T, next_right: T) => void,
     ): void {
       const next = cycle_hand_toggle_state(left_channels[channel], right_channels[channel], side);
       apply(
@@ -5497,6 +5558,58 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       });
     }
 
+    function append_slot_target_rows(rows: ToolPropertyRow[]): void {
+      rows.push({
+        type: 'edit_channel_matrix',
+        id: 'shared_slot_targets',
+        row_label: 'MAT',
+        columns: [
+          {
+            id: 'slot_1',
+            label: '1',
+            shortcut: '',
+            left_value: left_brush_slot_targets.slot_1,
+            right_value: right_brush_slot_targets.slot_1,
+            left_enabled: true,
+            right_enabled: true,
+          },
+          {
+            id: 'slot_2',
+            label: '2',
+            shortcut: '',
+            left_value: left_brush_slot_targets.slot_2,
+            right_value: right_brush_slot_targets.slot_2,
+            left_enabled: true,
+            right_enabled: true,
+          },
+          {
+            id: 'slot_3',
+            label: '3',
+            shortcut: '',
+            left_value: left_brush_slot_targets.slot_3,
+            right_value: right_brush_slot_targets.slot_3,
+            left_enabled: true,
+            right_enabled: true,
+          },
+        ],
+        on_toggle: (side, column_id) => {
+          const key = column_id as keyof AppearanceSlotTargetMask;
+          toggle_edit_channel_pair(
+            side,
+            key,
+            left_brush_slot_targets,
+            right_brush_slot_targets,
+            (next_left, next_right) => {
+              if (side !== 'both') active_property_side = side;
+              left_brush_slot_targets = next_left;
+              right_brush_slot_targets = next_right;
+              saveBrushSlotTargets();
+            },
+          );
+        },
+      });
+    }
+
     function append_shared_matrix_rows(rows: ToolPropertyRow[]): void {
       append_edit_channel_rows(
         rows,
@@ -5535,6 +5648,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       );
       const edit_row = rows[rows.length - 1];
       if (edit_row?.type === 'edit_channel_matrix') edit_row.row_label = 'Edit';
+
+      append_slot_target_rows(rows);
     }
 
     function append_tool_specific_rows(rows: ToolPropertyRow[], left_tool: ToolType, right_tool: ToolType): void {

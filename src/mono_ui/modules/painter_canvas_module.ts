@@ -10,9 +10,9 @@
  */
 
 import type { Canvas, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent, Cell } from '../types.js';
-import type { Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.js';
+import type { AppearanceSlotTargetMask, Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.js';
 import type { ToolEditTarget } from '../../ascii_painter/types.js';
-import { clone_appearance_slot_assignments, createGrid, getCell, setCell } from '../../ascii_painter/types.js';
+import { clone_appearance_slot_assignments, createGrid, DEFAULT_APPEARANCE_SLOT_TARGET_MASK, get_enabled_appearance_slots, getCell, setCell } from '../../ascii_painter/types.js';
 import { drawCell, drawLine, eraseCell, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditChannels } from '../../ascii_painter/edit_mask.js';
 import { logGroupCellAction, addToGroupBatch, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
@@ -76,6 +76,7 @@ export type PainterCanvasOptions = {
   get_preview_brush?: () => Brush;
   get_brush_for_button?: (button: number) => Brush;
   get_brush_edit_channels_for_button?: (button: number) => EditChannels;
+  get_appearance_slot_targets_for_button?: (button: number) => AppearanceSlotTargetMask;
   get_bucket_select_channels_for_button?: (button: number) => EditChannels;
   get_brush_size: () => number;
   get_brush_size_for_button?: (button: number) => number;
@@ -286,6 +287,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   function getBrushSizeForButton(button: number): number {
     if (opts.get_brush_size_for_button) return opts.get_brush_size_for_button(button === 2 ? 2 : 0);
     return opts.get_brush_size();
+  }
+
+  function getAppearanceSlotTargetsForButton(button: number): AppearanceSlotTargetMask {
+    return opts.get_appearance_slot_targets_for_button?.(button === 2 ? 2 : 0) ?? DEFAULT_APPEARANCE_SLOT_TARGET_MASK;
   }
 
   function getDragButton(): number {
@@ -773,7 +778,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const gridPoint = opts.get_grid_point_for_world?.(world) ?? null;
       if (gridPoint && !canEditCell(gridPoint.x, gridPoint.y)) continue;
       const oldCell = cloneGridCell(getActiveGroupWorldCell(world));
-      const newCell = applyBrushEditToCell(oldCell, brush, active_draw_channels);
+      const newCell = applyBrushEditToCell(oldCell, brush, active_draw_channels, getAppearanceSlotTargetsForButton(getDragButton()));
       if (gridCellsEqual(oldCell, newCell)) continue;
       changesByWorld.set(worldKey(world), buildChange(world, oldCell, newCell, gridPoint));
     }
@@ -1695,7 +1700,44 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     };
   }
 
-  function applyBrushEditToCell(cell: GridCell, brush: Brush, channels: EditChannels): GridCell {
+  function mergeBrushColorIntoSlots(cell: GridCell, brush: Brush, slot_targets?: AppearanceSlotTargetMask): GridCell {
+    const next = cloneGridCell(cell);
+    const slots = get_enabled_appearance_slots(slot_targets ?? DEFAULT_APPEARANCE_SLOT_TARGET_MASK);
+    const next_slots = clone_appearance_slot_assignments(next.appearance_slots) ?? {};
+    for (const slot of slots) {
+      const value = brush.appearance_slots?.[slot];
+      if (value) {
+        next_slots[slot] = value.kind === 'material'
+          ? { kind: 'material', material_id: value.material_id }
+          : { kind: 'flat_rgb', rgb: { ...value.rgb } };
+      }
+    }
+    next.appearance_slots = Object.keys(next_slots).length > 0 ? next_slots : undefined;
+    if (next.materials) {
+      const next_materials = { ...next.materials };
+      for (const slot of slots) delete next_materials[slot];
+      next.materials = Object.keys(next_materials).length > 0 ? next_materials : undefined;
+    }
+    return next;
+  }
+
+  function clearCellColorSlots(cell: GridCell, slot_targets?: AppearanceSlotTargetMask): GridCell {
+    const next = cloneGridCell(cell);
+    const slots = get_enabled_appearance_slots(slot_targets ?? DEFAULT_APPEARANCE_SLOT_TARGET_MASK);
+    const next_slots = clone_appearance_slot_assignments(next.appearance_slots);
+    if (next_slots) {
+      for (const slot of slots) delete next_slots[slot];
+      next.appearance_slots = Object.keys(next_slots).length > 0 ? next_slots : undefined;
+    }
+    if (next.materials) {
+      const next_materials = { ...next.materials };
+      for (const slot of slots) delete next_materials[slot];
+      next.materials = Object.keys(next_materials).length > 0 ? next_materials : undefined;
+    }
+    return next;
+  }
+
+  function applyBrushEditToCell(cell: GridCell, brush: Brush, channels: EditChannels, slot_targets?: AppearanceSlotTargetMask): GridCell {
     const next = cloneGridCell(cell);
     if (channels.char && channels.color && channels.weight) {
       return makeCellFromBrush(brush);
@@ -1709,8 +1751,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     if (channels.color) {
       next.rgb = { ...brush.rgb };
       if (!channels.char) {
-        next.appearance_slots = clone_appearance_slot_assignments(brush.appearance_slots) ?? next.appearance_slots;
-        next.materials = brush.materials ? { ...brush.materials } : next.materials;
+        const color_merged = mergeBrushColorIntoSlots(next, brush, slot_targets);
+        next.appearance_slots = color_merged.appearance_slots;
+        next.materials = color_merged.materials;
       }
     }
     if (channels.weight) {
@@ -1720,7 +1763,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return next;
   }
 
-  function applyEraserEditToCell(cell: GridCell, channels: EditChannels): GridCell {
+  function applyEraserEditToCell(cell: GridCell, channels: EditChannels, slot_targets?: AppearanceSlotTargetMask): GridCell {
     const next = cloneGridCell(cell);
     if (channels.char) {
       next.char = ' ';
@@ -1730,8 +1773,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     }
     if (channels.color) {
       next.rgb = { r: 0, g: 0, b: 0 };
-      next.appearance_slots = undefined;
-      next.materials = undefined;
+      if (!channels.char) {
+        const color_cleared = clearCellColorSlots(next, slot_targets);
+        next.appearance_slots = color_cleared.appearance_slots;
+        next.materials = color_cleared.materials;
+      } else {
+        next.appearance_slots = undefined;
+        next.materials = undefined;
+      }
     }
     if (channels.weight) {
       next.weight_index = 0;
@@ -2085,7 +2134,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     const bounds = getActiveGroupWorldBounds();
     if (!bounds || !isWorldInsideBounds(startWorld, bounds)) return 0;
     const startCell = sampleActiveGroupWorldCell(startWorld);
-    const nextStartCell = applyBrushEditToCell(startCell, brush, editChannels);
+    const slotTargets = getAppearanceSlotTargetsForButton(button);
+    const nextStartCell = applyBrushEditToCell(startCell, brush, editChannels, slotTargets);
     if (cellsEqual(startCell, nextStartCell)) return 0;
     const selectChannels = getBucketSelectChannelsForButton(button);
     const domain = enumerateBoundedWorldDomain(bounds);
@@ -2114,7 +2164,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     let changed = 0;
     for (const world of filled) {
       const oldCell = sampleActiveGroupWorldCell(world);
-      const newCell = applyBrushEditToCell(oldCell, brush, editChannels);
+      const newCell = applyBrushEditToCell(oldCell, brush, editChannels, slotTargets);
       if (cellsEqual(oldCell, newCell)) continue;
       if (!trackWorldChange(world, oldCell, newCell, opts.get_grid_point_for_world?.(world) ?? null)) continue;
       changed += 1;
@@ -2350,7 +2400,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const oldCell = getGridCell(draw_x, draw_y);
         const cell = getCell(opts.grid, draw_x, draw_y);
         if (!cell || !oldCell) continue;
-        const newCell = applyEraserEditToCell(cell, channels);
+        const newCell = applyEraserEditToCell(cell, channels, getAppearanceSlotTargetsForButton(getDragButton()));
         if (cellsEqual(oldCell, newCell)) continue;
         opts.grid.cells[draw_y]![draw_x] = cloneGridCell(newCell);
         const committed = getGridCell(draw_x, draw_y);
@@ -2398,7 +2448,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         const oldCell = getGridCell(draw_x, draw_y);
         const cell = getCell(opts.grid, draw_x, draw_y);
         if (!cell || !oldCell || (cell.char === ' ' && !cell.graphic)) continue;
-        const editedCell = applyBrushEditToCell(cloneGridCell(cell), brush, channels);
+        const editedCell = applyBrushEditToCell(cloneGridCell(cell), brush, channels, getAppearanceSlotTargetsForButton(getDragButton()));
         opts.grid.cells[draw_y]![draw_x] = cloneGridCell(editedCell);
         const newCell = getGridCell(draw_x, draw_y);
         if (newCell && !trackChange(draw_x, draw_y, oldCell, newCell)) {
