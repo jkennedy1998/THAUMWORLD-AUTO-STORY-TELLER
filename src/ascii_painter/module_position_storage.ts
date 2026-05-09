@@ -1,11 +1,19 @@
 /**
  * Module Position Storage
  * 
- * Handles saving and loading module positions using slot-backed storage with a local cache.
+ * Transitional painter adapter over the shared module layout store.
  */
 
 import type { Rect } from '../mono_ui/types.js';
-import { get_module_layout_state, load_module_layouts, rect_to_layout_data, reset_module_layouts, save_module_layouts, type ModulePositions, type ModuleVisibility } from '../mono_ui/runtime/module_layout_store.js';
+import {
+  get_module_layout_state,
+  load_active_module_layout,
+  rect_to_layout_data,
+  reset_active_module_layout,
+  save_active_module_layout,
+  type ModulePositions,
+  type ModuleVisibility,
+} from '../mono_ui/runtime/module_layout_store.js';
 import type { CameraSettingsAppId } from '../mono_ui/runtime/camera_limits.js';
 import type { ProfileScope } from '../user_profiles/profile_scope.js';
 
@@ -18,41 +26,34 @@ let current_profile_scope: ProfileScope | null = null;
 let positions_cache: ModulePositions = {};
 let visibility_cache: ModuleVisibility = {};
 
-function sync_cache_from_local_storage(): void {
+function clear_legacy_local_storage_cache(): void {
   try {
-    const pos_data = localStorage.getItem(STORAGE_KEY);
-    positions_cache = pos_data ? JSON.parse(pos_data) as ModulePositions : {};
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(VISIBILITY_STORAGE_KEY);
   } catch {
-    positions_cache = {};
-  }
-  try {
-    const vis_data = localStorage.getItem(VISIBILITY_STORAGE_KEY);
-    visibility_cache = vis_data ? JSON.parse(vis_data) as ModuleVisibility : {};
-  } catch {
-    visibility_cache = {};
+    // ignore cache clear failures
   }
 }
 
-function sync_local_storage_from_cache(): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(positions_cache));
-    localStorage.setItem(VISIBILITY_STORAGE_KEY, JSON.stringify(visibility_cache));
-  } catch {
-    // ignore cache write failures
-  }
-}
-
-export function initModuleLayoutPersistence(slot: number, app: CameraSettingsAppId, opts?: { get_profile_scope?: () => ProfileScope | null; profile_scope_ready?: Promise<ProfileScope> | null }): void {
+export function initModuleLayoutPersistence(
+  slot: number,
+  app: CameraSettingsAppId,
+  opts?: {
+    get_profile_scope?: () => ProfileScope | null;
+    profile_scope_ready?: Promise<ProfileScope> | null;
+    on_layout_loaded?: (state: { positions: ModulePositions; visibility: ModuleVisibility }) => void;
+  },
+): void {
   current_slot = slot;
   current_app = app;
   current_profile_scope = opts?.get_profile_scope?.() ?? null;
-  sync_cache_from_local_storage();
+  clear_legacy_local_storage_cache();
   const sync_from_store = (profile_scope?: ProfileScope | null): void => {
     if (profile_scope) current_profile_scope = profile_scope;
-    void load_module_layouts(slot, app, profile_scope ?? current_profile_scope).then((state) => {
+    void load_active_module_layout(slot, app, profile_scope ?? current_profile_scope).then((state) => {
       positions_cache = state.positions;
       visibility_cache = state.visibility;
-      sync_local_storage_from_cache();
+      opts?.on_layout_loaded?.(state);
     }).catch(() => null);
   };
   sync_from_store(current_profile_scope);
@@ -62,39 +63,30 @@ export function initModuleLayoutPersistence(slot: number, app: CameraSettingsApp
 }
 
 function persist_layout_state(): void {
-  sync_local_storage_from_cache();
-  void save_module_layouts(current_slot, current_app, {
+  void save_active_module_layout(current_slot, current_app, {
     positions: positions_cache,
     visibility: visibility_cache,
   }, current_profile_scope).catch(() => null);
 }
 
-/**
- * Save module positions to localStorage
- */
+export function getCachedModuleLayoutState(): { positions: ModulePositions; visibility: ModuleVisibility } {
+  return get_module_layout_state(current_app);
+}
+
 export function saveModulePositions(positions: ModulePositions): void {
   positions_cache = positions;
   persist_layout_state();
 }
 
-/**
- * Load module positions from localStorage
- */
 export function loadModulePositions(): ModulePositions {
   return { ...positions_cache };
 }
 
-/**
- * Save a single module position
- */
 export function saveModulePosition(moduleId: string, rect: Rect): void {
   positions_cache[moduleId] = rect_to_layout_data(rect);
   persist_layout_state();
 }
 
-/**
- * Get a single module position
- */
 export function getModulePosition(moduleId: string): Rect | null {
   const pos = positions_cache[moduleId];
   if (pos) {
@@ -108,19 +100,11 @@ export function getModulePosition(moduleId: string): Rect | null {
   return null;
 }
 
-/**
- * Clear all module positions
- */
 export function clearModulePositions(): void {
   positions_cache = {};
   visibility_cache = {};
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.removeItem(VISIBILITY_STORAGE_KEY);
-  } catch {
-    // ignore cache clear failures
-  }
-  void reset_module_layouts(current_slot, current_app, current_profile_scope).catch(() => null);
+  clear_legacy_local_storage_cache();
+  void reset_active_module_layout(current_slot, current_app, current_profile_scope).catch(() => null);
 }
 
 export function saveModuleVisibilityState(visibility: ModuleVisibility): void {

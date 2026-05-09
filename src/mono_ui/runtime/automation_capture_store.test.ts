@@ -30,7 +30,7 @@ assert(stored!.appearance_slots?.[1]?.kind === 'flat_rgb' && stored!.appearance_
 assert(stored!.materials?.[1] === 'STONE_PALE', 'capture store should deep-clone materials on set');
 
 stored!.graphic!.graphic_id = 'atlas:mutated_after_get';
-stored!.appearance_slots![1]!.rgb.g = 88;
+if (stored!.appearance_slots![1]?.kind === 'flat_rgb') stored!.appearance_slots![1].rgb.g = 88;
 stored!.materials![1] = 'WOOD_DARK';
 
 const reread = store.get_painter_cell('sample');

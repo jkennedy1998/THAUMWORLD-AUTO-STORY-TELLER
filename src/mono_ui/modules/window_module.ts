@@ -5,6 +5,7 @@ import type { ModuleGizmosConfig } from "../module_gizmos.js";
 import { get_ui_semantic_rgb } from "../runtime/ui_customization_store.js";
 import { make_floating_panel_module } from "./floating_panel_module.js";
 import { clamp_weight_index, DEFAULT_WEIGHT_INDEX } from "../weight_system.js";
+import { create_vertical_scroll_pan_adapter } from './adapters/vertical_scroll_pan_adapter.js';
 
 export type TextWindowMessage = {
     content: string;
@@ -192,6 +193,19 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
 
     let scroll_y = 0;
 
+    const scroll_pan_adapter = create_vertical_scroll_pan_adapter({
+        get_scroll_y: () => scroll_y,
+        set_scroll_y: (y: number) => {
+            scroll_y = y;
+        },
+        clamp: (y: number) => {
+            const text_r = inner_text_rect();
+            const text_h = rect_height(text_r);
+            const max_scroll = Math.max(0, cached_lines.length - text_h);
+            return clamp(y, 0, max_scroll);
+        },
+    });
+
     // Drag-to-pan (UI traversal): same feel as place module panning.
     // Uses drag events so small pointer jitter doesn't scroll.
     let is_drag_panning = false;
@@ -227,13 +241,6 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         return { x0: rect.x0 + 1, y0: rect.y0 + 1, x1: rect.x1 - 1, y1: rect.y1 - 2 };
     }
 
-    function scroll_by(dy_lines: number) {
-        const text_r = inner_text_rect();
-        const text_h = rect_height(text_r);
-        const max_scroll = Math.max(0, cached_lines.length - text_h);
-        scroll_y = clamp(scroll_y + dy_lines, 0, max_scroll);
-    }
-
     function get_border_markers(current_rect: Rect): BorderMarkers {
         const text_h = rect_height({ x0: current_rect.x0 + 1, y0: current_rect.y0 + 1, x1: current_rect.x1 - 1, y1: current_rect.y1 - 2 });
         const total = cached_lines.length;
@@ -261,6 +268,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
             max_width: 200,
             max_height: 80,
         } : undefined,
+        get_pan_target_adapter: () => scroll_pan_adapter,
         draw_content(c: Canvas, next_rect: Rect): void {
             rect = next_rect;
             const text_rgb = opts.text_rgb ?? get_ui_semantic_rgb('bright');
@@ -312,7 +320,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         on_drag_move_content(e: DragEvent): void {
             if (!is_drag_panning) return;
             if (!(e.buttons & 1)) return;
-            scroll_by(e.step_dy);
+            scroll_pan_adapter.applyAxisDelta?.({ y: e.step_dy });
         },
         on_drag_end_content(): void {
             is_drag_panning = false;
@@ -320,7 +328,7 @@ export function make_text_window_module(opts: TextWindowOptions): Module {
         on_wheel_content(e: WheelEvent): void {
             const dy = e.delta_y;
             if (dy === 0) return;
-            scroll_by(dy > 0 ? 1 : -1);
+            scroll_pan_adapter.applyAxisDelta?.({ y: dy > 0 ? 1 : -1 });
         },
     });
 }

@@ -232,9 +232,11 @@ This is mostly a workflow alignment point, not a present runtime unification.
 
 #### Painter feature
 
-Painter display cells already have some support for richer display data at the grid level, including:
+Painter now preserves richer visual payload data across authored storage, runtime projection, and active editing paths, including:
 - `graphic`
-- `materials`
+- `appearance_slots`
+- compatibility `materials`
+- shared `weight_index`
 
 The broader painter direction also wants room for:
 - special rendered glyphs that are still tile-sized
@@ -250,18 +252,20 @@ Game rendering already uses richer payloads than plain text cells, including:
 
 ### Why this matters
 
-This is not a bad alignment point. It is a strong future alignment point.
+This is now one of the strongest active alignment areas.
 
-The issue is not that the painter and game should stay separate here. The issue is that the painter's canonical saved/runtime-authored payload is not yet rich enough to carry the same class of visual data faithfully.
+The painter is no longer limited to a tiny text-only canonical payload here; it can now preserve the same general class of visual payload the game runtime already understands.
 
 ### Current caution
 
-Painter `GridCell` supports richer display data, but canonical `PainterVoxelRecord` still only stores:
-- `char`
-- `rgb`
-- `weight_index`
+The remaining gap is no longer basic schema capability. It is source-of-truth and authority cleanup around that richer payload.
 
-So this is currently a schema capability gap, not proof against convergence.
+Current follow-up alignment issues are mostly:
+- `appearance_slots` vs compatibility `materials` / legacy `rgb` authority is still not fully cut over everywhere
+- brush, erase, text, paste, move, and helper paths still need continued low-traffic sweep work to avoid reconstructing legacy text-first cells
+- backend routing and family lookup still rely on naming conventions in places (`text_`, atlas-family prefixes)
+- graphic-definition ownership and presentation-selection ownership are still spread across multiple runtime layers instead of one explicit registry/resolution surface
+- neighbor/facing/breath presentation selection is only partially unified
 
 ---
 
@@ -487,7 +491,7 @@ But they do already align in important ways around:
 
 The main current blockers to deeper alignment are:
 - painter composition rules differ from game render composition rules
-- canonical painter-authored payloads are still too small for richer graphic/material payloads
+- richer payload authority is still partly transitional (`appearance_slots` vs compatibility `materials` / legacy `rgb`, plus naming-driven backend routing)
 - painter positioned-group/location truth is not yet fully cleaned up
 - game rendering is still not fully using the same projected-scene style interface as the more advanced painter path
 

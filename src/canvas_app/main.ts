@@ -310,6 +310,13 @@ runtime = new CanvasRuntime({
     on_pointer_move_global: (x, y, e) => on_pointer_move_global?.(x, y, e),
     on_pointer_down_global: (x, y, e) => on_pointer_down_global?.(x, y, e),
     on_pointer_up_global: (x, y, e) => on_pointer_up_global?.(x, y, e),
+    on_module_pointer_down: (module) => {
+        try {
+            module_registry?.bring_to_front?.(module.id);
+        } catch {
+            // ignore
+        }
+    },
     on_after_compose: (canvas) => on_after_compose?.(canvas),
 });
 

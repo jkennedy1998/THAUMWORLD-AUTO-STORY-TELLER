@@ -6,10 +6,15 @@ import { get_inbox_path, get_log_path } from "../engine/paths.js";
 import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import { build_working_memory } from "../context_manager/index.js";
-import { debug_log } from "../shared/debug.js";
+import { debug_warn } from "../shared/debug.js";
+import { diag_log } from "../shared/diagnostics.js";
 import type { TimedEventType } from "../shared/constants.js";
-import { advance_turn, finalize_world_sim_interstitial, get_active_actor_ref, get_timed_event_phase, get_timed_event_state, get_timed_event_world_breath_index, save_world_store, should_auto_end_actor_turn, start_timed_event } from "../world_storage/store.js";
+import { advance_turn, finalize_world_sim_interstitial, get_active_actor_ref, get_timed_event_phase, get_timed_event_state, get_timed_event_world_breath_index, is_timed_event_participant, save_world_store, should_auto_end_actor_turn, start_timed_event } from "../world_storage/store.js";
 import type { WorldStore } from "../world_storage/store.js";
+
+function timed_event_diag(verbosity: 'important' | 'verbose' | 'trace', tag: string, message: string, payload?: Record<string, unknown>): void {
+    diag_log('timed_event', verbosity, tag, message, payload);
+}
 
 export type TimedEventTurnAdvanceResult =
     | { ok: true; advanced: true; interstitial_started: false; current_round: number; active_actor_index: number; active_actor: string }
@@ -62,7 +67,7 @@ function roll_and_save_initiative(slot: number, store: WorldStore): boolean {
         entry.initiative_roll = roll + dex_bonus;
         entry.dex_score = dex;
 
-        debug_log("TIMED_EVENT_START", "initiative roll", {
+        timed_event_diag('verbose', 'START', 'initiative roll', {
             slot,
             actor: entry.actor_ref,
             roll,
@@ -153,13 +158,13 @@ export async function start_canonical_timed_event(
     try {
         const region_id = `region.${location.world_x}_${location.world_y}_${location.region_x}_${location.region_y}`;
         await build_working_memory(slot, result.event_id, event_type, region_id, participants);
-        debug_log("TIMED_EVENT_START", "working memory built", {
+        timed_event_diag('verbose', 'START', 'working memory built', {
             slot,
             event_id: result.event_id,
             participants: participants.length,
         });
     } catch (err) {
-        debug_log("TIMED_EVENT_START", "failed to build working memory", {
+        debug_warn("TIMED_EVENT_START", "working memory unavailable; continuing without memory", {
             slot,
             event_id: result.event_id,
             error: err instanceof Error ? err.message : String(err),
@@ -183,7 +188,7 @@ export async function start_canonical_timed_event(
     append_inbox_message(inbox_path, create_message(start_announcement));
     append_log_message(log_path, "system", `Timed event started: ${event_type} with ${participants.length} participants.`);
 
-    debug_log("TIMED_EVENT_START", "canonical timed event start completed", {
+    timed_event_diag('important', 'START', 'canonical timed event start completed', {
         slot,
         event_id: result.event_id,
         event_type,
@@ -241,7 +246,7 @@ export function advance_active_timed_event_turn(
         return { ok: false, error: "no_active_timed_event" };
     }
     if (active_actor_ref !== actor_ref) {
-        debug_log("TIMED_EVENT_TURN", "blocked canonical turn advance for non-active actor", {
+        timed_event_diag('verbose', 'TURN', 'blocked canonical turn advance for non-active actor', {
             slot,
             actor_ref,
             active_actor_ref,
@@ -266,7 +271,7 @@ export function advance_active_timed_event_turn(
                 active_actor: null,
             };
             if (options?.announce !== false) announce_timed_event_turn_advance(slot, result);
-            debug_log("TIMED_EVENT_TURN", "canonical turn advance entered world sim interstitial", {
+            timed_event_diag('important', 'TURN', 'canonical turn advance entered world sim interstitial', {
                 slot,
                 actor_ref,
                 source: options?.source ?? null,
@@ -288,7 +293,7 @@ export function advance_active_timed_event_turn(
         active_actor: advanced.active_actor,
     };
     if (options?.announce !== false) announce_timed_event_turn_advance(slot, result);
-    debug_log("TIMED_EVENT_TURN", "canonical turn advance completed", {
+    timed_event_diag('important', 'TURN', 'canonical turn advance completed', {
         slot,
         actor_ref,
         source: options?.source ?? null,
@@ -311,7 +316,7 @@ export function finalize_world_sim_interstitial_round(
 ): { ok: true; current_round: number; active_actor: string | null; active_actor_index: number } | { ok: false; error: string } {
     const finalized = finalize_world_sim_interstitial(slot);
     if (!finalized.ok) {
-        debug_log("TIMED_EVENT_TURN", "failed to finalize world sim interstitial round", {
+        debug_warn("TIMED_EVENT_TURN", "failed to finalize world sim interstitial round", {
             slot,
             source: context?.source ?? null,
             reason: context?.reason ?? null,
@@ -321,7 +326,7 @@ export function finalize_world_sim_interstitial_round(
         });
         return finalized;
     }
-    debug_log("TIMED_EVENT_TURN", "canonical world sim interstitial finalize completed", {
+    timed_event_diag('important', 'TURN', 'canonical world sim interstitial finalize completed', {
         slot,
         source: context?.source ?? null,
         reason: context?.reason ?? null,
@@ -332,6 +337,14 @@ export function finalize_world_sim_interstitial_round(
         world_breath_index: get_timed_event_world_breath_index(slot),
     });
     return finalized;
+}
+
+export function should_run_ambient_world_breaths(slot: number): boolean {
+    return get_timed_event_phase(slot) === "world_sim_interstitial";
+}
+
+export function should_suppress_entity_ambient_breath(slot: number, entity_ref: string): boolean {
+    return should_run_ambient_world_breaths(slot) && is_timed_event_participant(slot, entity_ref);
 }
 
 export function finalize_timed_event_turn_if_exhausted(

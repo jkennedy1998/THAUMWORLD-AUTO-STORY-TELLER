@@ -31,6 +31,7 @@ assert(rasterState[0]!.materials?.[1] === 'STONE_PALE', 'set_group_raster_state 
 
 const rasterProperty = normalize_painter_command_property_value({ kind: 'raster', voxels: [richGraphicVoxel] });
 assert(rasterProperty.kind === 'raster', 'raster property normalization should preserve raster kind');
+if (rasterProperty.kind !== 'raster') throw new Error('expected_raster_property');
 assert(rasterProperty.voxels.length === 1, 'raster property normalization should preserve voxels');
 assert(rasterProperty.voxels[0]!.graphic?.graphic_id === 'atlas:terrain.tree', 'raster property normalization should preserve graphic payload');
 assert(rasterProperty.voxels[0]!.appearance_slots?.[1]?.kind === 'flat_rgb', 'raster property normalization should preserve appearance slots');

@@ -6,6 +6,7 @@ export type DiagnosticCategory =
   | 'performance_metrics'
   | 'camera'
   | 'tai'
+  | 'timed_event'
   | 'items'
   | 'npc'
   | 'network'
@@ -32,6 +33,7 @@ const CATEGORY_LIST: DiagnosticCategory[] = [
   'performance_metrics',
   'camera',
   'tai',
+  'timed_event',
   'items',
   'npc',
   'network',
@@ -82,6 +84,7 @@ function getProgramProfileDefaults(program: DiagnosticProgram, profile: 'quiet' 
       performance_metrics: 'important',
       camera: 'important',
       tai: 'verbose',
+      timed_event: 'important',
       painter: 'verbose',
     };
   }
@@ -92,6 +95,7 @@ function getProgramProfileDefaults(program: DiagnosticProgram, profile: 'quiet' 
     performance_metrics: 'important',
     camera: 'important',
     tai: 'verbose',
+    timed_event: 'important',
     items: 'important',
     npc: 'important',
     network: 'important',

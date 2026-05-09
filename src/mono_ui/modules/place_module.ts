@@ -34,6 +34,7 @@ import { compute_dom_viewport_for_rect } from "../runtime/dom_viewport.js";
 import { get_ui_cell_metrics } from "../runtime/ui_metrics.js";
 import { compute_anchor_relative_mouse_parallax } from "../runtime/camera_anchor_runtime.js";
 import { create_place_camera_controller } from "../runtime/place_camera_controller.js";
+import { create_place_module_pan_adapter } from "./adapters/place_module_pan_adapter.js";
 import {
   begin_place_render_perf_frame,
   finish_place_render_perf_frame,
@@ -249,7 +250,7 @@ type PlaceCameraAnchor = {
   x: number;
   y: number;
   z: number;
-  source: 'focus_target' | 'selected_target' | 'actor_fallback' | 'bootstrap';
+  source: 'runtime' | 'bootstrap';
 };
 
 type PlaceCameraDebugSnapshot = {
@@ -299,12 +300,10 @@ function invalidate_scene_place_cache(): void {
 
   const multitile_devlog_once = new Set<string>();
   let last_cached_place_id: string | null = null;
+  let last_synced_runtime_camera_place_id: string | null = null;
   let last_painter_drag_key: string | null = null;
   let painter_move_drag_active = false;
   let painter_shape_drag_active = false;
-  let painter_pan_drag_active = false;
-  let painter_pan_start = { x: 0, y: 0 };
-  let painter_pan_view_start = { x: 0, y: 0 };
   let last_painter_key_pan_ms = 0;
   let last_camera_debug_snapshot: PlaceCameraDebugSnapshot | null = null;
   let last_dom_viewport_ready = false;
@@ -444,10 +443,9 @@ export type PlaceModuleConfig = {
   get_api_base_url?: () => string;
   request_scene_place_refresh?: (place_id: string) => void;
   get_actor_position?: () => { x: number; y: number } | null;  // For distance checking
-  get_camera_target_position?: () => { x: number; y: number } | null;
-  get_active_focus_target?: () => { x: number; y: number; z: number } | null;
-  get_camera_target_mode?: () => 'follow_actor' | 'free';
-  set_camera_target_position?: (tile: { x: number; y: number }, mode?: 'follow_actor' | 'free') => void;
+  get_module_camera_anchor?: () => { x: number; y: number; z: number } | null;
+  should_persist_camera_view?: () => boolean;
+  on_module_camera_anchor_changed?: (anchor: { x: number; y: number; z: number }) => void;
 
   // Ground item UX (tabletop): direct drag only when exactly one item exists on the tile.
   on_drag_start_ground_item?: (tile_x: number, tile_y: number) => void;
@@ -1625,35 +1623,19 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     };
   }
 
-  function get_active_place_focus_target(place: Place): { x: number; y: number; z: number } | null {
-    const explicit = config.get_active_focus_target?.() ?? null;
-    if (explicit && Number.isFinite(Number(explicit.x)) && Number.isFinite(Number(explicit.y)) && Number.isFinite(Number(explicit.z))) {
-      return {
-        x: Math.floor(Number(explicit.x)),
-        y: Math.floor(Number(explicit.y)),
-        z: Math.floor(Number(explicit.z)),
-      };
-    }
-    if ((config.get_camera_target_mode?.() ?? 'follow_actor') !== 'free') return null;
-    const actor = get_controlled_place_actor(place);
-    if (actor) {
-      const ref = String(actor?.actor_ref ?? '');
-      const focus = get_entity_focus_tile(actor, place, ref);
-      if (focus) return focus;
-    }
-    const free_target = config.get_camera_target_position?.() ?? config.get_actor_position?.() ?? null;
-    if (free_target && Number.isFinite(Number(free_target.x)) && Number.isFinite(Number(free_target.y))) {
-      return {
-        x: Math.floor(Number(free_target.x)),
-        y: Math.floor(Number(free_target.y)),
-        z: get_focus_world_z_for_place(place),
-      };
-    }
-    return null;
+  function get_runtime_camera_anchor(): { x: number; y: number; z: number } | null {
+    const explicit = config.get_module_camera_anchor?.() ?? null;
+    if (!explicit) return null;
+    if (!Number.isFinite(Number(explicit.x)) || !Number.isFinite(Number(explicit.y)) || !Number.isFinite(Number(explicit.z))) return null;
+    return {
+      x: Math.floor(Number(explicit.x)),
+      y: Math.floor(Number(explicit.y)),
+      z: Math.floor(Number(explicit.z)),
+    };
   }
 
   function should_persist_camera_view(): boolean {
-    return (config.get_camera_target_mode?.() ?? (config.is_place_painter_active?.() ? 'free' : 'follow_actor')) === 'free';
+    return config.should_persist_camera_view?.() ?? !!config.is_place_painter_active?.();
   }
 
   function get_scene_bootstrap_focus_target(place: Place): { x: number; y: number; z: number } {
@@ -1673,23 +1655,8 @@ export function make_place_module(config: PlaceModuleConfig): Module {
   }
 
   function get_camera_anchor(place: Place): PlaceCameraAnchor {
-    const focus_target = get_active_place_focus_target(place);
-    if (focus_target) return { ...focus_target, source: 'focus_target' };
-
-    const selected_target = get_target_current_position(place);
-    if (selected_target) return { ...selected_target, source: 'selected_target' };
-
-    const a0 = place.contents.actors_present?.[0];
-    if (a0?.tile_position) {
-      const base_z = get_place_base_z(place);
-      return {
-        x: Math.floor(a0.tile_position.x),
-        y: Math.floor(a0.tile_position.y),
-        z: get_entity_world_z(a0 as any, base_z),
-        source: 'actor_fallback',
-      };
-    }
-
+    const runtime_anchor = get_runtime_camera_anchor();
+    if (runtime_anchor) return { ...runtime_anchor, source: 'runtime' };
     return { ...get_scene_bootstrap_focus_target(place), source: 'bootstrap' };
   }
 
@@ -1853,13 +1820,17 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     return build_scene_place_cache(selected_place).connector_lookup.get(`${scene_x},${scene_y},${world_z}`) ?? null;
   }
 
-  function update_painter_camera_target_from_view(place: Place): void {
-    if (!config.set_camera_target_position) return;
+  function sync_module_camera_anchor_from_view(place: Place): void {
+    if (!config.on_module_camera_anchor_changed) return;
     const { width, height } = inner_size();
     const center_view_x = Math.floor(view.offset_x + (width * view.scale) / 2);
     const center_view_y = Math.floor(view.offset_y + (height * view.scale) / 2);
     const center_scene = view_to_scene_tile(place, center_view_x, center_view_y, get_focus_world_z_for_place(place));
-    config.set_camera_target_position({ x: center_scene.x, y: center_scene.y }, 'free');
+    config.on_module_camera_anchor_changed({
+      x: Math.floor(center_scene.x),
+      y: Math.floor(center_scene.y),
+      z: Math.floor(center_scene.z),
+    });
   }
 
   // Get all entities at tile position (for cycling)
@@ -5340,11 +5311,41 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     entityTagCache.set(event.entityRef, currentTags);
   }
 
+  function getPlacePanTargetAdapter(): ReturnType<typeof create_place_module_pan_adapter> | null {
+    const place = config.get_place();
+    if (!place) return null;
+    return create_place_module_pan_adapter({
+      get_world_anchor: () => get_camera_anchor(place),
+      set_world_anchor: (anchor) => {
+        config.on_module_camera_anchor_changed?.({
+          x: Math.floor(anchor.x),
+          y: Math.floor(anchor.y),
+          z: Math.floor(anchor.z),
+        });
+      },
+      get_view_state: () => get_configured_place_view_state(),
+      get_screen_step_size_px: () => ({
+        x: Number.isFinite(dom_pan_px.tileW) && dom_pan_px.tileW > 0 ? dom_pan_px.tileW : 0,
+        y: Number.isFinite(dom_pan_px.tileH) && dom_pan_px.tileH > 0 ? dom_pan_px.tileH : 0,
+      }),
+      on_after_pan: ({ source }) => {
+        if (source !== 'axis_step') return;
+        camera.schedule_save(place, should_persist_camera_view());
+      },
+      on_gesture_end: () => {
+        camera.schedule_save(place, should_persist_camera_view());
+      },
+    });
+  }
+
   const mod: Module = {
     id: config.id,
     get rect() { return rect; },
     set rect(next_rect: Rect) { rect = next_rect; },
     Focusable: true,
+    getPanTargetAdapter(): ReturnType<typeof create_place_module_pan_adapter> | null {
+      return getPlacePanTargetAdapter();
+    },
 
 // Draw callback for PlaceModule - renders the place with all entities and effects
     Draw(canvas: Canvas): void {
@@ -5399,66 +5400,48 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       }
 
       // Phase 0.6: per-place view persistence (camera controller).
+      if (place.id !== last_cached_place_id) {
+        last_synced_runtime_camera_place_id = null;
+      }
       const painter_active = !!config.is_place_painter_active?.();
       const { width: inner_w, height: inner_h } = inner_size();
-      const camera_target_mode = config.get_camera_target_mode?.() ?? (painter_active ? 'free' : 'follow_actor');
       const persist_camera_view = should_persist_camera_view();
       const view_loaded = camera.ensure_loaded_for_place(place, inner_w, inner_h, persist_camera_view);
       current_draw_transition_frame = config.get_view_transition_frame ? config.get_view_transition_frame() : null;
 
-      // First render: center on the actor when available; otherwise default entry.
-      // Only do this if we did not load a persisted view state for this place.
+      if (view_loaded && persist_camera_view && last_synced_runtime_camera_place_id !== place.id) {
+        sync_module_camera_anchor_from_view(place);
+        last_synced_runtime_camera_place_id = place.id;
+      }
+
+      const camera_target = get_camera_anchor(place);
       if (!view_loaded && view.offset_x === 0 && view.offset_y === 0) {
-        const initial_target = get_active_place_focus_target(place);
-        const target = initial_target ?? get_camera_anchor(place);
         debug_log_place("First render, centering on", {
-          target,
-          using_actor: !!initial_target,
+          target: camera_target,
           default_entry: place.tile_grid.default_entry,
           place_size: { w: place.tile_grid.width, h: place.tile_grid.height }
         });
-        if (target) {
-          const before_offset = { x: view.offset_x, y: view.offset_y };
-          center_on_scene_tile(target.x, target.y, target.z, place, { force_center: true });
-          if (current_draw_transition_frame?.committed_this_frame) {
-            try {
-              console.log('[PLACE_CAMERA_DEBUG] center_on_scene_tile handoff', JSON.stringify({
-                reason: 'initial_target',
-                transition_phase: current_draw_transition_frame.phase,
-                committed_this_frame: current_draw_transition_frame.committed_this_frame,
-                hard_view: current_draw_transition_frame.hard_view,
-                target: { x: target.x, y: target.y, z: target.z },
-                before_offset,
-                after_offset: { x: view.offset_x, y: view.offset_y },
-              }));
-            } catch {
-              // ignore debug logging failures
-            }
-          }
-          camera.schedule_save(place, persist_camera_view);
+      }
+      const before_offset = { x: view.offset_x, y: view.offset_y };
+      center_on_scene_tile(camera_target.x, camera_target.y, camera_target.z, place, { force_center: true });
+      if (current_draw_transition_frame?.committed_this_frame) {
+        try {
+          console.log('[PLACE_CAMERA_DEBUG] center_on_scene_tile handoff', JSON.stringify({
+            reason: view_loaded ? 'runtime_anchor' : 'initial_target',
+            transition_phase: current_draw_transition_frame.phase,
+            committed_this_frame: current_draw_transition_frame.committed_this_frame,
+            hard_view: current_draw_transition_frame.hard_view,
+            target: { x: camera_target.x, y: camera_target.y, z: camera_target.z },
+            before_offset,
+            after_offset: { x: view.offset_x, y: view.offset_y },
+          }));
+        } catch {
+          // ignore debug logging failures
         }
       }
-
-      // Follow actor normally; in painter mode preserve free camera view.
-      const camera_target = get_camera_anchor(place);
-      if (camera_target_mode !== 'free') {
-        const before_offset = { x: view.offset_x, y: view.offset_y };
-        center_on_scene_tile(camera_target.x, camera_target.y, camera_target.z, place, { force_center: true });
-        if (current_draw_transition_frame?.committed_this_frame) {
-          try {
-            console.log('[PLACE_CAMERA_DEBUG] center_on_scene_tile handoff', JSON.stringify({
-              reason: 'follow_target',
-              transition_phase: current_draw_transition_frame.phase,
-              committed_this_frame: current_draw_transition_frame.committed_this_frame,
-              hard_view: current_draw_transition_frame.hard_view,
-              target: { x: camera_target.x, y: camera_target.y, z: camera_target.z },
-              before_offset,
-              after_offset: { x: view.offset_x, y: view.offset_y },
-            }));
-          } catch {
-            // ignore debug logging failures
-          }
-        }
+      if (!view_loaded) {
+        last_synced_runtime_camera_place_id = place.id;
+        camera.schedule_save(place, persist_camera_view);
       }
 
       const screen_intent = get_move_intent();
@@ -5469,11 +5452,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const now_ms = Date.now();
           if (now_ms - last_painter_key_pan_ms >= 90) {
             last_painter_key_pan_ms = now_ms;
-            view.offset_x += painter_intent.dx;
-            view.offset_y += painter_intent.dy;
-            camera.clamp_to_bounds(place, inner_w, inner_h);
-            update_painter_camera_target_from_view(place);
-            camera.schedule_save(place, should_persist_camera_view());
+            getPlacePanTargetAdapter()?.applyAxisDelta?.({ x: painter_intent.dx, y: painter_intent.dy });
             debug_log_place('PLACE_PAINTER camera key pan', { dx: painter_intent.dx, dy: painter_intent.dy, offset_x: view.offset_x, offset_y: view.offset_y });
           }
         }
@@ -5706,14 +5685,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       const place = config.get_place();
       if (!place) return;
 
-      if (config.is_place_painter_active?.() && e.space && (e.buttons & 1) !== 0) {
-        painter_pan_drag_active = true;
-        painter_pan_start = { x: e.start_x, y: e.start_y };
-        painter_pan_view_start = { x: view.offset_x, y: view.offset_y };
-        debug_log_place('PLACE_PAINTER drag pan start', { start_x: e.start_x, start_y: e.start_y, offset_x: view.offset_x, offset_y: view.offset_y });
-        return;
-      }
-
       // Don't start a ground drag if a UI drag is active.
       if (config.is_dragging?.()) return;
 
@@ -5763,17 +5734,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         return;
       }
 
-      const place = config.get_place();
-      if (!place) return;
-      if (config.is_place_painter_active?.() && painter_pan_drag_active) {
-        view.offset_x = painter_pan_view_start.x - e.dx * view.scale;
-        view.offset_y = painter_pan_view_start.y - e.dy * view.scale;
-        const { width, height } = inner_size();
-        camera.clamp_to_bounds(place, width, height);
-        update_painter_camera_target_from_view(place);
-        camera.schedule_save(place, should_persist_camera_view());
-        return;
-      }
+      if (!config.get_place()) return;
       void e;
     },
 
@@ -5797,14 +5758,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
       debug_log_place(`[OnDragEnd] config.get_drag_source exists: ${!!config.get_drag_source}`);
 
       const place = config.get_place();
-      if (config.is_place_painter_active?.() && painter_pan_drag_active) {
-        painter_pan_drag_active = false;
-        if (place) {
-          update_painter_camera_target_from_view(place);
-          debug_log_place(`[PLACE_PAINTER] drag pan end ${JSON.stringify({ offset_x: view.offset_x, offset_y: view.offset_y })}`);
-        }
-        return;
-      }
       if (config.is_place_painter_active?.() && painter_move_drag_active) {
         debug_log_place(`[PLACE_PAINTER] suppressing generic OnDragEnd during move drag`);
         return;

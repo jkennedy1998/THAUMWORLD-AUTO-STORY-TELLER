@@ -4,8 +4,9 @@
  * Implements all drawing tools: pencil, eraser, line, rectangle, bucket, eyedropper
  */
 
-import type { Grid, GridCell, GridPoint, Brush, ToolType } from './types.js';
-import { clone_appearance_slot_assignments, getCell, setCell } from './types.js';
+import type { Grid, GridCell, GridPoint, Brush, ToolType, AppearanceSlotTargetMask } from './types.js';
+import { clone_appearance_slot_assignments, DEFAULT_APPEARANCE_SLOT_TARGET_MASK, get_enabled_appearance_slots, getCell, setCell } from './types.js';
+import type { EditChannels } from './edit_mask.js';
 import {
   get_flood_fill_points,
   get_line_points,
@@ -25,6 +26,71 @@ export function drawCell(grid: Grid, x: number, y: number, brush: Brush): boolea
     rgb: { ...brush.rgb },
     weight_index: brush.weight_index
   });
+}
+
+function has_meaningful_existing_text_appearance(cell: GridCell | null | undefined): boolean {
+  if (!cell) return false;
+  return cell.char !== ' '
+    || !!cell.graphic
+    || !!cell.appearance_slots
+    || !!cell.materials
+    || cell.weight_index !== 0
+    || cell.rgb.r !== 0
+    || cell.rgb.g !== 0
+    || cell.rgb.b !== 0;
+}
+
+export function buildTextEntryCell(
+  existing: GridCell | null | undefined,
+  brush: Brush,
+  char: string,
+  channels: EditChannels = { char: true, color: true, weight: true },
+  slot_targets: AppearanceSlotTargetMask = DEFAULT_APPEARANCE_SLOT_TARGET_MASK,
+): GridCell {
+  const next: GridCell = has_meaningful_existing_text_appearance(existing)
+    ? {
+        char,
+        graphic: undefined,
+        appearance_slots: clone_appearance_slot_assignments(existing?.appearance_slots),
+        materials: existing?.materials ? { ...existing.materials } : undefined,
+        rgb: existing ? { ...existing.rgb } : { ...brush.rgb },
+        weight_index: existing?.weight_index ?? brush.weight_index,
+        render_index: existing?.render_index,
+      }
+    : {
+        char,
+        graphic: undefined,
+        appearance_slots: clone_appearance_slot_assignments(brush.appearance_slots),
+        materials: brush.materials ? { ...brush.materials } : undefined,
+        rgb: { ...brush.rgb },
+        weight_index: brush.weight_index,
+      };
+
+  if (channels.color) {
+    next.rgb = { ...brush.rgb };
+    const targeted_slots = get_enabled_appearance_slots(slot_targets);
+    const next_slots = clone_appearance_slot_assignments(next.appearance_slots) ?? {};
+    const next_materials = next.materials ? { ...next.materials } : {};
+    for (const slot of targeted_slots) {
+      const brush_slot = brush.appearance_slots?.[slot];
+      if (brush_slot) next_slots[slot] = brush_slot.kind === 'material'
+        ? { kind: 'material', material_id: brush_slot.material_id }
+        : { kind: 'flat_rgb', rgb: { ...brush_slot.rgb } };
+      else delete next_slots[slot];
+
+      const brush_material = brush.materials?.[slot];
+      if (brush_material) next_materials[slot] = brush_material;
+      else delete next_materials[slot];
+    }
+    next.appearance_slots = Object.keys(next_slots).length > 0 ? next_slots : undefined;
+    next.materials = Object.keys(next_materials).length > 0 ? next_materials : undefined;
+  }
+
+  if (channels.weight) {
+    next.weight_index = brush.weight_index;
+  }
+
+  return next;
 }
 
 /**

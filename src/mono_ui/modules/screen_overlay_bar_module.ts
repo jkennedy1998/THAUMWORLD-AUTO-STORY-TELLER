@@ -61,8 +61,8 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
   let anim_from = expanded ? 1 : 0;
   let anim_to = expanded ? 1 : 0;
   let anim_started_at = Date.now();
-  let runtime_pan_x = 0;
-  let runtime_pan_y = 0;
+  let screen_locked_viewport_offset_x = 0;
+  let screen_locked_viewport_offset_y = 0;
 
   const collapsed_height = Math.max(3, opts.collapsed_height ?? 3);
   const expanded_height = Math.max(collapsed_height, opts.expanded_height ?? 5);
@@ -114,17 +114,17 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
     const current_height = collapsed_height + Math.round((expanded_height - collapsed_height) * progress);
     if ((opts.anchor ?? 'bottom') === 'top') {
       return {
-        x0: insets.left - runtime_pan_x,
-        y0: (height - current_height - insets.top) + runtime_pan_y,
-        x1: (width - 1 - insets.right) - runtime_pan_x,
-        y1: (height - 1 - insets.top) + runtime_pan_y,
+        x0: insets.left - screen_locked_viewport_offset_x,
+        y0: (height - current_height - insets.top) + screen_locked_viewport_offset_y,
+        x1: (width - 1 - insets.right) - screen_locked_viewport_offset_x,
+        y1: (height - 1 - insets.top) + screen_locked_viewport_offset_y,
       };
     }
     return {
-      x0: insets.left - runtime_pan_x,
-      y0: insets.bottom + runtime_pan_y,
-      x1: (width - 1 - insets.right) - runtime_pan_x,
-      y1: (insets.bottom + current_height - 1) + runtime_pan_y,
+      x0: insets.left - screen_locked_viewport_offset_x,
+      y0: insets.bottom + screen_locked_viewport_offset_y,
+      x1: (width - 1 - insets.right) - screen_locked_viewport_offset_x,
+      y1: (insets.bottom + current_height - 1) + screen_locked_viewport_offset_y,
     };
   }
 
@@ -228,9 +228,12 @@ export function make_screen_overlay_bar_module(opts: OverlayBarOptions): Module 
     id: opts.id,
     get rect() { return get_rect(); },
     Focusable: true,
-    setRuntimePanOffset(x_tiles: number, y_tiles: number): void {
-      runtime_pan_x = x_tiles;
-      runtime_pan_y = y_tiles;
+    getLayerMode(): 'screen_locked' {
+      return 'screen_locked';
+    },
+    setScreenLockedViewportOffset(x_tiles: number, y_tiles: number): void {
+      screen_locked_viewport_offset_x = x_tiles;
+      screen_locked_viewport_offset_y = y_tiles;
     },
 
     Draw(c: Canvas): void {

@@ -1,4 +1,5 @@
 import type { Canvas, DragEvent, Module, PointerEvent, Rect, Rgb, WheelEvent } from '../types.js';
+import type { IPanTargetAdapter } from '../../engine/pan/pan_target.js';
 import type { ModuleBorderConfig } from '../module_borders.js';
 import { PANEL_BORDER_PRESETS, draw_module_border } from '../module_borders.js';
 import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
@@ -60,6 +61,7 @@ type FloatingPanelCallbacks = {
   on_blur?: () => void;
   on_global_key_down?: (e: KeyboardEvent) => void;
   on_global_key_up?: (e: KeyboardEvent) => void;
+  get_pan_target_adapter?: () => IPanTargetAdapter | null;
 };
 
 export type FloatingPanelOptions = FloatingPanelCallbacks & {
@@ -111,6 +113,10 @@ export function make_floating_panel_module(opts: FloatingPanelOptions): Module {
     get rect() { return rect; },
     set rect(next_rect) { rect = next_rect; },
     Focusable: opts.focusable ?? true,
+    BringToFrontOnPointerDown: true,
+    getPanTargetAdapter(): IPanTargetAdapter | null {
+      return opts.get_pan_target_adapter?.() ?? null;
+    },
 
     Draw(c: Canvas): void {
       if (opts.is_visible && !opts.is_visible()) return;

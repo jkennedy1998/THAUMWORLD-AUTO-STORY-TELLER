@@ -13,7 +13,7 @@ import type { Canvas, Module, Rect, Rgb, PointerEvent, DragEvent, WheelEvent, Ce
 import type { AppearanceSlotTargetMask, Grid, Brush, ToolType, GridCell } from '../../ascii_painter/types.js';
 import type { ToolEditTarget } from '../../ascii_painter/types.js';
 import { clone_appearance_slot_assignments, createGrid, DEFAULT_APPEARANCE_SLOT_TARGET_MASK, get_enabled_appearance_slots, getCell, setCell } from '../../ascii_painter/types.js';
-import { drawCell, drawLine, eraseCell, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
+import { buildTextEntryCell, drawCell, drawLine, eraseCell, sampleCell, previewLine, previewRectStroke, previewRectFill } from '../../ascii_painter/tools.js';
 import { has_any_edit_channel, resolve_edit_channels_with_modifiers, type EditChannels } from '../../ascii_painter/edit_mask.js';
 import { logGroupCellAction, addToGroupBatch, type HistoryManager, type CellChange } from '../../ascii_painter/history.js';
 import { get_color_by_name } from '../colors.js';
@@ -33,6 +33,7 @@ import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
 import type { CameraAnchor } from '../runtime/camera_anchor_runtime.js';
 import { get_principal_view_plane_axis, make_place_view_state, map_screen_direction_to_world_delta, project_world_point_with_roll, remap_world_offset_between_views, step_place_view_action, unproject_plane_point_with_roll, type PlaceViewState } from '../runtime/place_view_projection.js';
 import { diag_log } from '../../shared/diagnostics.js';
+import { create_painter_canvas_pan_adapter } from './adapters/painter_canvas_pan_adapter.js';
 import { cells_match_edit_channels, get_flood_fill_voxels } from '../../shared/painter_tools.js';
 import {
   order_resolved_targets,
@@ -143,6 +144,10 @@ export type PainterCanvasOptions = {
   get_selection_status?: () => string | null;
   on_step_view_action?: (action: PainterViewAction) => void;
   on_step_depth?: (dir: -1 | 1) => void;
+  get_camera_frame_anchor_world?: () => { x: number; y: number; z: number };
+  set_camera_frame_anchor_world?: (anchor: { x: number; y: number; z: number }, context: { source: 'screen_drag' | 'axis_step'; detach_follow: boolean }) => void;
+  get_pan_step_size_px?: () => { x: number; y: number };
+  on_pan_gesture_end?: () => void;
   on_history_applied?: () => void;
   on_undo_request: () => string | null;
   on_redo_request: () => string | null;
@@ -153,6 +158,7 @@ export type PainterCanvasOptions = {
     group_id: string;
     changes: CellChange[];
   }) => void;
+  on_text_cursor_anchor_changed?: (anchor: PainterInteractionAnchor | null) => void;
 };
 
 export type PainterInteractionAnchor = CameraAnchor;
@@ -481,14 +487,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return Math.max(1, rect.y1 - rect.y0 + 1);
   }
   
-  // Global pan offset from CSS transform (when panning blank space)
-  let global_pan_offset = { x: 0, y: 0 };
-
   // Unified coordinate system helpers - ALL coordinate calculations go through these
   
   /**
-   * Get total pan (camera pan + global CSS pan offset)
-   * This is the single source of truth for pan calculations
+   * Get the effective local canvas pan.
+   * Pointer events already arrive in coordinates that account for runtime viewport pan.
     */
   function getTotalPan(): { x: number; y: number } {
     const camera = getCamera();
@@ -541,22 +544,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     };
   }
   
-  /**
-   * Set the global pan offset (called from runtime when CSS transform changes)
-   */
-  function setGlobalPanOffset(x: number, y: number): void {
-    global_pan_offset.x = x;
-    global_pan_offset.y = y;
-  }
-
-  // Legacy helper - kept for compatibility but uses unified system
-  function getPan(): { x: number; y: number } {
-    return getTotalPan();
+  function getCanvasPanAdapter(): ReturnType<typeof create_painter_canvas_pan_adapter> {
+    return create_painter_canvas_pan_adapter({
+      get_world_anchor: () => opts.get_camera_frame_anchor_world?.() ?? { x: 0, y: 0, z: opts.get_selected_z() },
+      set_world_anchor: (anchor, context) => {
+        opts.set_camera_frame_anchor_world?.(anchor, context);
+      },
+      get_view_state: () => opts.get_view_state?.() ?? make_place_view_state('top', 0),
+      get_screen_step_size_px: () => opts.get_pan_step_size_px?.() ?? { x: 0, y: 0 },
+      on_gesture_end: opts.on_pan_gesture_end,
+    });
   }
 
   function getTextCursorInteractionAnchor(): PainterInteractionAnchor | null {
     const focusZ = opts.get_selected_z();
-    const pan = getPan();
+    const pan = getTotalPan();
     if (text_mode_active) {
       const textWorld = text_cursor_world ?? opts.get_world_point_for_grid?.(text_cursor_x, text_cursor_y) ?? { x: text_cursor_x, y: text_cursor_y, z: focusZ };
       const textGrid = opts.get_grid_point_for_world?.(textWorld) ?? { x: text_cursor_x, y: text_cursor_y };
@@ -572,41 +574,17 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return null;
   }
 
-  // Atomic pan functions - all panning operations use these for consistency
-  // Positive deltaX = pan right (shows content to the left)
-  // Positive deltaY = pan up (shows content below)
-  function panBy(deltaX: number, deltaY: number): void {
-    const camera = getCamera();
-    const oldX = camera.pan_x ?? 0;
-    const oldY = camera.pan_y ?? 0;
-    camera.pan_x = oldX + deltaX;
-    camera.pan_y = oldY + deltaY;
-    emitViewport();
-  }
-
-  function panTo(x: number, y: number): void {
-    const camera = getCamera();
-    const oldX = camera.pan_x ?? 0;
-    const oldY = camera.pan_y ?? 0;
-    camera.pan_x = x;
-    camera.pan_y = y;
-    emitViewport();
-  }
-
-  let is_panning = false;
   let is_drawing = false;
   let is_erasing = false;
   let active_draw_channels: EditChannels = { char: true, color: true, weight: true };
   let active_stroke_tool: ToolType | null = null;
   let drag_start: { x: number; y: number } | null = null;
   let last_draw_pos: { x: number; y: number } | null = null;
-  let pan_start: { x: number; y: number } | null = null;
-  let view_start: { x: number; y: number } | null = null;
   let drag_start_buttons = 0;
-  let space_held = false;
 
   // Text input state
   let text_mode_active = false;
+  let text_mode_button: number = 0;
   let text_cursor_x = 0;
   let text_cursor_y = 0;
   let text_start_x = 0;
@@ -1128,15 +1106,31 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     });
   }
 
+  function emitTextCursorAnchorChanged(): void {
+    opts.on_text_cursor_anchor_changed?.(getTextCursorInteractionAnchor());
+  }
+
+  function isValidTextModeAuxiliaryTarget(module_id: string | null | undefined): boolean {
+    if (!module_id) return false;
+    return module_id === 'painter_canvas'
+      || module_id === 'char_selector'
+      || module_id === 'color_selector'
+      || module_id === 'color_block'
+      || module_id === 'tool_properties'
+      || module_id === 'camera_control';
+  }
+
   function exitTextMode(commitPending: boolean): void {
     if (!text_mode_active) return;
     if (commitPending) commitPendingTextChanges('Type Text');
     text_mode_active = false;
+    text_mode_button = 0;
     text_cursor_world = null;
     text_start_world = null;
     text_current_line = 0;
     text_line_start_worlds = [];
     text_line_end_worlds = [];
+    emitTextCursorAnchorChanged();
   }
 
   function cloneWorldPoint(world: { x: number; y: number; z: number } | null | undefined): { x: number; y: number; z: number } | null {
@@ -1283,16 +1277,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       ?? { x: text_cursor_x, y: text_cursor_y, z: opts.get_selected_z() };
   }
 
+  function setTextCursorPosition(nextX: number, nextY: number, world: { x: number; y: number; z: number }): boolean {
+    if (nextX < 0 || nextX >= opts.grid.width || nextY < 0 || nextY >= opts.grid.height) return false;
+    text_cursor_x = nextX;
+    text_cursor_y = nextY;
+    text_cursor_world = { x: world.x, y: world.y, z: world.z };
+    emitTextCursorAnchorChanged();
+    return true;
+  }
+
   function tryMoveTextCursorToWorld(world: { x: number; y: number; z: number }): boolean {
     const gridPoint = opts.get_grid_point_for_world?.(world);
     if (gridPoint) {
       const nextX = Math.floor(gridPoint.x);
       const nextY = Math.floor(gridPoint.y);
-      if (nextX < 0 || nextX >= opts.grid.width || nextY < 0 || nextY >= opts.grid.height) return false;
-      text_cursor_x = nextX;
-      text_cursor_y = nextY;
-      text_cursor_world = { x: world.x, y: world.y, z: world.z };
-      return true;
+      return setTextCursorPosition(nextX, nextY, world);
     }
     if (opts.get_grid_point_for_world) return false;
     if (world.x < 0 || world.x >= opts.grid.width || world.y < 0 || world.y >= opts.grid.height) return false;
@@ -1300,15 +1299,32 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     return true;
   }
 
+  function tryMoveTextCursorToGridOnPlane(nextX: number, nextY: number, plane: number | null): boolean {
+    if (nextX < 0 || nextX >= opts.grid.width || nextY < 0 || nextY >= opts.grid.height) return false;
+    const resolvedPlane = typeof plane === 'number' ? Math.floor(plane) : null;
+    const fallbackWorld = opts.get_world_point_for_grid_on_plane?.(nextX, nextY, resolvedPlane ?? opts.get_selected_z())
+      ?? (() => {
+        const baseWorld = opts.get_world_point_for_grid?.(nextX, nextY) ?? { x: nextX, y: nextY, z: opts.get_selected_z() };
+        return resolvedPlane === null ? baseWorld : setWorldPointPlaneCoordinate(baseWorld, resolvedPlane);
+      })();
+    return setTextCursorPosition(nextX, nextY, fallbackWorld);
+  }
+
   function moveTextCursorByScreenDelta(screen_dx: number, screen_dy: number): boolean {
     syncTextCursorGridFromWorld();
     const current = getTextCurrentWorld();
     const delta = getScreenVectorWorldDelta(screen_dx, screen_dy);
-    return tryMoveTextCursorToWorld({
+    if (tryMoveTextCursorToWorld({
       x: current.x + delta.x,
       y: current.y + delta.y,
       z: current.z + delta.z,
-    });
+    })) {
+      return true;
+    }
+    const fallbackDx = Math.trunc(screen_dx);
+    const fallbackDy = Math.trunc(screen_dy);
+    if (fallbackDx === 0 && fallbackDy === 0) return false;
+    return tryMoveTextCursorToGridOnPlane(text_cursor_x + fallbackDx, text_cursor_y + fallbackDy, getWorldPointPlaneCoordinate(current));
   }
 
   function getCurrentLineStartWorld(): { x: number; y: number; z: number } {
@@ -1333,7 +1349,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     };
     text_line_start_worlds[text_current_line] = { ...next };
     text_line_end_worlds[text_current_line] = { ...next };
-    return tryMoveTextCursorToWorld(next);
+    if (tryMoveTextCursorToWorld(next)) return true;
+    return tryMoveTextCursorToGridOnPlane(getTextStartGridX() + opts.get_text_enterspace(), text_cursor_y + opts.get_text_enterlead(), getWorldPointPlaneCoordinate(base));
   }
 
   function resetTextEntryAnchorAtCurrentCursor(): void {
@@ -1350,11 +1367,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     if (pending_changes.length < 1) return;
     const committed_changes = pending_changes.map((change) => ({ ...change, oldCell: cloneGridCell(change.oldCell), newCell: cloneGridCell(change.newCell) }));
     const active_group_id = requireActiveGroupId();
-    logGroupCellAction(opts.history, 'draw_cells', description, { z: opts.get_selected_z(), group_id: active_group_id }, pending_changes);
+    const textCommitPlane = committed_changes[0]?.worldZ ?? opts.get_selected_z();
+    logGroupCellAction(opts.history, 'draw_cells', description, { z: textCommitPlane, group_id: active_group_id }, pending_changes);
     opts.on_commit_cell_changes?.({
       action_type: 'draw_cells',
       description,
-      z: opts.get_selected_z(),
+      z: textCommitPlane,
       group_id: active_group_id,
       changes: committed_changes,
     });
@@ -1420,7 +1438,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       ?? cloneWorldPoint(text_start_world)
       ?? opts.get_world_point_for_grid?.(text_cursor_x, text_cursor_y)
       ?? { x: text_cursor_x, y: text_cursor_y, z: opts.get_selected_z() };
-    const plane = anchorWorld.z;
+    const plane = getWorldPointPlaneCoordinate(anchorWorld) ?? anchorWorld.z;
     const now = Date.now();
     if (!force && now - last_live_stroke_preview_at < LIVE_STROKE_PREVIEW_INTERVAL_MS) return;
     last_live_stroke_preview_at = now;
@@ -1450,7 +1468,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
         moveTextCursorToNextLine();
         if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width || text_cursor_y < 0 || text_cursor_y >= opts.grid.height) {
-          text_mode_active = false;
+          exitTextMode(false);
           break;
         }
         continue;
@@ -1458,7 +1476,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width || text_cursor_y < 0 || text_cursor_y >= opts.grid.height) continue;
 
-      const text_brush = getPreviewBrush();
+      const text_brush = getBrushForButton(text_mode_button);
+      const text_channels = opts.get_brush_edit_channels_for_button?.(text_mode_button) ?? { char: true, color: true, weight: true };
+      const text_slot_targets = getAppearanceSlotTargetsForButton(text_mode_button);
       const oldCell = getGridCell(text_cursor_x, text_cursor_y);
 
       if (char === ' ') {
@@ -1466,22 +1486,15 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
           opts.grid.cells[text_cursor_y]![text_cursor_x] = makeEmptyCell();
           const newCell = getGridCell(text_cursor_x, text_cursor_y);
           if (oldCell && newCell) {
-            trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+            trackTextCursorChange(oldCell, newCell);
             maybeEmitLiveTextPreview(true);
           }
         }
       } else {
-        opts.grid.cells[text_cursor_y]![text_cursor_x] = {
-          char,
-          graphic: undefined,
-          appearance_slots: undefined,
-          materials: undefined,
-          rgb: { ...text_brush.rgb },
-          weight_index: text_brush.weight_index,
-        };
+        opts.grid.cells[text_cursor_y]![text_cursor_x] = buildTextEntryCell(oldCell, text_brush, char, text_channels, text_slot_targets);
         const newCell = getGridCell(text_cursor_x, text_cursor_y);
         if (oldCell && newCell) {
-          trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+          trackTextCursorChange(oldCell, newCell);
           maybeEmitLiveTextPreview(true);
         }
       }
@@ -1491,7 +1504,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       if (text_cursor_x < 0 || text_cursor_x >= opts.grid.width || text_cursor_y < 0 || text_cursor_y >= opts.grid.height) {
         commitPendingTextChanges(commitDescription);
-        text_mode_active = false;
+        exitTextMode(false);
         break;
       }
     }
@@ -1638,6 +1651,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     const world = getWorldPointForEditPlane(x, y);
     if (!world) return false;
     return trackWorldChange(world, oldCell, newCell, { x, y });
+  }
+
+  function trackTextCursorChange(oldCell: GridCell, newCell: GridCell): boolean {
+    const world = cloneWorldPoint(text_cursor_world)
+      ?? opts.get_world_point_for_grid?.(text_cursor_x, text_cursor_y)
+      ?? getWorldPointForEditPlane(text_cursor_x, text_cursor_y);
+    if (!world) return false;
+    return trackWorldChange(world, oldCell, newCell, { x: text_cursor_x, y: text_cursor_y });
   }
 
   function trackWorldChange(world: { x: number; y: number; z: number }, oldCell: GridCell, newCell: GridCell, grid?: { x: number; y: number } | null): boolean {
@@ -2148,8 +2169,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return {
           char: sampled.char,
           graphic: sampled.graphic ? { ...sampled.graphic } : undefined,
-          appearance_slots: clone_appearance_slot_assignments(sampled.appearance_slots),
-          materials: sampled.materials ? { ...sampled.materials } : undefined,
+          appearance_slots: clone_appearance_slot_assignments(sampled.appearance_slots) as any,
+          materials: (sampled.materials ? { ...sampled.materials } : undefined) as any,
           rgb: { ...sampled.rgb },
           weight: sampled.weight_index,
         };
@@ -2188,8 +2209,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return {
           char: sampled.char,
           graphic: sampled.graphic ? { ...sampled.graphic } : undefined,
-          appearance_slots: clone_appearance_slot_assignments(sampled.appearance_slots),
-          materials: sampled.materials ? { ...sampled.materials } : undefined,
+          appearance_slots: clone_appearance_slot_assignments(sampled.appearance_slots) as any,
+          materials: (sampled.materials ? { ...sampled.materials } : undefined) as any,
           rgb: { ...sampled.rgb },
           weight: sampled.weight_index,
         };
@@ -2267,10 +2288,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       }
       commitLoggedCellChanges(action_type, tool_name, selected_z);
     }
-    if (text_mode_active && pending_changes.length > 0) {
-      const selected_z = opts.get_selected_z();
-      commitLoggedCellChanges('draw_cells', 'Type Text', selected_z);
-    }
     clearActiveStrokeState();
   }
 
@@ -2278,6 +2295,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     text_cursor_x = clamp(Math.floor(grid_x), 0, Math.max(0, opts.grid.width - 1));
     text_cursor_y = clamp(Math.floor(grid_y), 0, Math.max(0, opts.grid.height - 1));
     text_cursor_world = opts.get_world_point_for_grid?.(text_cursor_x, text_cursor_y) ?? { x: text_cursor_x, y: text_cursor_y, z: opts.get_selected_z() };
+    emitTextCursorAnchorChanged();
   }
 
   function syncTextCursorGridFromWorld(): void {
@@ -2481,7 +2499,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     getSelectionBitmap: () => SelectionBitmap;
     setSelectionBitmap: (bitmap: SelectionBitmap) => void;
     emitViewport: () => void;
-    setGlobalPanOffset: (x: number, y: number) => void;
+    getPanTargetAdapter: () => ReturnType<typeof create_painter_canvas_pan_adapter>;
     getTextCursorInteractionAnchor: () => PainterInteractionAnchor | null;
     resolveInteractionTargets: (x: number, y: number) => OrderedResolvedTargets;
     finalizePendingChanges: () => void;
@@ -2533,9 +2551,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       emitViewport();
     },
 
-    setGlobalPanOffset: (x: number, y: number) => {
-      setGlobalPanOffset(x, y);
-    },
+    getPanTargetAdapter: () => getCanvasPanAdapter(),
 
     getTextCursorInteractionAnchor: () => getTextCursorInteractionAnchor(),
 
@@ -2909,17 +2925,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      // Space + Left click = pan mode.
-      // Use event-captured keyboard state so this works even if key focus routing is imperfect.
-      if (!text_mode_active && e.space && e.button === 0) {
-        is_panning = true;
-        pan_start = { x: local_x, y: local_y };
-        // Use camera pan as the starting point
-        const camera = getCamera();
-        view_start = { x: camera.pan_x ?? 0, y: camera.pan_y ?? 0 };
-        return;
-      }
-
       const tool_for_button = e.button === 2 ? opts.get_right_click_tool() : opts.get_left_click_tool();
       const tool_target = getToolTargetForButton(e.button, tool_for_button);
 
@@ -2989,10 +2994,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
 
         if (tool_for_button === 'text') {
-          text_mode_active = false;
+          exitTextMode(false);
           text_mode_active = true;
+          text_mode_button = e.button;
           moveTextCursorTo(grid_x, grid_y);
           resetTextEntryAnchorAtCurrentCursor();
+          emitTextCursorAnchorChanged();
           return;
         }
 
@@ -3206,17 +3213,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         return;
       }
 
-      if (is_panning && pan_start && view_start) {
-        // Drag panning: subtract delta from starting position
-        // Drag right (positive delta) = show content to left = decrease pan_x
-        // Drag down (positive delta) = show content above = decrease pan_y
-        const panSpeed = 0.5; // Convert pixel movement to grid cell pan
-        const newPanX = view_start.x - (local_x - pan_start.x) * panSpeed;
-        const newPanY = view_start.y - (local_y - pan_start.y) * panSpeed;
-        panTo(newPanX, newPanY);
-        return;
-      }
-
       if (isActiveEraserStroke() && last_draw_pos) {
         const grid_coords = localToGrid(local_x, local_y);
         const grid_x = grid_coords.x;
@@ -3317,14 +3313,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     },
 
     OnDragEnd(e: DragEvent): void {
-      if (is_panning) {
-        is_panning = false;
-        pan_start = null;
-        view_start = null;
-        drag_start_buttons = 0;
-        return;
-      }
-
       if (is_selecting && selection_drag_start) {
         const local_x = e.x - rect.x0;
         const local_y = e.y - rect.y0;
@@ -3532,12 +3520,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         if (opts.on_resize) opts.on_resize(rect);
       }
 
-      if (is_panning) {
-        is_panning = false;
-        pan_start = null;
-        view_start = null;
-      }
-      
       // Log pending changes to history when drawing ends
       if ((is_drawing || is_erasing) && pending_changes.length > 0) {
         const selected_z = getResolvedCommitPlane();
@@ -3564,12 +3546,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
         
         commitLoggedCellChanges(action_type, tool_name, selected_z);
-      }
-      
-      // Log text changes when exiting text mode via click
-      if (text_mode_active && pending_changes.length > 0) {
-        const selected_z = opts.get_selected_z();
-        commitLoggedCellChanges('draw_cells', 'Type Text', selected_z);
       }
       
       is_drawing = false;
@@ -3684,10 +3660,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Plain vertical wheel is reserved for depth navigation.
       // Shift/Alt wheel keep explicit pan controls available.
       const scroll_step = 2; // Grid cells per scroll
+      const pan = getCanvasPanAdapter();
       if (e.shift) {
-        panBy(e.delta_y > 0 ? scroll_step : -scroll_step, 0);
+        pan.applyAxisDelta?.({ x: e.delta_y > 0 ? scroll_step : -scroll_step });
       } else if (e.alt) {
-        panBy(0, e.delta_y > 0 ? -scroll_step : scroll_step);
+        pan.applyAxisDelta?.({ y: e.delta_y > 0 ? -scroll_step : scroll_step });
       }
     },
 
@@ -3794,7 +3771,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               opts.grid.cells[text_cursor_y]![text_cursor_x] = makeEmptyCell();
               const newCell = getGridCell(text_cursor_x, text_cursor_y);
               if (oldCell && newCell) {
-                trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+                trackTextCursorChange(oldCell, newCell);
                 maybeEmitLiveTextPreview(true);
               }
             }
@@ -3811,7 +3788,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             opts.grid.cells[text_cursor_y]![text_cursor_x] = makeEmptyCell();
             const newCell = getGridCell(text_cursor_x, text_cursor_y);
             if (oldCell && newCell) {
-              trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+              trackTextCursorChange(oldCell, newCell);
               maybeEmitLiveTextPreview(true);
             }
           }
@@ -3850,7 +3827,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
               opts.grid.cells[text_cursor_y]![text_cursor_x] = makeEmptyCell();
               const newCell = getGridCell(text_cursor_x, text_cursor_y);
               if (oldCell && newCell) {
-                trackChange(text_cursor_x, text_cursor_y, oldCell, newCell);
+                trackTextCursorChange(oldCell, newCell);
                 maybeEmitLiveTextPreview(true);
               }
             }
@@ -3874,7 +3851,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
       // Space for panning (only when NOT in text mode)
       if (e.code === 'Space') {
-        space_held = true;
         e.preventDefault();
         return;
       }
@@ -3883,26 +3859,27 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       // Note: In grid coordinates, Y increases upward
       // ArrowUp = show content below = increase pan_y
       const pan_step = 1; // Move 1 grid cell per keypress
+      const pan = getCanvasPanAdapter();
       switch (e.key) {
         case 'ArrowUp':
         case 'w':
         case 'W':
-          panBy(0, pan_step);
+          pan.applyAxisDelta?.({ y: pan_step });
           break;
         case 'ArrowDown':
         case 's':
         case 'S':
-          panBy(0, -pan_step);
+          pan.applyAxisDelta?.({ y: -pan_step });
           break;
         case 'ArrowLeft':
         case 'a':
         case 'A':
-          panBy(-pan_step, 0);
+          pan.applyAxisDelta?.({ x: -pan_step });
           break;
         case 'ArrowRight':
         case 'd':
         case 'D':
-          panBy(pan_step, 0);
+          pan.applyAxisDelta?.({ x: pan_step });
           break;
       }
     },
@@ -3915,30 +3892,32 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnGlobalPointerDown(e: PointerEvent): void {
       handle_global_pointer_down_for_gizmos(e, rect, gizmo_config, gizmo_state);
-      if (text_mode_active && (e.x < rect.x0 || e.x > rect.x1 || e.y < rect.y0 || e.y > rect.y1)) {
-        exitTextMode(true);
-      }
+      if (!text_mode_active) return;
+      const target_module_id = typeof (e as any)?.target_module_id === 'string' ? String((e as any).target_module_id) : null;
+      if (isValidTextModeAuxiliaryTarget(target_module_id)) return;
+      exitTextMode(true);
     },
 
     OnKeyUp(e: KeyboardEvent): void {
       if (e.code === 'Space') {
-        space_held = false;
+        return;
       }
     },
 
     OnBlur(): void {
-      exitTextMode(true);
       clearCanvasNavInteraction();
-      clearMovePreview();
+      if (!text_mode_active) {
+        clearMovePreview();
+      }
       clearGroupLocationDrag();
-      clearPendingPreviewChanges();
+      if (!text_mode_active) {
+        clearPendingPreviewChanges();
+      }
       paste_preview_data = null;
       paste_preview_pos = null;
       paste_preview_world_data = null;
       paste_preview_world_anchor = null;
       paste_preview_rotation_view = null;
-      space_held = false;
-      is_panning = false;
       is_drawing = false;
       is_erasing = false;
       active_draw_channels = { char: true, color: true, weight: true };
@@ -3946,8 +3925,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       active_stroke_anchor_world = null;
       is_selecting = false;
       is_lasso_selecting = false;
-      pan_start = null;
-      view_start = null;
       drag_start = null;
       selection_drag_start = null;
       lasso_points = [];

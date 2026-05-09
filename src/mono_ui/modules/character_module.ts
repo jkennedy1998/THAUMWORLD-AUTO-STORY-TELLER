@@ -27,6 +27,7 @@ import { has_resolved_tag } from "../../tag_system/canonical_readers.js";
 import { tag_key } from "../../tag_system/tag_key.js";
 import type { TagInstance } from "../../tag_system/registry.js";
 import { build_equipment_slot_target, build_inventory_slot_target, order_resolved_targets, type OrderedResolvedTargets } from "../runtime/interaction_runtime_types.js";
+import { create_flat_module_pan_adapter } from './adapters/flat_module_pan_adapter.js';
 
 export const CHARACTER_MODULE_TAG_ROWS = 4;
 export const CHARACTER_MODULE_TAG_AREA_HEIGHT = CHARACTER_MODULE_TAG_ROWS + 1;
@@ -248,6 +249,23 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
     return Math.max(min, Math.min(max, n));
   }
 
+  function clamp_pan_offset(x: number, y: number): { x: number; y: number } {
+    const bounds = calculate_pan_bounds();
+    return {
+      x: clamp(x, bounds.min_x, bounds.max_x),
+      y: clamp(y, bounds.min_y, bounds.max_y),
+    };
+  }
+
+  const body_pan_adapter = create_flat_module_pan_adapter({
+    get_offset: () => ({ ...pan_offset }),
+    set_offset: (x: number, y: number) => {
+      pan_offset.x = x;
+      pan_offset.y = y;
+    },
+    clamp: (x: number, y: number) => clamp_pan_offset(x, y),
+  });
+
   /**
    * Get the resolved slot at a screen position (accounting for pan)
    */
@@ -388,6 +406,7 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       max_width: 160,
       max_height: 80,
     } : undefined,
+    get_pan_target_adapter: () => body_pan_adapter,
     draw_content(c: Canvas, next_rect: Rect): void {
       rect = next_rect;
       const actor_name = opts.get_actor_name();
@@ -835,19 +854,10 @@ export function make_character_module(opts: CharacterModuleConfig): Module {
       if (is_panning) {
         const dx = e.x - pan_start.x;
         const dy = e.y - pan_start.y;
-        
-        // Calculate new offset
-        let new_x = pan_start_offset.x + dx;
-        let new_y = pan_start_offset.y + dy;
-        
-        // Apply bounds to keep content visible
-        const bounds = calculate_pan_bounds();
-        new_x = clamp(new_x, bounds.min_x, bounds.max_x);
-        new_y = clamp(new_y, bounds.min_y, bounds.max_y);
-        
-        pan_offset.x = new_x;
-        pan_offset.y = new_y;
-        debug_log(`[CharacterModule] Panning: offset (${pan_offset.x}, ${pan_offset.y}), bounds:`, bounds);
+        const next = clamp_pan_offset(pan_start_offset.x + dx, pan_start_offset.y + dy);
+        pan_offset.x = next.x;
+        pan_offset.y = next.y;
+        debug_log(`[CharacterModule] Panning: offset (${pan_offset.x}, ${pan_offset.y}), bounds:`, calculate_pan_bounds());
         return;
       }
 

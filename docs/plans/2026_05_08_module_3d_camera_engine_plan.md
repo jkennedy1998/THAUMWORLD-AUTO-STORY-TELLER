@@ -429,6 +429,57 @@ Modules do not own generalized follow logic.
 
 ---
 
+## Implementation Status Snapshot
+
+Status as of 2026-05-08 later pass.
+
+### Phase status
+
+- [x] Phase 0: Preparation and naming freeze
+- [x] Phase 1: Build the shared camera engine core
+- [x] Phase 2: Add subject resolver adapters
+- [~] Phase 3: Integrate THAUMWORLD gameplay place camera
+- [~] Phase 4: Integrate THAUMWORLD place painter camera
+- [~] Phase 5: Integrate standalone ASCII painter camera
+- [ ] Phase 6: Remove transitional glue and old camera helpers
+- [~] Phase 7: Validation and cleanup
+
+### What is actually done
+
+- Shared engine camera files exist under `src/engine/camera/` and the core test passes.
+- THAUMWORLD resolver and policy adapters exist under `src/thaumworld/camera/`.
+- ASCII painter resolver and policy adapters exist under `src/ascii_painter/camera/`.
+- `src/canvas_app/app_state.ts` now creates a real shared `place_camera` runtime and drives subject/policy through that runtime.
+- `src/mono_ui/modules/place_module.ts` now consumes runtime camera anchor state instead of owning the main follow policy loop.
+- THAUMWORLD in-game painter boot behavior has been shifted to place-center bootstrap plus detached camera behavior.
+- `src/canvas_app/painter_app_state.ts` now creates a real shared painter camera runtime and uses camera-owned frame-anchor and focus-plane state.
+- Standalone painter text-cursor camera policy is explicit and now receives movement/change callbacks from `src/mono_ui/modules/painter_canvas_module.ts`.
+- Automation `get_camera_target` for the standalone painter now maps to frame anchor semantics.
+
+### What is still not done
+
+- THAUMWORLD gameplay still keeps legacy compatibility state in `ui_state.place.camera_target` and still has legacy helper naming such as `resolve_follow_actor_camera_focus_region(...)` in `src/canvas_app/app_state.ts`.
+- Standalone painter still has transitional helper naming in hot paths, especially around `getPainterFallbackTargetWorld()`, `getCurrentFocusWorldPlane()`, and `refreshPainterProjectionPreservingCurrentTarget()`.
+- Final removal of old helper layers, old naming, and temporary bridges has not happened yet.
+- Integration-test coverage described below is not complete; current validation is still mostly focused on `src/engine/camera/camera_core.test.ts` plus targeted searches/checks.
+- Full project typecheck is still blocked by pre-existing unrelated errors.
+
+### Current interpretation
+
+This migration is past the architecture-proof stage and into cleanup/convergence.
+
+The shared engine is real.
+The THAUMWORLD place path is mostly migrated but not fully cleaned.
+The standalone painter is meaningfully migrated but not yet vocabulary-clean.
+
+So the project is roughly at:
+
+- engine/adapters: complete enough for use
+- gameplay/place integration: mostly complete
+- in-game painter integration: mostly complete behaviorally
+- standalone painter integration: mostly complete structurally, still mid-cleanup
+- removal/final audit: not complete
+
 ## Implementation Strategy
 
 This is a significant backend change and should be implemented in phases.

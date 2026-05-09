@@ -231,7 +231,7 @@ export function decodeFromSpecialFormat(encoded: string): CopyData | null {
               if (!value || typeof value !== 'object') continue;
               const maybe = value as Record<string, any>;
               cells[y]![x] = {
-                char: typeof maybe.char === 'string' && maybe.char.length > 0 ? maybe.char[0] : ' ',
+                char: typeof maybe.char === 'string' && maybe.char.length > 0 ? maybe.char.charAt(0) : ' ',
                 graphic: maybe.graphic && typeof maybe.graphic === 'object' ? { ...maybe.graphic } : undefined,
                 appearance_slots: clone_appearance_slot_assignments(maybe.appearance_slots),
                 materials: maybe.materials && typeof maybe.materials === 'object' ? { ...maybe.materials } : undefined,

@@ -1,36 +1,92 @@
 /**
  * Color Selector Module
- * 
- * A floating, movable module showing a grid of all indexed colors.
- * Each color slot displays the selected character alternating with a solid block,
- * using the selected weight and color.
+ *
+ * A floating, movable palette showing materials and indexed colors using the
+ * same marker + preview-cell pattern as the character picker.
  */
 
-import type { Canvas, Cell, Module, Rect, PointerEvent, WheelEvent } from '../types.js';
+import type { Canvas, Cell, Module, Rect, PointerEvent, WheelEvent, Rgb } from '../types.js';
 import { get_enabled_appearance_slots, type AppearanceSlotTargetMask } from '../../ascii_painter/types.js';
 import { get_color_by_name, INDEXED_COLORS } from '../colors.js';
+import { list_material_defs, resolve_material_rgb } from '../runtime/material_registry.js';
+import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 
 type PreviewBrush = Pick<Cell, 'char' | 'graphic' | 'appearance_slots' | 'materials' | 'rgb' | 'weight_index'>;
 
+type PreviewCell = Partial<Cell> & { char: string };
+
+type PaletteEntry =
+  | { kind: 'material'; key: string; material_id: string }
+  | { kind: 'color'; key: string; rgb: Rgb };
+
+type PaletteRow =
+  | { kind: 'text'; text: string; rgb: Rgb; weight_index: number }
+  | { kind: 'entries'; label: string; entries: PaletteEntry[] };
+
+type PaletteHitbox = {
+  x0: number;
+  x1: number;
+  y: number;
+  entry: PaletteEntry;
+};
+
 export type ColorSelectorOptions = {
   id: string;
   rect: Rect;
-  get_brush: () => PreviewBrush;
-  get_left_rgb?: () => { r: number; g: number; b: number };
-  get_right_rgb?: () => { r: number; g: number; b: number };
+  get_brush?: () => PreviewBrush;
+  get_left_brush?: () => PreviewBrush;
+  get_right_brush?: () => PreviewBrush;
+  get_left_rgb?: () => { r: number; g: number; b: number } | undefined;
+  get_right_rgb?: () => { r: number; g: number; b: number } | undefined;
+  get_left_material_id?: () => string | null;
+  get_right_material_id?: () => string | null;
   get_slot_targets?: () => AppearanceSlotTargetMask;
   on_color_select: (rgb: { r: number; g: number; b: number }, button: number) => void;
+  on_material_select?: (material_id: string, button: number) => void;
   on_move?: (new_rect: Rect) => void;
   on_close?: () => void;
 };
 
-function rgb_eq(a: { r: number; g: number; b: number } | undefined, b: { r: number; g: number; b: number } | undefined): boolean {
+const MATERIAL_DEFS = list_material_defs();
+const LABEL_WIDTH = 10;
+const ENTRY_WIDTH = 3;
+const WHEEL_ROWS = 3;
+
+function rgb_eq(a: Rgb | undefined, b: Rgb | undefined): boolean {
   return !!a && !!b && a.r === b.r && a.g === b.g && a.b === b.b;
 }
 
-function make_color_preview_cell(brush: PreviewBrush, rgb: { r: number; g: number; b: number }, flash_state: number, slot_targets?: AppearanceSlotTargetMask): Partial<Cell> & { char: string } {
+function get_all_slots(): Array<1 | 2 | 3> {
+  return [1, 2, 3];
+}
+
+function make_neutral_preview_cell(brush: PreviewBrush, rgb: Rgb): PreviewCell {
+  if (brush.graphic) {
+    const appearance_slots: NonNullable<PreviewBrush['appearance_slots']> = {};
+    for (const slot of get_all_slots()) {
+      appearance_slots[slot] = { kind: 'flat_rgb', rgb: { ...rgb } };
+    }
+    return {
+      char: brush.char,
+      graphic: { ...brush.graphic },
+      appearance_slots,
+      materials: undefined,
+      rgb,
+      style: 'regular',
+      weight_index: brush.weight_index,
+    };
+  }
+  return {
+    char: brush.char === ' ' ? '█' : brush.char,
+    rgb,
+    style: 'regular',
+    weight_index: brush.weight_index,
+  };
+}
+
+function make_color_preview_cell(brush: PreviewBrush, rgb: Rgb, slot_targets?: AppearanceSlotTargetMask): PreviewCell {
   if (brush.graphic) {
     const appearance_slots = brush.appearance_slots ? { ...brush.appearance_slots } : {};
     for (const slot of get_enabled_appearance_slots(slot_targets)) {
@@ -47,36 +103,120 @@ function make_color_preview_cell(brush: PreviewBrush, rgb: { r: number; g: numbe
     };
   }
   return {
-    char: flash_state === 0 ? brush.char : '█',
+    char: brush.char === ' ' ? '█' : brush.char,
     rgb,
     style: 'regular',
     weight_index: brush.weight_index,
   };
 }
 
-// Grid layout - responsive to module size
-const COLOR_SPACING_X = 3;  // Space between colors horizontally
-const COLOR_SPACING_Y = 2;  // Space between colors vertically
-
-// Calculate how many colors fit per row based on width
-function get_colors_per_row(width: number): number {
-  const inner_width = width - 3; // -3 for borders and padding
-  return Math.max(2, Math.floor(inner_width / COLOR_SPACING_X));
+function make_material_preview_cell(brush: PreviewBrush, material_id: string, slot_targets?: AppearanceSlotTargetMask): PreviewCell {
+  const preview_rgb = resolve_material_rgb(material_id, '2nd_lightest') ?? brush.rgb;
+  if (brush.graphic) {
+    const appearance_slots = brush.appearance_slots ? { ...brush.appearance_slots } : {};
+    const materials = brush.materials ? { ...brush.materials } : {};
+    for (const slot of get_enabled_appearance_slots(slot_targets)) {
+      appearance_slots[slot] = { kind: 'material', material_id };
+      materials[slot] = material_id;
+    }
+    return {
+      char: brush.char,
+      graphic: { ...brush.graphic },
+      appearance_slots,
+      materials,
+      rgb: preview_rgb,
+      style: 'regular',
+      weight_index: brush.weight_index,
+    };
+  }
+  return {
+    char: brush.char === ' ' ? '█' : brush.char,
+    rgb: preview_rgb,
+    style: 'regular',
+    weight_index: brush.weight_index,
+  };
 }
 
-// Animation state for flashing effect
-let flash_state = 0;
-let last_flash_time = 0;
-const FLASH_INTERVAL = 500; // ms
+function get_content_bounds(rect: Rect): { top: number; bottom: number; visible_rows: number } {
+  const top = rect.y1 - 2;
+  const bottom = rect.y0 + 1;
+  return {
+    top,
+    bottom,
+    visible_rows: Math.max(1, top - bottom + 1),
+  };
+}
+
+function get_entry_columns(rect: Rect, include_label: boolean): number {
+  const inner_width = Math.max(1, rect.x1 - rect.x0 - 2);
+  const reserved = include_label ? LABEL_WIDTH : 0;
+  const glyph_width = Math.max(1, inner_width - reserved - 1);
+  return Math.max(1, Math.floor(glyph_width / ENTRY_WIDTH));
+}
+
+function build_rows(rect: Rect): PaletteRow[] {
+  const rows: PaletteRow[] = [];
+  const bg = get_ui_semantic_rgb('background');
+  const medium = get_ui_semantic_rgb('medium');
+  const bright = get_ui_semantic_rgb('bright');
+  const material_entries: PaletteEntry[] = MATERIAL_DEFS.map((material) => ({ kind: 'material', key: `material:${material.id}`, material_id: material.id }));
+  const color_entries: PaletteEntry[] = INDEXED_COLORS.map((color) => ({ kind: 'color', key: `color:${color.index}`, rgb: color.rgb }));
+
+  rows.push({ kind: 'text', text: '[MATERIALS]', rgb: bright, weight_index: 5 });
+  const material_columns = get_entry_columns(rect, false);
+  for (let i = 0; i < material_entries.length; i += material_columns) {
+    rows.push({ kind: 'entries', label: '', entries: material_entries.slice(i, i + material_columns) });
+  }
+  rows.push({ kind: 'text', text: '', rgb: bg, weight_index: 1 });
+  rows.push({ kind: 'text', text: '[INDEXED]', rgb: bright, weight_index: 5 });
+  const color_columns = get_entry_columns(rect, false);
+  for (let i = 0; i < color_entries.length; i += color_columns) {
+    rows.push({ kind: 'entries', label: '', entries: color_entries.slice(i, i + color_columns) });
+  }
+  rows.push({ kind: 'text', text: '', rgb: medium, weight_index: 1 });
+  return rows;
+}
+
+function get_marker(selected_left: boolean, selected_right: boolean): string {
+  if (selected_left && selected_right) return 'B';
+  if (selected_left) return 'L';
+  if (selected_right) return 'R';
+  return ' ';
+}
+
+function make_entry_preview_cells(
+  entry: PaletteEntry,
+  left_brush: PreviewBrush,
+  right_brush: PreviewBrush,
+  slot_targets: AppearanceSlotTargetMask | undefined,
+  left_selected: boolean,
+  right_selected: boolean,
+): { left: PreviewCell; right: PreviewCell } {
+  const makePreview = (brush: PreviewBrush): PreviewCell => entry.kind === 'material'
+    ? make_material_preview_cell(brush, entry.material_id, slot_targets)
+    : make_color_preview_cell(brush, entry.rgb, slot_targets);
+  const left = makePreview(left_brush);
+  const right = makePreview(right_brush);
+  return {
+    left: {
+      ...left,
+      style: left_selected ? 'reverse' : 'regular',
+      weight_index: left_selected ? Math.max(3, left.weight_index ?? 0) : Math.max(1, left.weight_index ?? 0),
+    },
+    right: {
+      ...right,
+      style: right_selected ? 'reverse' : 'regular',
+      weight_index: right_selected ? Math.max(3, right.weight_index ?? 0) : Math.max(1, right.weight_index ?? 0),
+    },
+  };
+}
 
 export function make_color_selector_module(opts: ColorSelectorOptions): Module {
-  // Size constraints for resizing
-  const MIN_WIDTH = 10;  // Minimum width
-  const MAX_WIDTH = 40;  // Maximum width
-  const MIN_HEIGHT = 8;  // Minimum height
-  const MAX_HEIGHT = 40; // Maximum height
+  const MIN_WIDTH = 12;
+  const MAX_WIDTH = 48;
+  const MIN_HEIGHT = 8;
+  const MAX_HEIGHT = 40;
 
-  // Gizmo configuration
   const gizmo_config: ModuleGizmosConfig = {
     enabled: ['move', 'resize', 'close', 'seamless'],
     can_close: true,
@@ -85,62 +225,22 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
     on_close: opts.on_close,
     on_move: opts.on_move,
   };
-  
-  // Scroll state
+
   let scroll_offset = 0;
-  
-  // Calculate visible rows based on height
-  function get_visible_rows(rect: Rect): number {
-    const inner_height = rect.y1 - rect.y0 - 2; // -2 for gizmo/title rows
-    return Math.max(1, Math.floor(inner_height / COLOR_SPACING_Y));
-  }
-  
-  function clamp_scroll(rect: Rect): void {
-    const colors_per_row = get_colors_per_row(rect.x1 - rect.x0);
-    const total_rows = Math.ceil(INDEXED_COLORS.length / colors_per_row);
-    const max_scroll = Math.max(0, total_rows - get_visible_rows(rect));
+  let last_hitboxes: PaletteHitbox[] = [];
+
+  function clamp_scroll(rect: Rect): PaletteRow[] {
+    const rows = build_rows(rect);
+    const { visible_rows } = get_content_bounds(rect);
+    const max_scroll = Math.max(0, rows.length - visible_rows);
     scroll_offset = Math.max(0, Math.min(max_scroll, scroll_offset));
-  }
-  
-  // Get color at grid position (row, col)
-  function get_color_at(rect: Rect, row: number, col: number): typeof INDEXED_COLORS[0] | null {
-    const colors_per_row = get_colors_per_row(rect.x1 - rect.x0);
-    const color_index = (scroll_offset + row) * colors_per_row + col;
-    
-    if (color_index >= 0 && color_index < INDEXED_COLORS.length) {
-      return INDEXED_COLORS[color_index]!;
-    }
-    return null;
-  }
-  
-  // Get grid position from screen coordinates
-  function get_grid_pos_from_screen(rect: Rect, x: number, y: number): { row: number; col: number } | null {
-    const colors_per_row = get_colors_per_row(rect.x1 - rect.x0);
-    const start_x = rect.x0 + 2;
-    const start_y = rect.y1 - 3;
-    
-    const col = Math.floor((x - start_x) / COLOR_SPACING_X);
-    const row = Math.floor((start_y - y) / COLOR_SPACING_Y);
-    
-    if (col >= 0 && col < colors_per_row && row >= 0 && row < get_visible_rows(rect)) {
-      return { row, col };
-    }
-    return null;
-  }
-  
-  // Update flash state
-  function update_flash(): void {
-    const now = Date.now();
-    if (now - last_flash_time > FLASH_INTERVAL) {
-      flash_state = (flash_state + 1) % 2;
-      last_flash_time = now;
-    }
+    return rows;
   }
 
   return make_floating_panel_module({
     id: opts.id,
     rect: opts.rect,
-    title: 'COLORS',
+    title: 'PALETTE',
     gizmos: gizmo_config,
     background: { rgb: get_color_by_name('off_black').rgb },
     resize: {
@@ -151,83 +251,80 @@ export function make_color_selector_module(opts: ColorSelectorOptions): Module {
     },
     draw_content(c: Canvas, rect: Rect): void {
       const bg_color = get_color_by_name('off_black').rgb;
-      
-      // Update flashing animation
-      update_flash();
-      
-      // Fill background
-      c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
-
-      // Draw colors in a grid
-      const visible_rows = get_visible_rows(rect);
-      const colors_per_row = get_colors_per_row(rect.x1 - rect.x0);
-      const start_x = rect.x0 + 2;
-      const start_y = rect.y1 - 3;
-      const brush = opts.get_brush();
+      const label_rgb = get_ui_semantic_rgb('medium');
+      const rows = clamp_scroll(rect);
+      const { top, visible_rows } = get_content_bounds(rect);
+      const fallback_brush = opts.get_brush?.();
+      const left_brush: PreviewBrush = opts.get_left_brush?.() ?? fallback_brush ?? { char: '█', rgb: get_ui_semantic_rgb('left_hand'), weight_index: 2 };
+      const right_brush: PreviewBrush = opts.get_right_brush?.() ?? fallback_brush ?? { char: '█', rgb: get_ui_semantic_rgb('right_hand'), weight_index: 2 };
       const left_rgb = opts.get_left_rgb?.();
       const right_rgb = opts.get_right_rgb?.();
-      
-      for (let row = 0; row < visible_rows; row++) {
-        for (let col = 0; col < colors_per_row; col++) {
-          const color = get_color_at(rect, row, col);
-          if (!color) continue;
-          
-          const color_x = start_x + (col * COLOR_SPACING_X);
-          const color_y = start_y - (row * COLOR_SPACING_Y);
-          
-          if (color_y <= rect.y0) continue;
-          
-          c.set(color_x, color_y, make_color_preview_cell(brush, color.rgb, flash_state, opts.get_slot_targets?.()));
+      const left_material_id = opts.get_left_material_id?.() ?? null;
+      const right_material_id = opts.get_right_material_id?.() ?? null;
 
-          const left_selected = rgb_eq(color.rgb, left_rgb);
-          const right_selected = rgb_eq(color.rgb, right_rgb);
-          if (left_selected || right_selected) {
-            const marker_char = left_selected && right_selected ? 'B' : left_selected ? 'L' : 'R';
-            const marker_rgb = left_selected && right_selected
-              ? get_color_by_name('vivid_yellow').rgb
-              : left_selected
-                ? get_color_by_name('vivid_blue').rgb
-                : get_color_by_name('vivid_red').rgb;
-            if (color_y - 1 > rect.y0) {
-              c.set(color_x, color_y - 1, {
-                char: marker_char,
-                rgb: marker_rgb,
-                style: 'regular',
-                weight_index: 2,
-              });
-            }
+      last_hitboxes = [];
+      c.fill_rect(rect, { char: ' ', rgb: bg_color, style: 'regular' });
+
+      for (let visible_index = 0; visible_index < visible_rows; visible_index += 1) {
+        const row = rows[scroll_offset + visible_index];
+        const y = top - visible_index;
+        if (!row) continue;
+
+        if (row.kind === 'text') {
+          for (let i = 0; i < row.text.length && rect.x0 + 2 + i < rect.x1; i += 1) {
+            c.set(rect.x0 + 2 + i, y, {
+              char: row.text[i]!,
+              rgb: row.rgb,
+              style: 'regular',
+              weight_index: row.weight_index,
+            });
           }
+          continue;
+        }
+
+        const glyph_start_x = rect.x0 + 2 + (row.label.length > 0 ? LABEL_WIDTH : 0);
+        for (let i = 0; i < row.entries.length; i += 1) {
+          const entry = row.entries[i]!;
+          const x = glyph_start_x + (i * ENTRY_WIDTH);
+          if (x + 1 >= rect.x1) break;
+
+          const left_selected = entry.kind === 'material'
+            ? left_material_id === entry.material_id
+            : rgb_eq(left_rgb, entry.rgb);
+          const right_selected = entry.kind === 'material'
+            ? right_material_id === entry.material_id
+            : rgb_eq(right_rgb, entry.rgb);
+          const preview = make_entry_preview_cells(entry, left_brush, right_brush, opts.get_slot_targets?.(), left_selected, right_selected);
+          c.set(x, y, preview.left);
+          c.set(x + 1, y, preview.right);
+
+          last_hitboxes.push({ x0: x, x1: x + 1, y, entry });
         }
       }
-      
-      // Draw scroll indicator if needed
-      const total_rows = Math.ceil(INDEXED_COLORS.length / colors_per_row);
-      if (total_rows > visible_rows) {
-        const scroll_percent = scroll_offset / (total_rows - visible_rows);
-        const indicator_y = rect.y1 - 3 - Math.floor(scroll_percent * (visible_rows - 1)) * COLOR_SPACING_Y;
-        if (indicator_y > rect.y0) {
-          c.set(rect.x1 - 1, indicator_y, {
-            char: '│',
-            rgb: get_color_by_name('pale_yellow').rgb,
-            style: 'regular',
-            weight_index: 2
-          });
-        }
+
+      if (rows.length > visible_rows) {
+        const max_scroll = Math.max(1, rows.length - visible_rows);
+        const scroll_percent = scroll_offset / max_scroll;
+        const indicator_y = top - Math.floor(scroll_percent * Math.max(0, visible_rows - 1));
+        c.set(rect.x1 - 1, indicator_y, {
+          char: '│',
+          rgb: get_ui_semantic_rgb('bright'),
+          style: 'regular',
+          weight_index: 2,
+        });
       }
     },
-    on_pointer_down_content(e: PointerEvent, rect: Rect): void {
-      // Color selection
-      const grid_pos = get_grid_pos_from_screen(rect, e.x, e.y);
-      if (grid_pos) {
-        const color = get_color_at(rect, grid_pos.row, grid_pos.col);
-        if (color) {
-          opts.on_color_select(color.rgb, e.button);
-        }
+    on_pointer_down_content(e: PointerEvent): void {
+      const hit = last_hitboxes.find((entry) => entry.y === e.y && e.x >= entry.x0 && e.x <= entry.x1);
+      if (!hit) return;
+      if (hit.entry.kind === 'material') {
+        opts.on_material_select?.(hit.entry.material_id, e.button);
+        return;
       }
+      opts.on_color_select(hit.entry.rgb, e.button);
     },
     on_wheel_content(e: WheelEvent, rect: Rect): void {
-      const scroll_amount = e.delta_y > 0 ? 1 : -1;
-      scroll_offset += scroll_amount;
+      scroll_offset += e.delta_y > 0 ? WHEEL_ROWS : e.delta_y < 0 ? -WHEEL_ROWS : 0;
       clamp_scroll(rect);
     },
   });

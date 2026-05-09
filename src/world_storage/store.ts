@@ -898,6 +898,12 @@ export function get_world_sim_interstitial_breaths_remaining(slot: number): numb
     return Math.max(0, remaining);
 }
 
+export function is_timed_event_participant(slot: number, actor_ref: string): boolean {
+    const store = get_timed_event_state(slot);
+    if (!store?.timed_event_active || !Array.isArray(store.initiative_order)) return false;
+    return store.initiative_order.some((entry) => entry.actor_ref === actor_ref);
+}
+
 function reset_initiative_round_entries(slot: number, entries: InitiativeEntry[]): void {
     for (const entry of entries) {
         if (entry.status === "left_region") continue;

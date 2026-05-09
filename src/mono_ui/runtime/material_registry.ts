@@ -92,6 +92,10 @@ const MATERIAL_DEFS = new Map<string, MaterialDef>([
   }],
 ]);
 
+export function list_material_defs(): readonly MaterialDef[] {
+  return Array.from(MATERIAL_DEFS.values());
+}
+
 export function get_material_def(id: string | null | undefined): MaterialDef | null {
   if (typeof id !== 'string' || id.trim().length <= 0) return null;
   return MATERIAL_DEFS.get(id.trim().toUpperCase()) ?? null;

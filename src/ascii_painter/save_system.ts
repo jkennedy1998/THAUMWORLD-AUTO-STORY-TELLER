@@ -13,7 +13,7 @@ import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid 
 import type { PainterDocument } from './painter_document.js';
 import { clone_painter_document } from './painter_document.js';
 import type { AppearanceSlotTargetMask, ToolEditTarget, ToolType } from './types.js';
-import type { AppearanceSlotAssignments, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from '../render_shaders/graphics_contract.js';
+import type { AppearanceSlotAssignments, AppearanceSlotValue, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from '../render_shaders/graphics_contract.js';
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
 import { ALL_EDIT_CHANNELS, sanitize_edit_channels, type EditChannels } from './edit_mask.js';
 
@@ -64,7 +64,7 @@ function sanitize_render_graphic_ref(value: unknown): RenderGraphicRef | undefin
     graphic_id,
     view_direction,
     facing,
-    weight_index,
+    weight_index: weight_index as 0 | 1 | 2 | 3,
     variant: typeof graphic.variant === 'string' && graphic.variant.length > 0 ? graphic.variant : undefined,
     frame: typeof graphic.frame === 'string' && graphic.frame.length > 0 ? graphic.frame : undefined,
   };
@@ -81,21 +81,25 @@ function sanitize_inline_material_assignments(value: unknown): InlineMaterialAss
   return Object.keys(sanitized).length > 0 ? sanitized : undefined;
 }
 
+function sanitize_appearance_slot_value(value: unknown): AppearanceSlotValue | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const entry = value as Record<string, unknown>;
+  if (entry.kind === 'material' && typeof entry.material_id === 'string' && entry.material_id.length > 0) {
+    return { kind: 'material', material_id: entry.material_id };
+  }
+  if (entry.kind === 'flat_rgb') {
+    return { kind: 'flat_rgb', rgb: sanitize_rgb(entry.rgb, { r: 255, g: 255, b: 255 }) };
+  }
+  return undefined;
+}
+
 function sanitize_appearance_slot_assignments(value: unknown): AppearanceSlotAssignments | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const record = value as Record<string, unknown>;
   const sanitized: AppearanceSlotAssignments = {};
   for (const slot of [1, 2, 3] as const) {
-    const raw = record[String(slot)];
-    if (!raw || typeof raw !== 'object') continue;
-    const entry = raw as Record<string, unknown>;
-    if (entry.kind === 'material' && typeof entry.material_id === 'string' && entry.material_id.length > 0) {
-      sanitized[slot] = { kind: 'material', material_id: entry.material_id };
-      continue;
-    }
-    if (entry.kind === 'flat_rgb') {
-      sanitized[slot] = { kind: 'flat_rgb', rgb: sanitize_rgb(entry.rgb, { r: 255, g: 255, b: 255 }) };
-    }
+    const parsed = sanitize_appearance_slot_value(record[String(slot)]);
+    if (parsed) sanitized[slot] = parsed;
   }
   return Object.keys(sanitized).length > 0 ? sanitized : undefined;
 }
@@ -450,6 +454,8 @@ export interface ToolProperties {
   right_brush_appearance_slots?: AppearanceSlotAssignments;
   left_brush_materials?: InlineMaterialAssignments;
   right_brush_materials?: InlineMaterialAssignments;
+  left_selected_appearance?: AppearanceSlotValue;
+  right_selected_appearance?: AppearanceSlotValue;
   left_brush_weight_index: number;
   right_brush_weight_index: number;
   left_brush_edit_channels: EditChannels;
@@ -519,6 +525,8 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   right_brush_appearance_slots: undefined,
   left_brush_materials: undefined,
   right_brush_materials: undefined,
+  left_selected_appearance: undefined,
+  right_selected_appearance: undefined,
   left_brush_weight_index: 1,
   right_brush_weight_index: 1,
   left_brush_edit_channels: { ...ALL_EDIT_CHANNELS },
@@ -601,6 +609,8 @@ export function loadToolProperties(): ToolProperties {
       right_brush_appearance_slots: sanitize_appearance_slot_assignments(parsed.right_brush_appearance_slots),
       left_brush_materials: sanitize_inline_material_assignments(parsed.left_brush_materials),
       right_brush_materials: sanitize_inline_material_assignments(parsed.right_brush_materials),
+      left_selected_appearance: sanitize_appearance_slot_value(parsed.left_selected_appearance),
+      right_selected_appearance: sanitize_appearance_slot_value(parsed.right_selected_appearance),
       left_brush_weight_index: clamp_weight_index(parsed.left_brush_weight_index),
       right_brush_weight_index: clamp_weight_index(parsed.right_brush_weight_index),
       left_brush_edit_channels: sanitize_edit_channels(parsed.left_brush_edit_channels, DEFAULT_TOOL_PROPERTIES.left_brush_edit_channels),

@@ -216,7 +216,7 @@ const richRasterOverwrite = apply_painter_group_structure_change(slot, document_
       weight_index: 2,
     })],
   },
-});
+} as any);
 runtime = normalize_painter_document_runtime(richRasterOverwrite.snapshot);
 const richRasterAt6 = get_painter_group_raster_state_at_breath(runtime.document.groups[base_group_id]!, 6)?.content[0] ?? null;
 assert(richRasterAt6?.graphic?.graphic_id === 'atlas:terrain.tree', 'set_group_property_block raster overwrite should preserve graphic payload');

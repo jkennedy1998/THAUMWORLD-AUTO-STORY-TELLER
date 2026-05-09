@@ -127,7 +127,9 @@ Update this section as implementation progresses.
 - logs, API payloads, and UI state now mostly describe turn position using `current_round + initiative_order + active_actor_index` and a derived `turn_position_in_round`
 - the world sim interstitial count is now wired to an explicit 6-breath constant instead of the stale old turn-window constant
 - world sim interstitial is live as the round-end place where breath advancement should occur
-- post-edit runtime validation of the breath cutover is still pending
+- post-edit runtime validation of the breath cutover has partial fresh evidence from `local_data/data_slot_1/logs/2026-05-08/session_1778285340463_odter852.log`
+- fresh logs now confirm world sim interstitial runs with explicit countdowns `6 -> 5 -> 4 -> 3 -> 2 -> 1 -> 0` and finalizes back into initiative flow
+- fresh logs also show a remaining semantics gap: `TIMED_EVENT_BREATH running canonical place breaths for active turn place` still appears during `initiative_turn`, so actor-turn visual/world-freeze semantics are not fully clean yet
 
 ### Confirmed remaining truth gaps
 
@@ -138,7 +140,7 @@ Update this section as implementation progresses.
 - initiative UI still needs standard interactive control treatment for `END TURN`
 - some metadata fields such as `created_turn` / `turn_number` now carry derived actor-position meaning in live timed-event paths and should be cleaned up or renamed later
 - the older `docs/specs/TIMED_EVENTS.md` used to be stale and misleading; it has now been replaced, but other older plan/docs may still contain outdated assumptions
-- fresh runtime logs validating the new interstitial-only breath behavior are still needed
+- fresh runtime logs now exist, but they validate only part of the target behavior: interstitial cadence is correct, while active-turn place-breath activity still appears and needs cleanup
 
 ### Guiding cleanup stance
 
@@ -324,8 +326,11 @@ Goal: the runtime model matches `initiative participants -> 6-breath world sim -
 - [x] Remove active-turn place/environment breath advancement during `initiative_turn`
 - [x] Remove initiative-turn countdown bookkeeping from the durable timed-event state path
 - [ ] Validate in fresh runtime logs that no active-turn place breath entries occur during `initiative_turn`
+  - latest session still shows `TIMED_EVENT_BREATH running canonical place breaths for active turn place`, so this is not done yet
 - [ ] Validate in play that environment/grass remains visually frozen during `initiative_turn` and only advances during `world_sim_interstitial`
-- [ ] Verify world sim interstitial advances exactly 6 breaths
+  - likely still not fully true given the remaining active-turn place-breath log entries
+- [x] Verify world sim interstitial advances exactly 6 breaths
+  - validated in `local_data/data_slot_1/logs/2026-05-08/session_1778285340463_odter852.log` with countdown `6 -> 5 -> 4 -> 3 -> 2 -> 1 -> 0`
 - [ ] Verify initiative ordering persists across rounds without reroll
 - [ ] Verify the first actor of the next round is the top initiative actor again
 
@@ -383,7 +388,9 @@ Goal: stop carrying alternate systems.
 - [ ] NPC turns still progress through the canonical path
 - [ ] Manual/debug end still works
 - [ ] Fresh post-cutover timed-event logs show no active-turn breath application during `initiative_turn`
+  - latest validated session still fails this strict requirement
 - [ ] Fresh post-cutover timed-event logs show world/interstitial breath progression only during `world_sim_interstitial`
+  - interstitial progression is correct, but active-turn place-breath entries still exist outside interstitial
 - [ ] Latest logs show one readable progression path rather than split ownership symptoms
 
 ## Cleanup Candidates To Track During Implementation

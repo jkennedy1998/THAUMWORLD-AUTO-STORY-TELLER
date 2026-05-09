@@ -12,10 +12,10 @@ import type { EditPlaneId, GridPoint } from './types.js';
 import type { Voxel3 } from '../shared/coords.js';
 import type { PlacePrincipalView, PlaceViewRollQuarterTurn } from '../mono_ui/runtime/place_view_projection.js';
 
-function clamp_imported_weight_index(weight_index: unknown): number {
+function clamp_imported_weight_index(weight_index: unknown): 0 | 1 | 2 | 3 {
   const value = typeof weight_index === 'number' ? Math.trunc(weight_index) : 1;
   if (!Number.isFinite(value)) return 1;
-  return Math.max(0, Math.min(3, value));
+  return Math.max(0, Math.min(3, value)) as 0 | 1 | 2 | 3;
 }
 
 function clamp_imported_color_channel(value: unknown): number {

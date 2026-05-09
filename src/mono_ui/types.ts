@@ -1,6 +1,7 @@
 // mono_ui core types (pure, no DOM / no Node)
 
 import type { AppearanceSlotAssignments, ViewDirection } from "../render_shaders/graphics_contract.js";
+import type { IPanTargetAdapter } from "../engine/pan/pan_target.js";
 
 export type Rgb = {
     r: number; // 0-255
@@ -174,6 +175,7 @@ export type Module = {
     OnDragMove?(e: DragEvent): void;
     OnDragEnd?(e: DragEvent): void;
     Focusable?: boolean;
+    BringToFrontOnPointerDown?: boolean;
     OnFocus?(): void;
     OnBlur?(): void;
     OnWheel?(e: WheelEvent): void;
@@ -190,10 +192,14 @@ export type Module = {
     // optional global pointer lane (UI calls for all modules)
     OnGlobalPointerDown?(e: PointerEvent): void;
 
-    // optional runtime pan notification (tile units, screen-space canvas transform)
-    setRuntimePanOffset?(x_tiles: number, y_tiles: number): void;
-    isScreenLocked?: boolean;
-    getScreenLockedPanBounds?(): { min_x: number; max_x: number; min_y: number; max_y: number };
+    // optional layer/layout contract
+    getLayerMode?(): 'world_pannable' | 'screen_locked';
+
+    // optional screen-locked compensation bridge (tile units, screen-space canvas transform)
+    setScreenLockedViewportOffset?(x_tiles: number, y_tiles: number): void;
+
+    // optional shared pan adapter hook
+    getPanTargetAdapter?(): IPanTargetAdapter | null;
 
 };
 

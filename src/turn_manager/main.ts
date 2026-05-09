@@ -5,6 +5,7 @@ import { ensure_outbox_exists, read_outbox, write_outbox, append_outbox_message 
 import { create_message } from "../engine/message.js";
 import type { MessageInput } from "../engine/message.js";
 import { debug_log, log_service_error } from "../shared/debug.js";
+import { diag_log } from "../shared/diagnostics.js";
 import { load_actor } from "../actor_storage/store.js";
 import { load_npc } from "../npc_storage/store.js";
 import {
@@ -39,6 +40,10 @@ import { get_configured_data_slot } from "../shared/boot_env.js";
 const data_slot_number = get_configured_data_slot();
 const POLL_MS = SERVICE_CONFIG.POLL_MS.TURN_MANAGER;
 
+function timed_event_diag(verbosity: 'important' | 'verbose' | 'trace', tag: string, message: string, payload?: Record<string, unknown>): void {
+    diag_log('timed_event', verbosity, tag, message, payload);
+}
+
 // Track which events we've already processed to avoid duplicates
 const processedEventIds = new Set<string>();
 const processedMessages = new Set<string>();
@@ -54,7 +59,7 @@ function purge_stale_debug_timed_event_requests(outbox_path: string): number {
     const removed = before - outbox.messages.length;
     if (removed > 0) {
         write_outbox(outbox_path, outbox);
-        debug_log("TIMED_EVENT_BOOT", "purged stale debug timed event requests from outbox", {
+        timed_event_diag('verbose', 'BOOT', 'purged stale debug timed event requests from outbox', {
             slot: data_slot_number,
             removed,
         });
@@ -662,7 +667,7 @@ async function process_npc_turn(slot: number, actor_ref: string, store: WorldSto
 // Check if event should end
 async function check_event_end(slot: number, store: WorldStore): Promise<void> {
     if (!store.timed_event_active) return;
-    debug_log("TurnManager: automatic timed event end disabled", {
+    timed_event_diag('trace', 'POLICY', 'event auto-close remains manual', {
         event_id: store.timed_event_id,
         current_round: store.current_round,
         active_actor_index: typeof store.active_actor_index === "number" ? store.active_actor_index : null,
@@ -855,7 +860,7 @@ function initialize(): { outbox_path: string; inbox_path: string; log_path: stri
     ensure_world_exists(data_slot_number);
     const stale_clear = clear_stale_timed_event(data_slot_number, "turn_manager_boot");
     if ("error" in stale_clear) {
-        debug_log("TIMED_EVENT_BOOT", "failed to clear stale timed event on boot", {
+        timed_event_diag('important', 'BOOT', 'failed to clear stale timed event on boot', {
             slot: data_slot_number,
             error: stale_clear.error,
         });

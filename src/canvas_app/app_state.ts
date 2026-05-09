@@ -71,7 +71,7 @@ import {
 } from '../mono_ui/runtime/interaction_runtime_types.js';
 import { get_camera_settings_for_app, get_camera_slider_specs_for_app, load_camera_settings, save_camera_settings } from '../mono_ui/runtime/camera_customization_store.js';
 import { sanitize_camera_config_for_app } from '../mono_ui/runtime/camera_limits.js';
-import { load_module_layouts, save_module_layouts } from '../mono_ui/runtime/module_layout_store.js';
+import { load_active_module_layout, save_active_module_layout } from '../mono_ui/runtime/module_layout_store.js';
 import { get_ui_customization_state, load_ui_customization_state, save_ui_customization_role_color, set_ui_customization_role_color, type UiCustomizationState, type UiSemanticColorRole } from '../mono_ui/runtime/ui_customization_store.js';
 import { tag_key } from '../tag_system/tag_key.js';
 import type { TagInstance } from '../tag_system/registry.js';
@@ -109,6 +109,11 @@ import { start_roll_transition, start_swing_transition, type PlaceCameraTransiti
 import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
 import { create_tool_assisted_inputs_wiring } from './tool_assisted_inputs_wiring.js';
 import { create_game_controls_runtime } from './controls_wiring.js';
+import { create_module_3d_camera } from '../engine/camera/camera_core.js';
+import type { Module3DCameraView, WorldPoint3 } from '../engine/camera/camera_types.js';
+import { create_thaumworld_place_camera_resolver, type ThaumworldPlaceCameraSubject } from '../thaumworld/camera/place_camera_resolver.js';
+import { get_thaumworld_place_camera_turn_start_policy, get_thaumworld_place_camera_world_sim_policy } from '../thaumworld/camera/place_camera_policy.js';
+import { get_thaumworld_place_painter_boot_policy, get_thaumworld_place_painter_detached_policy } from '../thaumworld/camera/place_painter_camera_policy.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
 import { create_profile_scope, type ProfileScope } from '../user_profiles/profile_scope.js';
 import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
@@ -825,12 +830,6 @@ export function create_app_state(): AppState {
             scene_graph_version: 0,
             scene_connector_hops_visible: 1,
             npc_movement_active: false,
-            camera_target: {
-                mode: 'follow_actor' as 'follow_actor' | 'free',
-                tile: null as { x: number; y: number } | null,
-                region_pose: null as null | { x: number; y: number; z: number },
-                last_follow_update_ms: 0,
-            },
             // World focus layer for Place DOM renderer (0/1/2)
             focus_z: 0,
             principal_view: 'top' as PlacePrincipalView,
@@ -2800,13 +2799,13 @@ export function create_app_state(): AppState {
         const active_actor_changed = prev_active_actor_ref !== ui_state.timed_event_debug.active_actor_ref;
         if (!ui_state.place_painter.active && (timed_event_toggled || active_actor_changed)) {
             if (ui_state.timed_event_debug.phase === 'world_sim_interstitial' || (ui_state.timed_event_debug.active && !ui_state.timed_event_debug.active_actor_ref)) {
-                center_camera_on_current_place();
+                focus_place_camera_on_current_place_center();
             } else {
                 const follow_place_id = resolve_follow_camera_entity_place_id(get_follow_camera_entity_ref());
                 if (follow_place_id && follow_place_id !== ui_state.place.scene_selected_place_id) {
                     await set_scene_selected_place(follow_place_id, { refresh: false, center_camera: true });
                 } else {
-                    snap_place_camera_follow_to_actor();
+                    focus_place_camera_on_active_subject();
                 }
             }
         }
@@ -2832,17 +2831,13 @@ export function create_app_state(): AppState {
     }
 
     function get_follow_camera_entity_ref(): string {
-        const controlled_actor_ref = get_input_actor_ref();
-        if (controlled_actor_ref) {
-            return controlled_actor_ref;
-        }
         if (ui_state.timed_event_debug.active && ui_state.timed_event_debug.phase === 'world_sim_interstitial') {
             return '';
         }
         if (ui_state.timed_event_debug.active && typeof ui_state.timed_event_debug.active_actor_ref === 'string' && ui_state.timed_event_debug.active_actor_ref.length > 0) {
             return ui_state.timed_event_debug.active_actor_ref;
         }
-        return '';
+        return get_input_actor_ref() ?? '';
     }
 
     function find_entity_in_place(place: Place | null | undefined, entity_ref: string): any | null {
@@ -2977,8 +2972,12 @@ export function create_app_state(): AppState {
                     ui_state.place_painter.selected_palette_entry_id = active_entries[0]?.id ?? ui_state.place_painter.tile_palette_entries[0]?.id ?? null;
                 }
             }
-            const actor_tile = get_current_place()?.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
-            if (actor_tile) set_place_camera_target_position(actor_tile, 'free');
+            const render_place = get_render_place();
+            if (render_place?.id) {
+                apply_place_camera_subject({ kind: 'place_center', place_id: render_place.id }, get_thaumworld_place_painter_boot_policy());
+                place_camera.setFollowPolicy(get_thaumworld_place_painter_detached_policy().follow_policy);
+                sync_place_camera_derived_state_from_runtime();
+            }
             set_place_painter_modules_visible(true);
             save_place_painter_prefs_debounced();
             return true;
@@ -2990,7 +2989,7 @@ export function create_app_state(): AppState {
         ui_state.place_painter.move_pending_source = null;
         ui_state.place_painter.move_drag_session = null;
         ui_state.place_painter.shape_session = null;
-        snap_place_camera_follow_to_actor();
+        focus_place_camera_on_active_subject();
         set_place_painter_modules_visible(false);
         return true;
     }
@@ -4087,62 +4086,26 @@ export function create_app_state(): AppState {
         return { positions, visibility };
     }
 
-    function parse_module_layout_storage(raw: string | null | undefined): { positions: Record<string, Rect>; visibility: Record<string, boolean> } | null {
-        if (!raw) return null;
+    function clear_legacy_module_layout_cache(): void {
         try {
-            const parsed = JSON.parse(raw);
-            const positions: Record<string, Rect> = {};
-            const visibility: Record<string, boolean> = {};
-            const pos = parsed?.positions && typeof parsed.positions === 'object' ? parsed.positions : null;
-            const vis = parsed?.visibility && typeof parsed.visibility === 'object' ? parsed.visibility : null;
-            if (pos) {
-                for (const [id, rect] of Object.entries(pos)) {
-                    if (typeof id !== 'string' || id.length < 1 || !is_rect(rect)) continue;
-                    positions[id] = rect;
-                }
-            }
-            if (vis) {
-                for (const [id, visible] of Object.entries(vis)) {
-                    if (typeof id !== 'string' || id.length < 1) continue;
-                    visibility[id] = Boolean(visible);
-                }
-            }
-            return { positions, visibility };
+            window.localStorage?.removeItem(MODULE_LAYOUT_CACHE_STORAGE_KEY);
+            window.localStorage?.removeItem(MODULE_LAYOUT_LEGACY_STORAGE_KEY);
         } catch {
-            return null;
-        }
-    }
-
-    function load_cached_module_layout(): void {
-        const cached = parse_module_layout_storage(window.localStorage?.getItem(MODULE_LAYOUT_CACHE_STORAGE_KEY));
-        const legacy = cached ? null : parse_module_layout_storage(window.localStorage?.getItem(MODULE_LAYOUT_LEGACY_STORAGE_KEY));
-        const initial = cached ?? legacy;
-        if (!initial) return;
-        apply_module_layout_state(initial, { replace: true });
-        if (!cached && legacy) {
-            try {
-                window.localStorage?.setItem(MODULE_LAYOUT_CACHE_STORAGE_KEY, JSON.stringify(initial));
-            } catch {
-                // ignore cache write failures
-            }
+            // ignore cache clear failures
         }
     }
 
     function sync_module_layout_from_shared_store(): void {
-        void profile_scope_ready.then((profile_scope) => load_module_layouts(APP_CONFIG.selected_data_slot, 'thaum_world', profile_scope)).then((state) => {
+        clear_legacy_module_layout_cache();
+        void profile_scope_ready.then((profile_scope) => load_active_module_layout(APP_CONFIG.selected_data_slot, 'thaum_world', profile_scope)).then((state) => {
             const has_shared_state = Object.keys(state.positions).length > 0 || Object.keys(state.visibility).length > 0;
             if (has_shared_state) {
                 apply_module_layout_state(state as { positions: Record<string, Rect>; visibility: Record<string, boolean> }, { replace: true, sync_runtime: true });
-                try {
-                    window.localStorage?.setItem(MODULE_LAYOUT_CACHE_STORAGE_KEY, JSON.stringify(serialize_module_layout_state()));
-                } catch {
-                    // ignore cache write failures
-                }
                 return;
             }
             const current = serialize_module_layout_state();
             if (Object.keys(current.positions).length < 1 && Object.keys(current.visibility).length < 1) return;
-            void save_module_layouts(APP_CONFIG.selected_data_slot, 'thaum_world', current, active_profile_scope).catch(() => null);
+            void save_active_module_layout(APP_CONFIG.selected_data_slot, 'thaum_world', current, active_profile_scope).catch(() => null);
         }).catch(() => null);
     }
 
@@ -4229,6 +4192,8 @@ export function create_app_state(): AppState {
         const view = normalize_place_principal_view(next);
         ui_state.place.principal_view = view;
         ui_state.place.display_principal_view = view;
+        place_camera.setOrientation(view);
+        sync_place_camera_derived_state_from_runtime();
         save_place_principal_view();
     }
 
@@ -4315,13 +4280,7 @@ export function create_app_state(): AppState {
             ui_state.place.view_roll_quarter_turn = resolved.target_view.roll_quarter_turn;
             ui_state.place.display_principal_view = resolved.hard_view.principal_view;
             ui_state.place.display_view_roll_quarter_turn = resolved.hard_view.roll_quarter_turn;
-            const snap_anchor = ui_state.place.camera_target.region_pose
-                ? { x: ui_state.place.camera_target.region_pose.x, y: ui_state.place.camera_target.region_pose.y, z: ui_state.place.camera_target.region_pose.z }
-                : (() => {
-                    const follow = resolve_follow_actor_camera_focus_region();
-                    if (!follow) return null;
-                    return { x: follow.region_x, y: follow.region_y, z: follow.world_z };
-                })();
+            const snap_anchor = get_place_camera_world_anchor();
             if (snap_anchor) {
                 sync_place_focus_plane_from_anchor(snap_anchor);
                 if (typeof snap_anchor.z === 'number' && Number.isFinite(snap_anchor.z)) {
@@ -4476,6 +4435,9 @@ export function create_app_state(): AppState {
         ui_state.place.focus_z = next;
         save_place_focus_z();
         const world_z = Math.floor(Number(planes[next] ?? ui_state.place.world_z_center));
+        place_camera.setFocusPlane(world_z);
+        place_camera.notifyManualDepthChange();
+        sync_place_camera_derived_state_from_runtime();
         flash_status([`Depth: ${world_z}`], 900);
     }
 
@@ -4485,12 +4447,7 @@ export function create_app_state(): AppState {
         persist_timer = window.setTimeout(() => {
             persist_timer = null;
             const next = serialize_module_layout_state();
-            try {
-                window.localStorage?.setItem(MODULE_LAYOUT_CACHE_STORAGE_KEY, JSON.stringify(next));
-            } catch {
-                // ignore cache write failures
-            }
-            void save_module_layouts(APP_CONFIG.selected_data_slot, 'thaum_world', next, active_profile_scope).catch(() => null);
+            void save_active_module_layout(APP_CONFIG.selected_data_slot, 'thaum_world', next, active_profile_scope).catch(() => null);
         }, 200);
     }
 
@@ -4611,7 +4568,6 @@ export function create_app_state(): AppState {
     }
 
     // Load persisted module state early so it affects initial rects/visibility.
-    load_cached_module_layout();
     sync_module_layout_from_shared_store();
     void profile_scope_ready.then((profile_scope) => load_ui_customization_state(APP_CONFIG.selected_data_slot, { profile_scope })).then((next) => {
         apply_ui_customization_runtime(next);
@@ -4891,6 +4847,136 @@ export function create_app_state(): AppState {
             payload_compatibility: args.payload_compatibility,
         };
     }
+
+    const place_camera = create_module_3d_camera<ThaumworldPlaceCameraSubject, PlacePrincipalView>({
+        resolver: create_thaumworld_place_camera_resolver({
+            resolve_entity_world: (entity_ref) => resolve_place_camera_entity_world(entity_ref),
+            resolve_place_center_world: (place_id) => resolve_place_camera_center_world(place_id),
+        }),
+        initial_orientation: ui_state.place.principal_view,
+        initial_frame_anchor_world: { x: 0, y: 0, z: ui_state.place.world_z_center },
+        initial_focus_plane: ui_state.place.world_z_center,
+        initial_follow_policy: { kind: 'detached' },
+        initial_motion_style: { kind: 'snap' },
+    });
+
+    function get_place_camera_projection_view(): Module3DCameraView<ThaumworldPlaceCameraSubject, PlacePrincipalView> {
+        return place_camera.getProjectionView();
+    }
+
+    function get_place_camera_local_tile_from_world(world: WorldPoint3, render_place: Place | null | undefined = get_render_place()): { x: number; y: number; z: number } {
+        const origin = get_place_region_origin(render_place);
+        if (origin) {
+            return {
+                x: Math.floor(world.x - origin.x),
+                y: Math.floor(world.y - origin.y),
+                z: Math.floor(world.z),
+            };
+        }
+        return { x: Math.floor(world.x), y: Math.floor(world.y), z: Math.floor(world.z) };
+    }
+
+    function get_place_camera_focus_anchor_from_plane(focus_plane: number): { x?: number; y?: number; z?: number } {
+        const axis = get_principal_view_plane_axis(ui_state.place.principal_view);
+        if (axis === 'x') return { x: Math.floor(focus_plane) };
+        if (axis === 'y') return { y: Math.floor(focus_plane) };
+        return { z: Math.floor(focus_plane) };
+    }
+
+    function get_place_camera_world_anchor(): WorldPoint3 {
+        const world = get_place_camera_projection_view().frame_anchor_world;
+        return {
+            x: Math.floor(world.x),
+            y: Math.floor(world.y),
+            z: Math.floor(world.z),
+        };
+    }
+
+    function get_place_camera_focus_world(): WorldPoint3 | null {
+        const world = get_place_camera_projection_view().focus_target_world;
+        if (!world) return null;
+        return {
+            x: Math.floor(world.x),
+            y: Math.floor(world.y),
+            z: Math.floor(world.z),
+        };
+    }
+
+    function get_place_camera_focus_plane(): number {
+        return Math.floor(get_place_camera_projection_view().focus_plane);
+    }
+
+    function get_place_camera_local_anchor(place: Place | null | undefined = get_render_place()): { place_id: string; local_x: number; local_y: number; world_z: number } | null {
+        if (!place?.id) return null;
+        const local = get_place_camera_local_tile_from_world(get_place_camera_world_anchor(), place);
+        return {
+            place_id: place.id,
+            local_x: local.x,
+            local_y: local.y,
+            world_z: local.z,
+        };
+    }
+
+    function get_place_camera_local_focus(place: Place | null | undefined = get_render_place()): { place_id: string; local_x: number; local_y: number; world_z: number } | null {
+        const focusWorld = get_place_camera_focus_world();
+        if (!focusWorld || !place?.id) return null;
+        const local = get_place_camera_local_tile_from_world(focusWorld, place);
+        return {
+            place_id: place.id,
+            local_x: local.x,
+            local_y: local.y,
+            world_z: local.z,
+        };
+    }
+
+    function get_place_camera_subject(): ThaumworldPlaceCameraSubject | null {
+        return place_camera.getState().semantic.subject;
+    }
+
+    function sync_place_camera_derived_state_from_runtime(): void {
+        const view = get_place_camera_projection_view();
+        const worldAnchor = get_place_camera_world_anchor();
+        ui_state.place.world_z_center = worldAnchor.z;
+        sync_place_focus_plane_from_anchor(get_place_camera_focus_anchor_from_plane(view.focus_plane));
+    }
+
+    function is_place_camera_follow_active(): boolean {
+        return get_place_camera_projection_view().follow_active;
+    }
+
+    function resolve_place_camera_entity_world(entity_ref: string): WorldPoint3 | null {
+        if (!entity_ref) return null;
+        for (const place of get_candidate_follow_camera_places()) {
+            const focus = get_entity_focus_tile_in_place(place, entity_ref);
+            if (!focus) continue;
+            const origin = get_place_region_origin(place);
+            return origin
+                ? { x: origin.x + Math.floor(focus.x), y: origin.y + Math.floor(focus.y), z: Math.floor(focus.z) }
+                : { x: Math.floor(focus.x), y: Math.floor(focus.y), z: Math.floor(focus.z) };
+        }
+        return null;
+    }
+
+    function resolve_place_camera_center_world(place_id?: string | null): WorldPoint3 | null {
+        const place = (place_id ? get_scene_place(place_id) : null) ?? get_render_place();
+        const center = get_place_center_tile(place);
+        if (!center || !place) return null;
+        const origin = get_place_region_origin(place);
+        const fallback_z = origin?.z ?? (Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0);
+        return { x: Math.floor(center.x), y: Math.floor(center.y), z: fallback_z };
+    }
+
+    function apply_place_camera_subject(subject: ThaumworldPlaceCameraSubject, policy: ReturnType<typeof get_thaumworld_place_camera_world_sim_policy>): void {
+        place_camera.setSubject(subject);
+        place_camera.setMotionStyle(policy.motion_style);
+        place_camera.setFollowPolicy(policy.follow_policy);
+        place_camera.recenterOnSubject();
+        sync_place_camera_derived_state_from_runtime();
+    }
+
+    place_camera.setOrientation(ui_state.place.principal_view);
+    place_camera.setFocusPlane(ui_state.place.world_z_center);
+    sync_place_camera_derived_state_from_runtime();
 
     const interaction_registry = create_interaction_registry_runtime();
     let current_interaction_hover_state: InteractionHoverResolution | null = null;
@@ -8279,8 +8365,8 @@ export function create_app_state(): AppState {
             ui_state.place.current_place = actor_place;
             if (actor_place) set_command_handler_place(actor_place);
         }
-        if (ui_state.place.camera_target.mode === 'follow_actor') {
-            snap_place_camera_follow_to_actor();
+        if (is_place_camera_follow_active()) {
+            focus_place_camera_on_active_subject();
         }
     }
 
@@ -8299,8 +8385,8 @@ export function create_app_state(): AppState {
             ui_state.place.current_place = actor_place;
             if (actor_place) set_command_handler_place(actor_place);
         }
-        if (ui_state.place.camera_target.mode === 'follow_actor') {
-            snap_place_camera_follow_to_actor();
+        if (is_place_camera_follow_active()) {
+            focus_place_camera_on_active_subject();
         }
     }
 
@@ -8427,9 +8513,13 @@ export function create_app_state(): AppState {
             }
         }
         if (opts?.center_camera) {
-            const actor_tile = selected.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
-            if (had_painter && actor_tile) set_place_camera_target_position(actor_tile, 'free');
-            else if (!had_painter) snap_place_camera_follow_to_actor();
+            if (had_painter && selected?.id) {
+                apply_place_camera_subject({ kind: 'place_center', place_id: selected.id }, get_thaumworld_place_painter_boot_policy());
+                place_camera.setFollowPolicy(get_thaumworld_place_painter_detached_policy().follow_policy);
+                sync_place_camera_derived_state_from_runtime();
+            } else if (!had_painter) {
+                focus_place_camera_on_active_subject();
+            }
         }
         debug_log(`[PLACE_SCENE] select applied ${JSON.stringify({ place_id, had_painter, pause_sources: ui_state.place.pause_state.pause_sources, current_place_id: ui_state.place.current_place_id, selected_scene_place_id: ui_state.place.scene_selected_place_id })}`);
         return true;
@@ -8590,8 +8680,9 @@ export function create_app_state(): AppState {
             ui_state.place.scene_places = [];
             ui_state.place.scene_visible_place_ids = [];
             ui_state.place.scene_graph_version = 0;
-            ui_state.place.camera_target.region_pose = null;
-            ui_state.place.camera_target.last_follow_update_ms = 0;
+            place_camera.clearSubject();
+            place_camera.setFollowPolicy({ kind: 'detached' });
+            sync_place_camera_derived_state_from_runtime();
             sync_current_place_ground_item_cache_aliases();
             apply_place_pause_state(null);
             stop_place_touch_heartbeat();
@@ -8611,8 +8702,8 @@ export function create_app_state(): AppState {
             ui_state.place.scene_places = [];
             ui_state.place.scene_visible_place_ids = [];
             ui_state.place.scene_graph_version = 0;
-            ui_state.place.camera_target.region_pose = null;
-            ui_state.place.camera_target.last_follow_update_ms = 0;
+            place_camera.setFollowPolicy({ kind: 'detached' });
+            sync_place_camera_derived_state_from_runtime();
             sync_current_place_ground_item_cache_aliases();
             if (!preserve_place_painter) {
                 ui_state.place_painter.active = false;
@@ -8835,18 +8926,23 @@ export function create_app_state(): AppState {
                     if (!is_current_place_paused_by('place_painter')) {
                         await set_current_place_pause_source('place_painter', true);
                     }
+                    apply_place_camera_subject({ kind: 'place_center', place_id: next_place.id }, get_thaumworld_place_painter_boot_policy());
+                    place_camera.setFollowPolicy(get_thaumworld_place_painter_detached_policy().follow_policy);
+                    sync_place_camera_derived_state_from_runtime();
                 } else {
-                    snap_place_camera_follow_to_actor();
+                    focus_place_camera_on_active_subject();
                 }
                 debug_log(`[PLACE_SCENE] full place load applied ${JSON.stringify({ source, place_id: next_place.id, preserve_place_painter, current_place_id: ui_state.place.current_place_id, scene_selected_place_id: ui_state.place.scene_selected_place_id, scene_places: ui_state.place.scene_places.map((p) => p.id), pause_sources: ui_state.place.pause_state.pause_sources })}`);
             } else {
                 ui_state.place.current_place = null;
-                ui_state.place.camera_target.region_pose = null;
+                place_camera.setFollowPolicy({ kind: 'detached' });
+                sync_place_camera_derived_state_from_runtime();
             }
         } catch (err) {
             debug_warn('[mono_ui] failed to load place', place_id, err);
             ui_state.place.current_place = null;
-            ui_state.place.camera_target.region_pose = null;
+            place_camera.setFollowPolicy({ kind: 'detached' });
+            sync_place_camera_derived_state_from_runtime();
         }
     }
 
@@ -9797,7 +9893,9 @@ export function create_app_state(): AppState {
         const next_world_z = Math.floor(Number(world_z));
         if (!Number.isFinite(next_world_z)) return;
         ui_state.place.world_z_center = next_world_z;
+        place_camera.setFocusPlane(next_world_z);
         sync_place_focus_plane_from_anchor(place ? { x: undefined, y: undefined, z: next_world_z } : { z: next_world_z });
+        sync_place_camera_derived_state_from_runtime();
     }
 
     function get_candidate_follow_camera_places(): Place[] {
@@ -9850,170 +9948,80 @@ export function create_app_state(): AppState {
         };
     }
 
-    function center_camera_on_current_place(): void {
-        const center = get_place_center_tile(get_render_place());
-        if (!center) return;
-        set_place_camera_target_position(center, 'free');
-    }
-
-    function resolve_follow_actor_camera_focus_region(): { place_id: string; region_x: number; region_y: number; world_z: number; local_x: number; local_y: number } | null {
-        const actor_ref = get_follow_camera_entity_ref();
-        if (!actor_ref) return null;
-
-        for (const place of get_candidate_follow_camera_places()) {
-            const focus = get_entity_focus_tile_in_place(place, actor_ref);
-            if (!focus) continue;
-            const origin = get_place_region_origin(place);
-            if (!origin) {
-                return {
-                    place_id: place.id,
-                    region_x: focus.x,
-                    region_y: focus.y,
-                    world_z: focus.z,
-                    local_x: focus.x,
-                    local_y: focus.y,
-                };
-            }
-            return {
-                place_id: place.id,
-                region_x: origin.x + focus.x,
-                region_y: origin.y + focus.y,
-                world_z: focus.z,
-                local_x: focus.x,
-                local_y: focus.y,
-            };
-        }
-        return null;
+    function focus_place_camera_on_current_place_center(): void {
+        const place = get_render_place();
+        if (!place?.id) return;
+        apply_place_camera_subject({ kind: 'place_center', place_id: place.id }, get_thaumworld_place_camera_turn_start_policy());
     }
 
     function log_place_camera_follow_diag(reason: string, payload: Record<string, unknown>): void {
         diag_log('camera', 'trace', 'PLACE_CAMERA_FOLLOW', reason, payload);
     }
 
-    function snap_place_camera_follow_to_actor(): void {
-        ui_state.place.camera_target.mode = 'follow_actor';
-        ui_state.place.camera_target.tile = null;
-        const previous_pose = ui_state.place.camera_target.region_pose
-            ? { ...ui_state.place.camera_target.region_pose }
-            : null;
-        const target = resolve_follow_actor_camera_focus_region();
-        if (!target) return;
-        ui_state.place.camera_target.region_pose = {
-            x: target.region_x,
-            y: target.region_y,
-            z: target.world_z,
-        };
-        ui_state.place.camera_target.last_follow_update_ms = Date.now();
-        sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
-        ui_state.place.world_z_center = Math.floor(target.world_z);
-        log_place_camera_follow_diag('snap_follow_to_actor', {
-            actor_ref: get_follow_camera_entity_ref(),
+    function focus_place_camera_on_active_subject(): void {
+        const previous_anchor = get_place_camera_world_anchor();
+        const actor_ref = get_follow_camera_entity_ref();
+        if (!actor_ref) {
+            focus_place_camera_on_current_place_center();
+            return;
+        }
+        const policy = ui_state.timed_event_debug.active
+            ? get_thaumworld_place_camera_turn_start_policy()
+            : get_thaumworld_place_camera_world_sim_policy();
+        apply_place_camera_subject({ kind: 'entity_ref', entity_ref: actor_ref }, policy);
+        log_place_camera_follow_diag('focus_active_subject', {
+            actor_ref,
             render_place_id: get_render_place()?.id ?? null,
-            previous_pose,
-            next_pose: ui_state.place.camera_target.region_pose,
-            target,
-            mode: ui_state.place.camera_target.mode,
+            previous_anchor,
+            next_anchor: get_place_camera_world_anchor(),
+            target: get_place_camera_focus_world(),
+            subject: get_place_camera_subject(),
+            follow_active: is_place_camera_follow_active(),
         });
     }
 
-    function update_place_camera_follow(now_ms: number): void {
-        if (ui_state.place.camera_target.mode === 'free') return;
-        const target = resolve_follow_actor_camera_focus_region();
-        if (!target) return;
-        ui_state.place.camera_target.last_follow_update_ms = now_ms;
-        const pose = ui_state.place.camera_target.region_pose;
-        if (!pose) {
-            ui_state.place.camera_target.region_pose = { x: target.region_x, y: target.region_y, z: target.world_z };
-            sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
-            ui_state.place.world_z_center = Math.floor(target.world_z);
-            log_place_camera_follow_diag('update_follow_init_pose', {
+    function tick_place_camera(now_ms: number): void {
+        const previous_anchor = get_place_camera_world_anchor();
+        const changed = place_camera.tick(now_ms);
+        sync_place_camera_derived_state_from_runtime();
+        if (changed) {
+            log_place_camera_follow_diag('tick_place_camera', {
                 actor_ref: get_follow_camera_entity_ref(),
                 render_place_id: get_render_place()?.id ?? null,
-                previous_pose: null,
-                next_pose: ui_state.place.camera_target.region_pose,
-                target,
+                previous_anchor,
+                next_anchor: get_place_camera_world_anchor(),
+                target: get_place_camera_focus_world(),
+                subject: get_place_camera_subject(),
                 now_ms,
-                mode: ui_state.place.camera_target.mode,
-            });
-            return;
-        }
-        const previous_pose = { x: pose.x, y: pose.y, z: pose.z };
-        pose.x = target.region_x;
-        pose.y = target.region_y;
-        pose.z = target.world_z;
-        ui_state.place.world_z_center = Math.floor(target.world_z);
-        sync_place_focus_plane_from_anchor({ x: target.region_x, y: target.region_y, z: target.world_z });
-        if (previous_pose.x !== pose.x || previous_pose.y !== pose.y || previous_pose.z !== pose.z) {
-            log_place_camera_follow_diag('update_follow_pose', {
-                actor_ref: get_follow_camera_entity_ref(),
-                render_place_id: get_render_place()?.id ?? null,
-                previous_pose,
-                next_pose: { x: pose.x, y: pose.y, z: pose.z },
-                target,
-                now_ms,
-                mode: ui_state.place.camera_target.mode,
+                follow_active: is_place_camera_follow_active(),
             });
         }
     }
 
-    function get_place_camera_target_position(): { x: number; y: number } | null {
-        if (ui_state.place.camera_target.mode === 'free' && ui_state.place.camera_target.tile) {
-            return { ...ui_state.place.camera_target.tile };
-        }
+    function set_place_module_camera_anchor(anchor: { x: number; y: number; z: number }): void {
+        place_camera.setFrameAnchor({ x: Math.floor(anchor.x), y: Math.floor(anchor.y), z: Math.floor(anchor.z) });
+        place_camera.setFollowPolicy({ kind: 'detached' });
+        place_camera.notifyManualPan();
+        place_camera.setFocusPlane(Math.floor(anchor.z));
+        sync_place_camera_derived_state_from_runtime();
+    }
 
+    function set_place_module_camera_local_anchor(anchor: { x: number; y: number; z: number }): void {
         const place = get_render_place();
-        const focus = get_place_camera_focus_target_for_render_place(place);
-        if (focus) return { x: focus.x, y: focus.y };
-
-        return null;
-    }
-
-    function get_place_camera_focus_target_for_render_place(render_place: Place | null | undefined): { x: number; y: number; z: number } | null {
-        if (!render_place) return null;
-        const origin = get_place_region_origin(render_place);
-        const pose = ui_state.place.camera_target.region_pose;
-        if (pose && origin) {
-            return {
-                x: Math.floor(pose.x - origin.x),
-                y: Math.floor(pose.y - origin.y),
-                z: Math.floor(pose.z),
-            };
-        }
-
-        const target = resolve_follow_actor_camera_focus_region();
-        if (target && target.place_id === render_place.id) {
-            return {
-                x: Math.floor(target.local_x),
-                y: Math.floor(target.local_y),
-                z: Math.floor(target.world_z),
-            };
-        }
-
-        return null;
-    }
-
-    function get_active_place_focus_target_for_render_place(): { x: number; y: number; z: number } | null {
-        const render_place = get_render_place();
-        if (!render_place) return null;
-
-        if (ui_state.place.camera_target.mode === 'free' && ui_state.place.camera_target.tile) {
-            return {
-                x: Math.floor(ui_state.place.camera_target.tile.x),
-                y: Math.floor(ui_state.place.camera_target.tile.y),
-                z: get_focus_world_z_for_current_place(),
-            };
-        }
-
-        return get_place_camera_focus_target_for_render_place(render_place);
-    }
-
-    function set_place_camera_target_position(tile: { x: number; y: number }, mode: 'follow_actor' | 'free' = 'free'): void {
-        if (mode === 'free') {
-            ui_state.place.camera_target.mode = 'free';
-            ui_state.place.camera_target.tile = { x: Math.floor(tile.x), y: Math.floor(tile.y) };
+        const origin = get_place_region_origin(place);
+        if (!origin) {
+            set_place_module_camera_anchor(anchor);
             return;
         }
-        snap_place_camera_follow_to_actor();
+        set_place_module_camera_anchor({
+            x: Math.floor(origin.x + anchor.x),
+            y: Math.floor(origin.y + anchor.y),
+            z: Math.floor(anchor.z),
+        });
+    }
+
+    function should_persist_place_module_camera_view(): boolean {
+        return !is_place_camera_follow_active();
     }
 
     function get_entity_camera_anchor_world_z(entity: any, entity_ref: string, fallback_z: number): number {
@@ -10301,10 +10309,17 @@ export function create_app_state(): AppState {
             on_place_painter_resize_update: update_place_resize_session,
             on_place_painter_resize_end: () => { void finish_place_resize_session(); },
             on_place_painter_resize_adjust_z: adjust_place_resize_session_z,
-            get_camera_target_position: get_place_camera_target_position,
-            get_active_focus_target: get_active_place_focus_target_for_render_place,
-            get_camera_target_mode: () => ui_state.place.camera_target.mode,
-            set_camera_target_position: set_place_camera_target_position,
+            get_module_camera_anchor: () => {
+                const local = get_place_camera_local_anchor(get_render_place());
+                if (!local) return null;
+                return {
+                    x: local.local_x,
+                    y: local.local_y,
+                    z: local.world_z,
+                };
+            },
+            should_persist_camera_view: should_persist_place_module_camera_view,
+            on_module_camera_anchor_changed: set_place_module_camera_local_anchor,
             get_display_name_for_ref: (entity_ref: string) => get_entity_display_name(entity_ref),
             on_select_target: (target_ref: string): boolean => {
                 // Check if this target exists in the available targets list
@@ -12464,7 +12479,7 @@ export function create_app_state(): AppState {
                 set_command_handler_place(cached_target_place);
                 if (!painter_lock_selection) {
                     const actor_tile = cached_target_place.contents?.actors_present?.find((a: any) => a.actor_ref === get_input_actor_ref())?.tile_position;
-                    if (actor_tile) snap_place_camera_follow_to_actor();
+                    if (actor_tile) focus_place_camera_on_active_subject();
                 }
                 debug_log(`[PLACE_SCENE] actor place transition local handoff ${JSON.stringify({ target_place_id, used_cached_scene_place: true, next_selected_place_id, mirror_to_current_place: !painter_lock_selection, scene_places: ui_state.place.scene_places.map((p) => p.id) })}`);
             } else {
@@ -13475,8 +13490,8 @@ export function create_app_state(): AppState {
                     renderer_debug.last_place_breath_changed_ms = now_wall;
                 }
 
-                const follow_target = resolve_follow_actor_camera_focus_region();
-                const actor_key = follow_target
+                const follow_target = get_place_camera_local_focus();
+                const actor_key = follow_target && get_place_camera_subject()?.kind === 'entity_ref'
                     ? `${get_follow_camera_entity_ref() ?? 'unknown'}:${follow_target.place_id}:${follow_target.local_x},${follow_target.local_y},${follow_target.world_z}`
                     : null;
                 if (actor_key && actor_key !== renderer_debug.last_actor_pos_key) {
@@ -13484,7 +13499,7 @@ export function create_app_state(): AppState {
                     renderer_debug.actor_pos_change_count += 1;
                     renderer_debug.last_actor_pos_changed_ms = now_wall;
                 }
-                update_place_camera_follow(now_wall);
+                tick_place_camera(now_wall);
             } catch {
                 // ignore
             }

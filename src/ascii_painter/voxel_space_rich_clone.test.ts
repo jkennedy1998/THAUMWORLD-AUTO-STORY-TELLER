@@ -28,7 +28,7 @@ assert(storedCell!.appearance_slots?.[1]?.kind === 'flat_rgb' && storedCell!.app
 assert(storedCell!.materials?.[1] === 'STONE_PALE', 'setVoxel should deep-clone materials');
 
 storedCell!.graphic!.graphic_id = 'atlas:mutated_after_get';
-storedCell!.appearance_slots![1]!.rgb.g = 88;
+if (storedCell!.appearance_slots![1]?.kind === 'flat_rgb') storedCell!.appearance_slots![1].rgb.g = 88;
 storedCell!.materials![1] = 'WOOD_DARK';
 
 const rereadCell = getVoxel(space, 0, 0, 0);

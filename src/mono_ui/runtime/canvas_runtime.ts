@@ -1,6 +1,7 @@
 import { create_canvas } from '../canvas.js';
 import { compose_modules } from '../compose.js';
 import type { Canvas, Cell, Module, PointerEvent, DragEvent, WheelEvent } from '../types.js';
+import type { IPanTargetAdapter } from '../../engine/pan/pan_target.js';
 import { rect_contains } from '../types.js';
 import { debug_warn, DEBUG_LEVEL } from '../../shared/debug.js';
 import { diag_log } from '../../shared/diagnostics.js';
@@ -15,6 +16,8 @@ import { create_canvas_cell_renderer, type CanvasCellRenderer } from './cell_ren
 import { clamp_weight_index, DEFAULT_WEIGHT_INDEX_TO_CSS } from '../weight_system.js';
 import { create_electron_input_host, type ElectronInputHost } from './electron_input_host.js';
 import { reset_all } from './input_actions.js';
+import { create_pan_gesture_router } from '../../engine/pan/pan_gesture_router.js';
+import { create_runtime_viewport_pan_adapter } from './adapters/runtime_viewport_pan_adapter.js';
 
 function is_directional_action(action: string | null): action is 'move_up' | 'move_down' | 'move_left' | 'move_right' {
     return action === 'move_up' || action === 'move_down' || action === 'move_left' || action === 'move_right';
@@ -46,6 +49,7 @@ export type CanvasRuntimeOptions = {
     // Called on global pointer down/up so higher-level runtimes can coordinate shared interaction state.
     on_pointer_down_global?: (x: number, y: number, e: PointerEvent) => void;
     on_pointer_up_global?: (x: number, y: number, e: PointerEvent) => void;
+    on_module_pointer_down?: (module: Module) => void;
 
     // Called after modules compose each frame (for overlays)
     on_after_compose?: (canvas: Canvas) => void;
@@ -53,9 +57,12 @@ export type CanvasRuntimeOptions = {
 
 export class CanvasRuntime {
     private canvas_el: HTMLCanvasElement;
+    private overlay_canvas_el: HTMLCanvasElement | null = null;
     private ctx: CanvasRenderingContext2D;
+    private overlay_ctx: CanvasRenderingContext2D | null = null;
     private key_sink: HTMLTextAreaElement;
     private engine_canvas: Canvas;
+    private overlay_engine_canvas: Canvas;
     private modules: readonly Module[];
 
     private grid_width: number;
@@ -130,6 +137,7 @@ export class CanvasRuntime {
     private on_pointer_move_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
     private on_pointer_down_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
     private on_pointer_up_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
+    private on_module_pointer_down: ((module: Module) => void) | null = null;
     private on_after_compose: ((canvas: Canvas) => void) | null = null;
     private window_layout_refresh_handler: (() => void) | null = null;
     private window_focus_refresh_handler: (() => void) | null = null;
@@ -150,6 +158,8 @@ export class CanvasRuntime {
     private global_pan_active = false;
     private last_pan_client_x = 0;
     private last_pan_client_y = 0;
+    private active_pan_target: IPanTargetAdapter | null = null;
+    private active_pan_pointer_id: number | null = null;
     private space_down = false;
     private shift_down = false;
     private ctrl_down = false;
@@ -251,9 +261,6 @@ export class CanvasRuntime {
         return true;
     }
 
-    // Allow panning beyond strict canvas bounds (gives breathing room / "free space").
-    private readonly PAN_MARGIN_TILES = 10;
-
     // Base translate (centered/snap-to-grid) computed from viewport + canvas size.
     private base_pan_px_x = 0;
     private base_pan_px_y = 0;
@@ -284,9 +291,11 @@ export class CanvasRuntime {
         this.on_pointer_move_global = opts.on_pointer_move_global ?? null;
         this.on_pointer_down_global = opts.on_pointer_down_global ?? null;
         this.on_pointer_up_global = opts.on_pointer_up_global ?? null;
+        this.on_module_pointer_down = opts.on_module_pointer_down ?? null;
         this.on_after_compose = opts.on_after_compose ?? null;
 
         this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
+        this.overlay_engine_canvas = create_canvas(this.grid_width, this.grid_height);
         this.key_sink = opts.key_sink ?? this.ensure_key_sink();
         this.input_host = create_electron_input_host({
             on_keydown: this.handle_runtime_keydown,
@@ -326,6 +335,7 @@ export class CanvasRuntime {
             },
         });
 
+        this.ensure_overlay_canvas();
         this.attach_events();
     }
 
@@ -360,12 +370,31 @@ export class CanvasRuntime {
         this.grid_height = next_height;
         if (size_changed) {
             this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
+            this.overlay_engine_canvas = create_canvas(this.grid_width, this.grid_height);
         }
         this.resize_to_grid();
     }
 
     private clamp_scale(scale: number): number {
         return clamp_ui_scale(scale);
+    }
+
+    private ensure_overlay_canvas(): void {
+        if (this.overlay_canvas_el && this.overlay_ctx) return;
+        const viewport = this.canvas_el.parentElement;
+        if (!viewport) return;
+        const overlay = document.createElement('canvas');
+        overlay.id = `${this.canvas_el.id || 'mono_canvas'}_screen_locked_overlay`;
+        overlay.style.position = 'absolute';
+        overlay.style.left = '0px';
+        overlay.style.top = '0px';
+        overlay.style.pointerEvents = 'auto';
+        overlay.style.zIndex = '20';
+        const ctx = overlay.getContext('2d');
+        if (!ctx) return;
+        viewport.appendChild(overlay);
+        this.overlay_canvas_el = overlay;
+        this.overlay_ctx = ctx;
     }
 
     private persist_scale_best_effort(scale: number): void {
@@ -378,44 +407,32 @@ export class CanvasRuntime {
 
     set_modules(modules: readonly Module[]): void {
         this.modules = modules as Module[];
-        this.sync_runtime_pan_to_modules();
+        this.sync_screen_locked_viewport_offsets();
     }
 
-    private sync_runtime_pan_to_modules(): void {
+    private sync_screen_locked_viewport_offsets(): void {
         for (const module of this.modules) {
+            if (module?.getLayerMode?.() !== 'screen_locked') continue;
             try {
-                module?.setRuntimePanOffset?.(this.pan_tiles_x, this.pan_tiles_y);
+                module?.setScreenLockedViewportOffset?.(0, 0);
             } catch {
                 // ignore
             }
         }
     }
 
-    private get_screen_locked_pan_bounds(): { min_x: number; max_x: number; min_y: number; max_y: number } | null {
-        let found = false;
-        let min_x = Number.NEGATIVE_INFINITY;
-        let max_x = Number.POSITIVE_INFINITY;
-        let min_y = Number.NEGATIVE_INFINITY;
-        let max_y = Number.POSITIVE_INFINITY;
-
-        for (const module of this.modules) {
-            if (!module?.isScreenLocked || !module.getScreenLockedPanBounds) continue;
-            const bounds = module.getScreenLockedPanBounds();
-            min_x = Math.max(min_x, bounds.min_x);
-            max_x = Math.min(max_x, bounds.max_x);
-            min_y = Math.max(min_y, bounds.min_y);
-            max_y = Math.min(max_y, bounds.max_y);
-            found = true;
-        }
-
-        if (!found) return null;
-        return {
-            min_x: Number.isFinite(min_x) ? min_x : 0,
-            max_x: Number.isFinite(max_x) ? max_x : 0,
-            min_y: Number.isFinite(min_y) ? min_y : 0,
-            max_y: Number.isFinite(max_y) ? max_y : 0,
-        };
+    private is_screen_locked_module(module: Module | null | undefined): boolean {
+        return module?.getLayerMode?.() === 'screen_locked';
     }
+
+    private get_screen_locked_modules(): Module[] {
+        return this.modules.filter((module) => this.is_screen_locked_module(module));
+    }
+
+    private get_world_pannable_modules(): Module[] {
+        return this.modules.filter((module) => !this.is_screen_locked_module(module));
+    }
+
 
     private is_frame_perf_enabled(): boolean {
         try {
@@ -748,11 +765,20 @@ export class CanvasRuntime {
         this.down_tile = t;
         this.dragging = false;
         this.capture_owner = top;
+        if (top?.BringToFrontOnPointerDown) {
+            try {
+                this.on_module_pointer_down?.(top);
+                top = this.route_to_top_module(t.x, t.y) ?? top;
+                this.down_owner = top;
+                this.capture_owner = top;
+            } catch { /* ignore */ }
+        }
         if (top?.Focusable) this.update_focused_owner(top);
         else if (this.focused_owner?.id === 'painter_canvas') this.update_focused_owner(null);
         const pe: any = this.make_pointer_event('down', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y));
         pe.pointer_type = ev.pointerType;
         pe.pressure = ev.pressure;
+        pe.target_module_id = top?.id ?? null;
         for (const m of this.modules) {
             try { m?.OnGlobalPointerDown?.(pe as PointerEvent); } catch { /* ignore */ }
         }
@@ -846,10 +872,12 @@ export class CanvasRuntime {
         return Math.max(Math.abs(x - this.down_tile.x), Math.abs(y - this.down_tile.y));
     }
 
-    private route_to_top_module(x: number, y: number): Module | undefined {
+    private route_to_top_module(x: number, y: number, layer_mode?: 'screen_locked' | 'world_pannable'): Module | undefined {
         for (let i = this.modules.length - 1; i >= 0; i--) {
             const m = this.modules[i];
             if (!m) continue;
+            if (layer_mode === 'screen_locked' && !this.is_screen_locked_module(m)) continue;
+            if (layer_mode === 'world_pannable' && this.is_screen_locked_module(m)) continue;
             if (rect_contains(m.rect, x, y)) return m;
         }
         return undefined;
@@ -858,6 +886,103 @@ export class CanvasRuntime {
     private get_canvas_module(): Module | undefined {
         // Find the painter_canvas module to use as fallback for events
         return this.modules.find(m => m?.id === 'painter_canvas');
+    }
+
+    private get_viewport_element(): HTMLElement | null {
+        return this.canvas_el.parentElement;
+    }
+
+    private get_module_pan_target(module: Module | null | undefined): IPanTargetAdapter | null {
+        return module?.getPanTargetAdapter?.() ?? null;
+    }
+
+    private get_viewport_pan_target(): IPanTargetAdapter {
+        return create_runtime_viewport_pan_adapter({
+            apply_screen_delta: (dx: number, dy: number) => {
+                const { tile_w, tile_h } = this.get_metrics();
+                this.pan_accum_px_x += dx;
+                this.pan_accum_px_y += dy;
+
+                const step_x = tile_w > 0 ? Math.trunc(this.pan_accum_px_x / tile_w) : 0;
+                const step_y = tile_h > 0 ? Math.trunc(this.pan_accum_px_y / tile_h) : 0;
+
+                if (step_x !== 0) {
+                    this.pan_tiles_x += step_x;
+                    this.pan_accum_px_x -= step_x * tile_w;
+                }
+                if (step_y !== 0) {
+                    this.pan_tiles_y += step_y;
+                    this.pan_accum_px_y -= step_y * tile_h;
+                }
+
+                this.pan_dirty = true;
+                this.update_canvas_pan_transform();
+            },
+        });
+    }
+
+    private resolve_pan_target(module: Module | null, typing: boolean): IPanTargetAdapter | null {
+        if (typing) return null;
+        const allow_blank_space_viewport_pan = module === null;
+        const should_try_pan = this.space_down || allow_blank_space_viewport_pan;
+        if (!should_try_pan) return null;
+
+        const router = create_pan_gesture_router<Module>({
+            resolveModuleTarget: (target_module) => this.get_module_pan_target(target_module),
+            resolveViewportTarget: () => this.get_viewport_pan_target(),
+        });
+
+        return router.resolveTarget({
+            module,
+            prefer_module_target: this.space_down,
+            allow_viewport_fallback: this.space_down || allow_blank_space_viewport_pan,
+        });
+    }
+
+    private begin_pan_session(target: IPanTargetAdapter, ev: { clientX: number; clientY: number; pointerId?: number }): void {
+        this.active_pan_target = target;
+        this.active_pan_pointer_id = typeof ev.pointerId === 'number' ? ev.pointerId : 0;
+        this.global_pan_active = target.getKind() === 'viewport';
+        this.last_pan_client_x = ev.clientX;
+        this.last_pan_client_y = ev.clientY;
+        target.beginGesture?.();
+    }
+
+    private try_begin_blank_viewport_pan_session(ev: { clientX: number; clientY: number; pointerId?: number; target?: EventTarget | null; preventDefault?: () => void }): boolean {
+        if (this.active_pan_target) return true;
+        const target_node = ev.target instanceof Node ? ev.target : null;
+        if (target_node && (this.canvas_el.contains(target_node) || this.overlay_canvas_el?.contains(target_node))) return false;
+        const typing = this.focused_owner_wants_text_capture();
+        const pan_target = this.resolve_pan_target(null, typing);
+        if (!pan_target) return false;
+        ev.preventDefault?.();
+        this.begin_pan_session(pan_target, ev);
+        this.capture_owner = null;
+        this.down_owner = null;
+        this.down_tile = null;
+        this.dragging = false;
+        return true;
+    }
+
+    private update_pan_session(ev: { clientX: number; clientY: number; buttons?: number; pointerId?: number }): boolean {
+        if (!this.active_pan_target) return false;
+        const pointer_id = typeof ev.pointerId === 'number' ? ev.pointerId : 0;
+        if (this.active_pan_pointer_id !== null && pointer_id !== this.active_pan_pointer_id) return false;
+        if (((ev.buttons ?? 0) & 1) === 0) return false;
+        const dx = ev.clientX - this.last_pan_client_x;
+        const dy = ev.clientY - this.last_pan_client_y;
+        this.last_pan_client_x = ev.clientX;
+        this.last_pan_client_y = ev.clientY;
+        this.active_pan_target.applyScreenDelta?.(dx, dy);
+        return true;
+    }
+
+    private end_pan_session(): void {
+        if (!this.active_pan_target) return;
+        this.active_pan_target.endGesture?.();
+        this.active_pan_target = null;
+        this.active_pan_pointer_id = null;
+        this.global_pan_active = false;
     }
 
     private get_metrics() {
@@ -875,16 +1000,19 @@ export class CanvasRuntime {
         return { tile_w, tile_h, font_size_px };
     }
 
-    private resize_to_grid(): void {
+    private resize_canvas_element(canvas_el: HTMLCanvasElement | null): void {
+        if (!canvas_el) return;
         const { tile_w, tile_h } = this.get_metrics();
+        canvas_el.width = Math.ceil(tile_w * this.grid_width);
+        canvas_el.height = Math.ceil(tile_h * this.grid_height);
+        canvas_el.style.width = `${canvas_el.width}px`;
+        canvas_el.style.height = `${canvas_el.height}px`;
+    }
 
-        this.canvas_el.width = Math.ceil(tile_w * this.grid_width);
-        this.canvas_el.height = Math.ceil(tile_h * this.grid_height);
-
-        this.canvas_el.style.width = `${this.canvas_el.width}px`;
-        this.canvas_el.style.height = `${this.canvas_el.height}px`;
-
-        this.recenter_or_clamp_pan();
+    private resize_to_grid(): void {
+        this.resize_canvas_element(this.canvas_el);
+        this.resize_canvas_element(this.overlay_canvas_el);
+        this.update_canvas_pan_transform();
     }
 
     private refresh_layout_from_window_event(reason: 'window_resize' | 'window_focus' | 'visibility_visible'): void {
@@ -905,7 +1033,7 @@ export class CanvasRuntime {
         this.resize_to_grid();
     }
 
-    private recenter_or_clamp_pan(): void {
+    private update_canvas_pan_transform(): void {
         const viewport = this.canvas_el.parentElement;
         if (!viewport) return;
 
@@ -933,45 +1061,16 @@ export class CanvasRuntime {
             this.pan_accum_px_y = 0;
         }
 
-        const screen_locked_pan_bounds = this.get_screen_locked_pan_bounds();
-
-        const mx = this.PAN_MARGIN_TILES * tile_w;
-        const my = this.PAN_MARGIN_TILES * tile_h;
-
-        const desired_x = this.base_pan_px_x + this.pan_tiles_x * tile_w;
-        const desired_y = this.base_pan_px_y + this.pan_tiles_y * tile_h;
-
-        const min_x = Math.min(this.base_pan_px_x - mx, vw - cw - mx);
-        const max_x = Math.max(this.base_pan_px_x + mx, 0 + mx);
-        const min_y = Math.min(this.base_pan_px_y - my, vh - ch - my);
-        const max_y = Math.max(this.base_pan_px_y + my, 0 + my);
-
-        const clamped_x = Math.max(min_x, Math.min(max_x, desired_x));
-        const clamped_y = Math.max(min_y, Math.min(max_y, desired_y));
-
-        // Convert clamped px back to tile offsets (keeps tile-locked).
-        this.pan_tiles_x = Math.round((clamped_x - this.base_pan_px_x) / tile_w);
-        this.pan_tiles_y = Math.round((clamped_y - this.base_pan_px_y) / tile_h);
-
-        if (screen_locked_pan_bounds) {
-            const next_pan_x = Math.max(screen_locked_pan_bounds.min_x, Math.min(screen_locked_pan_bounds.max_x, this.pan_tiles_x));
-            const next_pan_y = Math.max(screen_locked_pan_bounds.min_y, Math.min(screen_locked_pan_bounds.max_y, this.pan_tiles_y));
-            if (next_pan_x !== this.pan_tiles_x) {
-                this.pan_accum_px_x = 0;
-                this.pan_tiles_x = next_pan_x;
-            }
-            if (next_pan_y !== this.pan_tiles_y) {
-                this.pan_accum_px_y = 0;
-                this.pan_tiles_y = next_pan_y;
-            }
-        }
-
         const final_x = this.base_pan_px_x + this.pan_tiles_x * tile_w;
         const final_y = this.base_pan_px_y + this.pan_tiles_y * tile_h;
 
-        // Apply CSS transform to move the entire canvas
+        // Apply CSS transform to move the world canvas while screen-locked UI
+        // stays on a separate fixed overlay canvas.
         this.canvas_el.style.transform = `translate(${final_x}px, ${final_y}px)`;
-        this.sync_runtime_pan_to_modules();
+        if (this.overlay_canvas_el) {
+            this.overlay_canvas_el.style.transform = `translate(${this.base_pan_px_x}px, ${this.base_pan_px_y}px)`;
+        }
+        this.sync_screen_locked_viewport_offsets();
 
         // Best-effort notification so the app shell can keep background patterns aligned.
         try {
@@ -993,7 +1092,7 @@ export class CanvasRuntime {
         }
     }
 
-    private draw_canvas(c: Canvas): {
+    private draw_canvas_to_context(c: Canvas, ctx: CanvasRenderingContext2D, canvas_el: HTMLCanvasElement): {
         clear_ms: number;
         scan_ms: number;
         draw_cell_ms: number;
@@ -1004,11 +1103,11 @@ export class CanvasRuntime {
         const { font_size_px, tile_w, tile_h } = this.get_metrics();
         const clear_started_at_ms = performance.now();
 
-        this.ctx.clearRect(0, 0, this.canvas_el.width, this.canvas_el.height);
+        ctx.clearRect(0, 0, canvas_el.width, canvas_el.height);
         const clear_ms = Math.max(0, performance.now() - clear_started_at_ms);
 
-        this.ctx.textAlign = 'center';
-        this.ctx.textBaseline = 'middle';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
 
         const scan_started_at_ms = performance.now();
         let draw_cell_ms = 0;
@@ -1034,7 +1133,7 @@ export class CanvasRuntime {
                 const cy = canvas_y + tile_h / 2;
                 const draw_cell_started_at_ms = performance.now();
                 this.cell_renderer.draw_cell({
-                    ctx: this.ctx,
+                    ctx,
                     cell: original_weight_index === wi ? cell : { ...cell, weight_index: wi },
                     center_x_px: cx,
                     center_y_px: cy,
@@ -1058,9 +1157,42 @@ export class CanvasRuntime {
         };
     }
 
-    private mouse_to_tile(ev: MouseEvent): { x: number; y: number } | null {
+    private draw_canvas(c: Canvas): {
+        clear_ms: number;
+        scan_ms: number;
+        draw_cell_ms: number;
+        cells_scanned: number;
+        non_empty_cells: number;
+        graphic_cells: number;
+    } {
+        return this.draw_canvas_to_context(c, this.ctx, this.canvas_el);
+    }
+
+    private draw_overlay_canvas(c: Canvas): {
+        clear_ms: number;
+        scan_ms: number;
+        draw_cell_ms: number;
+        cells_scanned: number;
+        non_empty_cells: number;
+        graphic_cells: number;
+    } {
+        if (!this.overlay_ctx || !this.overlay_canvas_el) {
+            return {
+                clear_ms: 0,
+                scan_ms: 0,
+                draw_cell_ms: 0,
+                cells_scanned: 0,
+                non_empty_cells: 0,
+                graphic_cells: 0,
+            };
+        }
+        return this.draw_canvas_to_context(c, this.overlay_ctx, this.overlay_canvas_el);
+    }
+
+    private mouse_to_tile_in_canvas(ev: MouseEvent, canvas_el: HTMLCanvasElement | null): { x: number; y: number } | null {
+        if (!canvas_el) return null;
         const { tile_w, tile_h } = this.get_metrics();
-        const rect = this.canvas_el.getBoundingClientRect();
+        const rect = canvas_el.getBoundingClientRect();
         return screen_px_to_grid_cell({
             client_x_px: ev.clientX,
             client_y_px: ev.clientY,
@@ -1071,6 +1203,36 @@ export class CanvasRuntime {
             cell_w_px: tile_w,
             cell_h_px: tile_h,
         });
+    }
+
+    private mouse_to_tile(ev: MouseEvent): { x: number; y: number } | null {
+        return this.mouse_to_tile_in_canvas(ev, this.canvas_el);
+    }
+
+    private mouse_to_screen_locked_tile(ev: MouseEvent): { x: number; y: number } | null {
+        return this.mouse_to_tile_in_canvas(ev, this.overlay_canvas_el);
+    }
+
+    private resolve_pointer_hit(ev: MouseEvent): { tile: { x: number; y: number }; top: Module | null; cell: Cell | undefined } | null {
+        const screen_tile = this.mouse_to_screen_locked_tile(ev);
+        if (screen_tile) {
+            const screen_top = this.route_to_top_module(screen_tile.x, screen_tile.y, 'screen_locked') ?? null;
+            if (screen_top) {
+                return {
+                    tile: screen_tile,
+                    top: screen_top,
+                    cell: this.overlay_engine_canvas.get(screen_tile.x, screen_tile.y),
+                };
+            }
+        }
+
+        const world_tile = this.mouse_to_tile(ev);
+        if (!world_tile) return null;
+        return {
+            tile: world_tile,
+            top: this.route_to_top_module(world_tile.x, world_tile.y, 'world_pannable') ?? null,
+            cell: this.engine_canvas.get(world_tile.x, world_tile.y),
+        };
     }
 
     private dispatch_global_keydown(ev: KeyboardEvent): boolean {
@@ -1529,9 +1691,9 @@ export class CanvasRuntime {
         };
 
         const route_move = (ev: any) => {
-            const t = this.mouse_to_tile(ev);
+            const hit = this.resolve_pointer_hit(ev);
 
-            if (!t) {
+            if (!hit) {
                 if (!this.capture_owner && this.hover_owner?.OnPointerLeave && this.last_tile) {
                     const leave_ev: any = this.make_pointer_event(
                         'leave',
@@ -1548,7 +1710,8 @@ export class CanvasRuntime {
                 return;
             }
 
-            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            const t = hit.tile;
+            const top = hit.top;
 
             const nb = normalize_buttons(ev);
             const base: any = this.make_pointer_event(
@@ -1556,7 +1719,7 @@ export class CanvasRuntime {
                 t.x,
                 t.y,
                 { ...ev, buttons: nb.buttons, button: nb.button },
-                this.engine_canvas.get(t.x, t.y),
+                hit.cell,
             );
             attach_pointer_meta(base, ev);
 
@@ -1570,44 +1733,9 @@ export class CanvasRuntime {
                 }
             }
 
-            // Global pan: Check at top level so it works even with no capture_owner (blank space)
-            if (this.global_pan_active && (nb.buttons & 1)) {
-                const should_global_pan = !this.capture_owner ||
-                    !(this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas') || this.capture_owner.id === 'place');
-
-                if (should_global_pan) {
-                    const dx = ev.clientX - this.last_pan_client_x;
-                    const dy = ev.clientY - this.last_pan_client_y;
-                    this.last_pan_client_x = ev.clientX;
-                    this.last_pan_client_y = ev.clientY;
-
-                    const { tile_w, tile_h } = this.get_metrics();
-                    this.pan_accum_px_x += dx;
-                    this.pan_accum_px_y += dy;
-
-                    const step_x = tile_w > 0 ? Math.trunc(this.pan_accum_px_x / tile_w) : 0;
-                    const step_y = tile_h > 0 ? Math.trunc(this.pan_accum_px_y / tile_h) : 0;
-
-                    if (step_x !== 0) {
-                        this.pan_tiles_x += step_x;
-                        this.pan_accum_px_x -= step_x * tile_w;
-                    }
-                    if (step_y !== 0) {
-                        this.pan_tiles_y += step_y;
-                        this.pan_accum_px_y -= step_y * tile_h;
-                    }
-
-                    this.pan_dirty = true;
-
-                    const canvas_module = this.get_canvas_module();
-                    if (canvas_module && (canvas_module as any).setGlobalPanOffset) {
-                        (canvas_module as any).setGlobalPanOffset(this.pan_tiles_x, -this.pan_tiles_y);
-                    }
-
-                    this.recenter_or_clamp_pan();
-                    this.last_tile = t;
-                    return;
-                }
+            if (this.active_pan_target) {
+                this.last_tile = t;
+                return;
             }
 
             if (this.capture_owner) {
@@ -1648,54 +1776,25 @@ export class CanvasRuntime {
         const route_down = (ev: any) => {
             ev.preventDefault?.();
 
-            const t = this.mouse_to_tile(ev);
-            if (!t) return;
+            const hit = this.resolve_pointer_hit(ev);
+            if (!hit) return;
+            const t = hit.tile;
 
             const nb = normalize_buttons(ev);
             // Mark that we should ignore mouse compatibility events for a moment.
             this.suppress_mouse_until_ms = now_ms() + 500;
 
-            let top = this.route_to_top_module(t.x, t.y) ?? null;
+            let top = hit.top;
 
             const typing = this.focused_owner_wants_text_capture();
-            const is_canvas_module = top?.id === 'painter_canvas' || top?.id?.startsWith('canvas');
-            const is_painter_mode2 = (window as any).electronAPI?.appMode === 'ascii_painter';
-
-            if (is_painter_mode2) {
-                if (!typing && this.space_down) {
-                    if (is_canvas_module) {
-                        this.global_pan_active = false;
-                        const canvas_module = this.get_canvas_module();
-                        if (canvas_module && (canvas_module as any).setGlobalPanOffset) {
-                            (canvas_module as any).setGlobalPanOffset(0, 0);
-                        }
-                    } else if (!top) {
-                        this.global_pan_active = true;
-                    } else {
-                        this.global_pan_active = !top.OnDragMove;
-                    }
-                } else {
-                    this.global_pan_active = false;
-                }
-             } else {
-                 // Game mode: route Space+Drag to modules that handle dragging (e.g. Place view pan).
-                 // Only use global UI pan when dragging blank space, or when the module does not implement drag.
-                 if (!typing && this.space_down) {
-                     if (is_canvas_module || top?.id === 'place') {
-                         this.global_pan_active = false;
-                     } else if (!top) {
-                         this.global_pan_active = true;
-                     } else {
-                         this.global_pan_active = !top.OnDragMove;
-                     }
-                 } else {
-                     this.global_pan_active = (!top && !typing);
-                 }
-             }
-
-            if (this.global_pan_active) {
-                this.last_pan_client_x = ev.clientX;
-                this.last_pan_client_y = ev.clientY;
+            const pan_target = this.resolve_pan_target(top, typing);
+            if (pan_target) {
+                this.begin_pan_session(pan_target, ev);
+                this.capture_owner = null;
+                this.down_owner = null;
+                this.down_tile = null;
+                this.dragging = false;
+                return;
             }
 
             this.down_owner = top;
@@ -1703,14 +1802,26 @@ export class CanvasRuntime {
             this.dragging = false;
             this.capture_owner = top;
 
+            if (top?.BringToFrontOnPointerDown) {
+                try {
+                    this.on_module_pointer_down?.(top);
+                    top = this.route_to_top_module(t.x, t.y) ?? top;
+                    this.down_owner = top;
+                    this.capture_owner = top;
+                } catch {
+                    // ignore
+                }
+            }
+
             if (top?.Focusable) {
                 this.update_focused_owner(top);
             } else if (this.focused_owner?.id === 'painter_canvas') {
                 this.update_focused_owner(null);
             }
 
-            const pe: any = this.make_pointer_event('down', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y));
+            const pe: any = this.make_pointer_event('down', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, hit.cell);
             attach_pointer_meta(pe, ev);
+            pe.target_module_id = top?.id ?? null;
 
             // Global pointer-down lane: lets modules cancel modes (e.g. resize) on outside clicks.
             for (const m of this.modules) {
@@ -1732,8 +1843,14 @@ export class CanvasRuntime {
         };
 
         const route_up = (ev: any) => {
-            const t = this.mouse_to_tile(ev);
+            const hit = this.resolve_pointer_hit(ev);
+            const t = hit?.tile ?? null;
             const nb = normalize_buttons(ev);
+
+            if (this.active_pan_target) {
+                this.end_pan_session();
+                return;
+            }
 
             if (!t) {
                 if (this.dragging && this.on_drag_end_outside) {
@@ -1747,10 +1864,10 @@ export class CanvasRuntime {
                 return;
             }
 
-            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            const top = hit?.top ?? null;
             const target = this.capture_owner ?? top;
 
-            const pe: any = this.make_pointer_event('up', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y));
+            const pe: any = this.make_pointer_event('up', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, hit?.cell);
             attach_pointer_meta(pe, ev);
             if (this.on_pointer_up_global) {
                 try {
@@ -1764,7 +1881,7 @@ export class CanvasRuntime {
             this.global_pan_active = false;
 
             if (this.dragging && top) {
-                const de: any = this.make_drag_event('drag_end', t.x, t.y, nb.buttons, this.engine_canvas.get(t.x, t.y));
+                const de: any = this.make_drag_event('drag_end', t.x, t.y, nb.buttons, hit?.cell);
                 attach_pointer_meta(de, ev);
                 de.pointer_id = typeof ev?.pointerId === 'number' ? ev.pointerId : 0;
                 top.OnDragEnd?.(de);
@@ -1810,51 +1927,92 @@ export class CanvasRuntime {
             this.dragging = false;
         };
 
+        const viewport_el = this.get_viewport_element();
+        viewport_el?.addEventListener('pointerdown', (ev: any) => {
+            if (this.try_begin_blank_viewport_pan_session(ev)) {
+                try { viewport_el.setPointerCapture?.(ev.pointerId); } catch { /* ignore */ }
+            }
+        }, { passive: false } as any);
+        viewport_el?.addEventListener('mousedown', (ev: MouseEvent) => {
+            this.try_begin_blank_viewport_pan_session(ev as any);
+        }, { passive: false });
+
+        window.addEventListener('pointermove', (ev: any) => {
+            if (!this.active_pan_target) return;
+            this.update_pan_session(ev);
+        }, { passive: false } as any);
+        window.addEventListener('pointerup', (ev: any) => {
+            if (!this.active_pan_target) return;
+            this.end_pan_session();
+            try { viewport_el?.releasePointerCapture?.(ev.pointerId); } catch { /* ignore */ }
+        }, { passive: false } as any);
+        window.addEventListener('pointercancel', (ev: any) => {
+            if (!this.active_pan_target) return;
+            this.end_pan_session();
+            try { viewport_el?.releasePointerCapture?.(ev.pointerId); } catch { /* ignore */ }
+        }, { passive: false } as any);
+        window.addEventListener('mousemove', (ev: MouseEvent) => {
+            if (!this.active_pan_target) return;
+            this.update_pan_session(ev as any);
+        }, { passive: false });
+        window.addEventListener('mouseup', () => {
+            if (!this.active_pan_target) return;
+            this.end_pan_session();
+        }, { passive: false });
+
+        const interaction_surfaces = [this.canvas_el, this.overlay_canvas_el].filter((el): el is HTMLCanvasElement => !!el);
+        const add_surface_listener = (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions): void => {
+            for (const surface of interaction_surfaces) {
+                surface.addEventListener(type, listener, options);
+            }
+        };
+
         // Stylus/tablet: route PointerEvents for real pen/touch support.
-        this.canvas_el.addEventListener('pointerdown', (ev: any) => {
+        add_surface_listener('pointerdown', (ev: any) => {
             try { (ev.target as HTMLElement | null)?.setPointerCapture?.(ev.pointerId); } catch { /* ignore */ }
             route_down(ev);
         }, { passive: false } as any);
-        this.canvas_el.addEventListener('pointermove', (ev: any) => {
+        add_surface_listener('pointermove', (ev: any) => {
             route_move(ev);
         }, { passive: false } as any);
-        this.canvas_el.addEventListener('pointerup', (ev: any) => {
+        add_surface_listener('pointerup', (ev: any) => {
             try { (ev.target as HTMLElement | null)?.releasePointerCapture?.(ev.pointerId); } catch { /* ignore */ }
             route_up(ev);
         }, { passive: false } as any);
-        this.canvas_el.addEventListener('pointercancel', (ev: any) => {
+        add_surface_listener('pointercancel', (ev: any) => {
             try { (ev.target as HTMLElement | null)?.releasePointerCapture?.(ev.pointerId); } catch { /* ignore */ }
             route_up({ ...ev, type: 'pointercancel' });
         }, { passive: false } as any);
 
-        this.canvas_el.addEventListener('contextmenu', (ev) => {
+        add_surface_listener('contextmenu', (ev) => {
             ev.preventDefault();
         });
 
         // Some drivers / browsers emit auxclick for middle/right.
         // Route it as a regular click so pen/mouse middle/right clicks are usable.
-        this.canvas_el.addEventListener('auxclick', (ev: any) => {
+        add_surface_listener('auxclick', (ev: any) => {
             if (now_ms() < this.suppress_mouse_until_ms) {
                 if (ev?.button === 0) return;
             }
             ev.preventDefault?.();
 
-            const t = this.mouse_to_tile(ev);
-            if (!t) return;
-            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            const hit = this.resolve_pointer_hit(ev as MouseEvent);
+            if (!hit) return;
+            const t = hit.tile;
+            const top = hit.top;
 
             const nb = { buttons: typeof ev?.buttons === 'number' ? ev.buttons : 0, button: typeof ev?.button === 'number' ? ev.button : 0 };
             top?.OnClick?.(
-                this.make_pointer_event('click', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, this.engine_canvas.get(t.x, t.y), 1),
+                this.make_pointer_event('click', t.x, t.y, { ...ev, buttons: nb.buttons, button: nb.button }, hit.cell, 1),
             );
         }, { passive: false } as any);
 
         // Unlock WebAudio on first user gesture.
-        this.canvas_el.addEventListener('mousedown', () => {
+        add_surface_listener('mousedown', () => {
             unlock_sfx();
         });
 
-        this.canvas_el.addEventListener('mousemove', (ev) => {
+        add_surface_listener('mousemove', (ev: any) => {
             if (now_ms() < this.suppress_mouse_until_ms) {
                 // Allow non-left mouse streams through during suppression. Some tablet drivers
                 // emit real mouse right/middle events for barrel buttons.
@@ -1862,9 +2020,9 @@ export class CanvasRuntime {
                 const has_non_left = (buttons & ~1) !== 0;
                 if (!has_non_left) return;
             }
-            const t = this.mouse_to_tile(ev);
+            const hit = this.resolve_pointer_hit(ev);
 
-            if (!t) {
+            if (!hit) {
                 if (!this.capture_owner && this.hover_owner?.OnPointerLeave && this.last_tile) {
                     this.hover_owner.OnPointerLeave(
                         this.make_pointer_event(
@@ -1881,61 +2039,20 @@ export class CanvasRuntime {
                 return;
             }
 
-            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            const t = hit.tile;
+            const top = hit.top;
 
             const base = this.make_pointer_event(
                 'move',
                 t.x,
                 t.y,
                 ev,
-                this.engine_canvas.get(t.x, t.y),
+                hit.cell,
             );
 
-            // Global pan: Check at top level so it works even with no capture_owner (blank space)
-            // This must come before the capture_owner check
-            if (this.global_pan_active && (ev.buttons & 1)) {
-                // When dragging, use capture_owner to determine if we should pan globally
-                // If no capture_owner (blank space), always pan globally
-                // If capture_owner exists, only pan globally if it's not the canvas module
-                 const should_global_pan = !this.capture_owner || 
-                     !(this.capture_owner.id === 'painter_canvas' || this.capture_owner.id?.startsWith('canvas') || this.capture_owner.id === 'place');
-                
-                if (should_global_pan) {
-                    const dx = ev.clientX - this.last_pan_client_x;
-                    const dy = ev.clientY - this.last_pan_client_y;
-                    this.last_pan_client_x = ev.clientX;
-                    this.last_pan_client_y = ev.clientY;
-
-                    const { tile_w, tile_h } = this.get_metrics();
-                    this.pan_accum_px_x += dx;
-                    this.pan_accum_px_y += dy;
-
-                    const step_x = tile_w > 0 ? Math.trunc(this.pan_accum_px_x / tile_w) : 0;
-                    const step_y = tile_h > 0 ? Math.trunc(this.pan_accum_px_y / tile_h) : 0;
-
-                    if (step_x !== 0) {
-                        this.pan_tiles_x += step_x;
-                        this.pan_accum_px_x -= step_x * tile_w;
-                    }
-                    if (step_y !== 0) {
-                        this.pan_tiles_y += step_y;
-                        this.pan_accum_px_y -= step_y * tile_h;
-                    }
-
-                    this.pan_dirty = true;
-                    console.log('[GLOBAL-PAN] Moving:', JSON.stringify({ capture_owner: this.capture_owner?.id ?? 'null', pan_tiles_x: this.pan_tiles_x, pan_tiles_y: this.pan_tiles_y, step_x, step_y }));
-                    
-                    // Notify canvas module of global pan offset (convert tile offset to grid cells)
-                    const canvas_module = this.get_canvas_module();
-                    if (canvas_module && (canvas_module as any).setGlobalPanOffset) {
-                        (canvas_module as any).setGlobalPanOffset(this.pan_tiles_x, -this.pan_tiles_y); // Y is inverted
-                    }
-                    
-                    this.recenter_or_clamp_pan();
-
-                    this.last_tile = t;
-                    return;
-                }
+            if (this.active_pan_target) {
+                this.last_tile = t;
+                return;
             }
 
             if (this.capture_owner) {
@@ -1973,7 +2090,7 @@ export class CanvasRuntime {
             this.last_tile = t;
         });
 
-        this.canvas_el.addEventListener('mouseleave', (ev) => {
+        add_surface_listener('mouseleave', (ev: any) => {
             if (!this.capture_owner && this.hover_owner && this.last_tile) {
                 this.hover_owner.OnPointerLeave?.(
                     this.make_pointer_event(
@@ -1990,73 +2107,27 @@ export class CanvasRuntime {
             this.last_tile = null;
         });
 
-        this.canvas_el.addEventListener('mousedown', (ev) => {
+        add_surface_listener('mousedown', (ev: any) => {
             if (now_ms() < this.suppress_mouse_until_ms) {
                 // Allow right/middle mouse downs (pen barrel) through.
                 if (ev.button === 0) return;
             }
             ev.preventDefault();
 
-            const t = this.mouse_to_tile(ev);
-            if (!t) return;
+            const hit = this.resolve_pointer_hit(ev);
+            if (!hit) return;
+            const t = hit.tile;
 
-            let top = this.route_to_top_module(t.x, t.y) ?? null;
-            
-            // Global UI pan gesture (GAME MODE ONLY):
-            // - Hold Space + drag anywhere (except while actively typing in input or on canvas module)
-            // - Or drag on background/free space
-            // NOTE: In painter mode, we use camera-based panning via the canvas module instead
+            let top = hit.top;
             const typing = this.focused_owner_wants_text_capture();
-            const is_canvas_module = top?.id === 'painter_canvas' || top?.id?.startsWith('canvas');
-            const is_painter_mode = (window as any).electronAPI?.appMode === 'ascii_painter';
-            
-            if (is_painter_mode) {
-                // Painter mode: Smart panning routing
-                // - On canvas module: Camera pan (routes to canvas)
-                // - On blank space: Global UI pan (move entire mono_canvas)
-                // - On other modules: If module has OnDragMove, it handles it; otherwise global pan
-                if (!typing && this.space_down) {
-                    if (is_canvas_module) {
-                        // On canvas: Route to canvas module for camera pan
-                        this.global_pan_active = false;
-                        console.log('[PAN-ROUTING] Canvas module: camera pan (global_pan_active=false)');
-                        // Reset global pan offset on canvas module
-                        const canvas_module = this.get_canvas_module();
-                        if (canvas_module && (canvas_module as any).setGlobalPanOffset) {
-                            (canvas_module as any).setGlobalPanOffset(0, 0);
-                        }
-                    } else if (!top) {
-                        // On blank space: Enable global UI pan
-                        this.global_pan_active = true;
-                        console.log('[PAN-ROUTING] Blank space: global UI pan (global_pan_active=true)');
-                    } else {
-                        // On other module: Check if it has OnDragMove
-                        // If yes, let module handle it; if no, use global pan
-                        this.global_pan_active = !top.OnDragMove;
-                        console.log(`[PAN-ROUTING] Module ${top.id}: ${top.OnDragMove ? 'module handles pan' : 'global UI pan'} (global_pan_active=${this.global_pan_active})`);
-                    }
-                } else {
-                    this.global_pan_active = false;
-                }
-             } else {
-                 // Game mode: route Space+Drag to modules that handle dragging (e.g. Place view pan).
-                 // Only use global UI pan when dragging blank space, or when the module does not implement drag.
-                 if (!typing && this.space_down) {
-                     if (is_canvas_module || top?.id === 'place') {
-                         this.global_pan_active = false;
-                     } else if (!top) {
-                         this.global_pan_active = true;
-                     } else {
-                         this.global_pan_active = !top.OnDragMove;
-                     }
-                 } else {
-                     this.global_pan_active = (!top && !typing);
-                 }
-             }
-            
-            if (this.global_pan_active) {
-                this.last_pan_client_x = ev.clientX;
-                this.last_pan_client_y = ev.clientY;
+            const pan_target = this.resolve_pan_target(top, typing);
+            if (pan_target) {
+                this.begin_pan_session(pan_target, ev);
+                this.capture_owner = null;
+                this.down_owner = null;
+                this.down_tile = null;
+                this.dragging = false;
+                return;
             }
 
             this.down_owner = top;
@@ -2069,16 +2140,17 @@ export class CanvasRuntime {
                 this.update_focused_owner(null);
             }
             top?.OnPointerDown?.(
-                this.make_pointer_event('down', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y)),
+                this.make_pointer_event('down', t.x, t.y, ev, hit.cell),
             );
             this.sync_text_input_focus_for_owner();
         });
 
-        this.canvas_el.addEventListener('wheel', (ev) => {
+        add_surface_listener('wheel', (ev: any) => {
             ev.preventDefault();
 
-            const t = this.mouse_to_tile(ev as any);
-            if (!t) return;
+            const hit = this.resolve_pointer_hit(ev as any);
+            if (!hit) return;
+            const t = hit.tile;
 
             this.wheel_accum_dx += ev.deltaX;
             this.wheel_accum_dy += ev.deltaY;
@@ -2090,25 +2162,31 @@ export class CanvasRuntime {
             };
         }, { passive: false });
 
-        this.canvas_el.addEventListener('contextmenu', (ev) => {
+        add_surface_listener('contextmenu', (ev: any) => {
             ev.preventDefault();
 
-            const t = this.mouse_to_tile(ev);
-            if (!t) return;
+            const hit = this.resolve_pointer_hit(ev);
+            if (!hit) return;
+            const t = hit.tile;
 
-            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            const top = hit.top;
             if (top) {
                 top.OnContextMenu?.(
-                    this.make_pointer_event('click', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y), 1),
+                    this.make_pointer_event('click', t.x, t.y, ev, hit.cell, 1),
                 );
             }
         });
 
-        this.canvas_el.addEventListener('mouseup', (ev) => {
+        add_surface_listener('mouseup', (ev: any) => {
             if (now_ms() < this.suppress_mouse_until_ms) {
                 if (ev.button === 0) return;
             }
-            const t = this.mouse_to_tile(ev);
+            if (this.active_pan_target) {
+                this.end_pan_session();
+                return;
+            }
+            const hit = this.resolve_pointer_hit(ev);
+            const t = hit?.tile ?? null;
             if (!t) {
                 // Drag ended outside canvas - notify for rejection feedback
                 if (this.dragging && this.on_drag_end_outside) {
@@ -2122,11 +2200,11 @@ export class CanvasRuntime {
                 return;
             }
 
-            const top = this.route_to_top_module(t.x, t.y) ?? null;
+            const top = hit?.top ?? null;
             const target = this.capture_owner ?? top;
 
             target?.OnPointerUp?.(
-                this.make_pointer_event('up', t.x, t.y, ev, this.engine_canvas.get(t.x, t.y)),
+                this.make_pointer_event('up', t.x, t.y, ev, hit?.cell),
             );
 
             this.global_pan_active = false;
@@ -2135,7 +2213,7 @@ export class CanvasRuntime {
             // This enables drag-and-drop between modules (e.g., CharacterModule to ContainerModule)
             if (this.dragging && top) {
                 top.OnDragEnd?.(
-                    this.make_drag_event('drag_end', t.x, t.y, ev.buttons, this.engine_canvas.get(t.x, t.y)),
+                    this.make_drag_event('drag_end', t.x, t.y, ev.buttons, hit?.cell),
                 );
             } else if (this.dragging && !top && this.on_drag_end_outside) {
                 // Drag ended outside any module - notify for rejection feedback
@@ -2183,7 +2261,7 @@ export class CanvasRuntime {
         });
 
         this.key_sink.addEventListener('beforeinput', (ev: InputEvent) => {
-            if (!this.focused_owner?.OnTextInput) return;
+            if (!this.focused_owner?.OnTextInput || !this.focused_owner_wants_text_capture()) return;
 
             ev.preventDefault();
             const data = (ev as any).data;
@@ -2193,7 +2271,7 @@ export class CanvasRuntime {
             }
         });
         this.key_sink.addEventListener('paste', (ev: ClipboardEvent) => {
-            if (!this.focused_owner?.OnTextInput) return;
+            if (!this.focused_owner?.OnTextInput || !this.focused_owner_wants_text_capture()) return;
 
             ev.preventDefault();
             const text = ev.clipboardData?.getData('text/plain') ?? '';
@@ -2237,7 +2315,12 @@ export class CanvasRuntime {
         }
 
         const compose_started_at_ms = performance.now();
-        compose_modules(this.engine_canvas, this.modules, (module, duration_ms) => {
+        compose_modules(this.engine_canvas, this.get_world_pannable_modules(), (module, duration_ms) => {
+            const module_id = String(module?.id ?? 'unknown');
+            module_draws.push({ module_id, draw_ms: duration_ms });
+            this.record_frame_perf_module(module_id, duration_ms);
+        });
+        compose_modules(this.overlay_engine_canvas, this.get_screen_locked_modules(), (module, duration_ms) => {
             const module_id = String(module?.id ?? 'unknown');
             module_draws.push({ module_id, draw_ms: duration_ms });
             this.record_frame_perf_module(module_id, duration_ms);
@@ -2270,6 +2353,7 @@ export class CanvasRuntime {
 
         const draw_canvas_started_at_ms = performance.now();
         const draw_canvas_stats = this.draw_canvas(this.engine_canvas);
+        this.draw_overlay_canvas(this.overlay_engine_canvas);
         const draw_canvas_ms = Math.max(0, performance.now() - draw_canvas_started_at_ms);
         const tick_total_js_ms = Math.max(0, performance.now() - frame_started_at_ms);
         this.frame_perf_previous_tick_end_ms = performance.now();

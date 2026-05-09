@@ -26,7 +26,7 @@ import { ensure_actor_exists, ensure_actor_has_spawn_location, find_actors, load
 import { create_npc_from_kind, find_npcs, save_npc } from "../npc_storage/store.js";
 import { find_kind, load_kind_definitions } from "../kind_storage/store.js";
 import { advance_timed_event_world_breaths, can_actor_afford_action_cost, can_actor_afford_movement_cost, consume_actor_action_cost, consume_actor_movement_cost, end_timed_event, get_active_actor_ref, get_timed_event_phase, get_timed_event_state, get_timed_event_world_breath_index, get_world_sim_interstitial_breaths_remaining, get_world_sim_interstitial_total_breaths, get_region_by_coords, is_timed_event_active, is_timed_event_world_sim_interstitial, load_region, perform_move_action_refresh, save_region } from "../world_storage/store.js";
-import { advance_active_timed_event_turn, finalize_timed_event_turn_if_exhausted, finalize_world_sim_interstitial_round, start_canonical_timed_event } from "../timed_events/runtime.js";
+import { advance_active_timed_event_turn, finalize_timed_event_turn_if_exhausted, finalize_world_sim_interstitial_round, should_suppress_entity_ambient_breath, start_canonical_timed_event } from "../timed_events/runtime.js";
 import { travel_between_places } from "../travel/movement.js";
 import { load_npc } from "../npc_storage/store.js";
 import { load_place, list_all_places, list_places_in_region, save_place, create_basic_place, compute_connected_place_bounds, region_bounds_conflict, create_place_connector_record, delete_place } from "../place_storage/store.js";
@@ -167,6 +167,9 @@ type MovementPulseOptions = {
     skip_brain?: boolean;
     skip_thinking?: boolean;
     skip_legality_refresh?: boolean;
+    skip_gravity?: boolean;
+    skip_reactive_tags?: boolean;
+    suppress_timed_event_participants?: boolean;
 };
 
 const ACTIVE_PLACE_TIMEOUT_MS = 10_000;
@@ -185,6 +188,10 @@ const MOVE_PHYSICS_DIAGNOSTICS_SAMPLE_LIMIT = 12;
 function log_move_physics_diag(message: string, data: Record<string, unknown>): void {
     if (!MOVE_PHYSICS_DIAGNOSTICS_ENABLED && !diagnostic_enabled('physics', 'trace')) return;
     diag_log('physics', 'trace', 'MOVE_PHYSICS_DIAG', message, data);
+}
+
+function timed_event_diag(verbosity: 'important' | 'verbose' | 'trace', tag: string, message: string, payload?: Record<string, unknown>): void {
+    diag_log('timed_event', verbosity, tag, message, payload);
 }
 const WALK_MOVE_BUDGET_CAP = 2;
 const WALK_MOVE_SPEND_CAP_PER_BREATH = 2;
@@ -798,7 +805,7 @@ function try_start_queued_non_movement_action(state: PlaceBreathState, ctl: Enti
     const timed_action_gate = get_timed_event_action_gate(state.slot, ctl.entity_ref, action_cost);
     if (timed_action_gate.active && !timed_action_gate.allowed) {
         if (place_bi % 10 === 0) {
-            debug_log('TIMED_EVENT_ACTION', 'queued non-movement action waiting for legal start', {
+            timed_event_diag('trace', 'ACTION', 'queued non-movement action waiting for legal start', {
                 entity_ref: ctl.entity_ref,
                 place_id: state.place_id,
                 breath_index: place_bi,
@@ -1740,7 +1747,7 @@ function get_timed_event_movement_gate(slot: number, entity_ref: string): {
     if (!is_timed_event_active(slot)) return { active: false, allowed: true };
     const active_actor_ref = get_active_actor_ref(slot);
     if (is_timed_event_world_sim_interstitial(slot)) {
-        debug_log('TIMED_EVENT_MOVE', 'movement gate blocked during interstitial', {
+        timed_event_diag('verbose', 'POLICY', 'movement gate blocked during interstitial', {
             slot,
             entity_ref,
             active_actor_ref,
@@ -1751,7 +1758,7 @@ function get_timed_event_movement_gate(slot: number, entity_ref: string): {
         return { active: true, allowed: false, reason: 'not_your_turn' };
     }
     if (!active_actor_ref) {
-        debug_log('TIMED_EVENT_MOVE', 'movement gate blocked without active actor', {
+        timed_event_diag('verbose', 'POLICY', 'movement gate blocked without active actor', {
             slot,
             entity_ref,
             reason: 'not_your_turn',
@@ -1761,7 +1768,7 @@ function get_timed_event_movement_gate(slot: number, entity_ref: string): {
         return { active: true, allowed: false, reason: 'not_your_turn' };
     }
     if (active_actor_ref && active_actor_ref !== entity_ref) {
-        debug_log('TIMED_EVENT_MOVE', 'movement gate blocked for inactive actor', {
+        timed_event_diag('verbose', 'POLICY', 'movement gate blocked for inactive actor', {
             slot,
             entity_ref,
             active_actor_ref,
@@ -1772,7 +1779,7 @@ function get_timed_event_movement_gate(slot: number, entity_ref: string): {
         return { active: true, allowed: false, reason: 'not_your_turn' };
     }
     if (!can_actor_afford_movement_cost(slot, entity_ref, 1)) {
-        debug_log('TIMED_EVENT_MOVE', 'movement gate blocked by depleted movement', {
+        timed_event_diag('verbose', 'POLICY', 'movement gate blocked by depleted movement', {
             slot,
             entity_ref,
             active_actor_ref,
@@ -1972,6 +1979,11 @@ function build_place_contents_for_legality(slot: number, place_id: string, place
     }
 }
 
+function should_skip_entity_ambient_breath(slot: number, entity_ref: string, options?: MovementPulseOptions): boolean {
+    if (options?.suppress_timed_event_participants !== true) return false;
+    return should_suppress_entity_ambient_breath(slot, entity_ref);
+}
+
 function apply_movement_action_phase_one_breath(state: PlaceBreathState, options?: MovementPulseOptions): void {
     const place_any: any = state.place_base;
     if (!place_any) return;
@@ -2064,7 +2076,7 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
                 runtime.velocity.vy = 0;
                 runtime.transient_selection = null;
                 if (place_bi % 10 === 0) {
-                    debug_log('TIMED_EVENT', 'movement control suppressed', {
+                    timed_event_diag('trace', 'MOVE', 'movement control suppressed', {
                         entity_ref,
                         place_id: state.place_id,
                         breath_index: place_bi,
@@ -2146,7 +2158,7 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
                     set_next_input_breath(runtime, 'walk', place_bi, walk_breaths_per_step, `move.walk.${String(ctl.mode).toLowerCase()}`);
                 }
                 if (timed_movement_gate.active && moves_applied > 0) {
-                    debug_log('TIMED_EVENT_MOVE', 'timed-event movement effort applied before physics resolution', {
+                    timed_event_diag('trace', 'MOVE', 'timed-event movement effort applied before physics resolution', {
                         entity_ref,
                         place_id: state.place_id,
                         breath_index: place_bi,
@@ -2165,7 +2177,7 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
                             moves_applied,
                         });
                     }
-                    debug_log('TIMED_EVENT', 'timed movement control cadence applied', {
+                    timed_event_diag('trace', 'MOVE', 'timed movement control cadence applied', {
                         entity_ref,
                         place_id: state.place_id,
                         breath_index: place_bi,
@@ -2184,7 +2196,7 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
                             error: finalize_result.error,
                         });
                     } else if (finalize_result.ok && finalize_result.exhausted) {
-                        debug_log('TIMED_EVENT', 'marked turn done after exhausting actions and movement', {
+                        timed_event_diag('important', 'TURN', 'marked turn done after exhausting actions and movement', {
                             entity_ref,
                             place_id: state.place_id,
                             breath_index: place_bi,
@@ -2236,12 +2248,12 @@ function apply_movement_action_phase_one_breath(state: PlaceBreathState, options
     for (const a of actors) {
         const ref = String(a?.actor_ref ?? '');
         if (entity_filter_ref && ref !== entity_filter_ref) continue;
-        if (ref) touch_entity(ref);
+        if (ref && !should_skip_entity_ambient_breath(state.slot, ref, options)) touch_entity(ref);
     }
     for (const n of npcs) {
         const ref = String(n?.npc_ref ?? '');
         if (entity_filter_ref && ref !== entity_filter_ref) continue;
-        if (ref) touch_entity(ref);
+        if (ref && !should_skip_entity_ambient_breath(state.slot, ref, options)) touch_entity(ref);
     }
 }
 
@@ -2302,7 +2314,7 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
 
             if (!skip_brain && (state.breath_index % BRAIN_EVERY_BREATHS) === 0) {
                 const started_ms = Date.now();
-                const brain_subprofile = apply_server_brain_one_breath(state);
+                const brain_subprofile = apply_server_brain_one_breath(state, options);
                 brain_duration_ms += Math.max(0, Date.now() - started_ms);
                 brain_profile.contents_ms += brain_subprofile.contents_ms;
                 brain_profile.npc_loop_ms += brain_subprofile.npc_loop_ms;
@@ -2315,7 +2327,7 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
             }
             if (!skip_thinking && (state.breath_index % THINK_EVERY_BREATHS) === 0) {
                 const started_ms = Date.now();
-                const think_subprofile = apply_server_thinking_one_breath(state);
+                const think_subprofile = apply_server_thinking_one_breath(state, options);
                 think_duration_ms += Math.max(0, Date.now() - started_ms);
                 thinking_profile.contents_ms += think_subprofile.contents_ms;
                 thinking_profile.controller_loop_ms += think_subprofile.controller_loop_ms;
@@ -2345,10 +2357,12 @@ function run_place_breaths(state: PlaceBreathState, ticks_to_run: number, now: n
             movement_profile.pushable_ms += physics_profile.pushable_ms;
             movement_profile.persist_ms += physics_profile.persist_ms;
             const gravity_started_ms = Date.now();
-            const ground_profile = apply_gravity_to_place_ground(state);
-            const tiles_profile = apply_gravity_to_place_tiles(state);
-            apply_place_breath_reactive_tags(state);
-            apply_entity_owned_item_breath_reactive_tags(state);
+            const ground_profile = options?.skip_gravity === true ? make_empty_gravity_breath_profile() : apply_gravity_to_place_ground(state);
+            const tiles_profile = options?.skip_gravity === true ? make_empty_gravity_breath_profile() : apply_gravity_to_place_tiles(state);
+            if (options?.skip_reactive_tags !== true) {
+                apply_place_breath_reactive_tags(state);
+                apply_entity_owned_item_breath_reactive_tags(state);
+            }
             gravity_duration_ms += Math.max(0, Date.now() - gravity_started_ms);
             gravity_profile.ground_total_ms += ground_profile.ground_total_ms;
             gravity_profile.ground_entries += ground_profile.ground_entries;
@@ -4391,7 +4405,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
                 reasons,
                 attempts: failed_attempts.length,
             });
-            debug_log('TIMED_EVENT_MOVE', 'timed-event physics resolved with no net movement', {
+            timed_event_diag('trace', 'MOVE', 'timed-event physics resolved with no net movement', {
                 entity_ref,
                 place_id: state.place_id,
                 breath_index: place_bi,
@@ -4668,7 +4682,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
             perception_finished_at_ms: Number(perception_timing?.perception_finished_at_ms ?? 0) || null,
             perception_total_ms: perception_timing ? Math.max(0, perception_timing.perception_finished_at_ms - perception_timing.perception_started_at_ms) : null,
         });
-        debug_log('TIMED_EVENT_MOVE', 'timed-event physics resolved net movement', {
+        timed_event_diag('trace', 'MOVE', 'timed-event physics resolved net movement', {
             entity_ref,
             place_id: state.place_id,
             breath_index: place_bi,
@@ -4684,13 +4698,13 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
     for (const a of actors) {
         const ref = String(a?.actor_ref ?? "");
         if (entity_filter_ref && ref !== entity_filter_ref) continue;
-        if (!ref) continue;
+        if (!ref || should_skip_entity_ambient_breath(state.slot, ref, options)) continue;
         step_entity(ref, 'actor', a);
     }
     for (const n of npcs) {
         const ref = String(n?.npc_ref ?? "");
         if (entity_filter_ref && ref !== entity_filter_ref) continue;
-        if (!ref) continue;
+        if (!ref || should_skip_entity_ambient_breath(state.slot, ref, options)) continue;
         step_entity(ref, 'npc', n);
     }
     for (const pending of pending_connector_transitions) {
@@ -4739,7 +4753,7 @@ function apply_server_movement_one_breath(state: PlaceBreathState, movement_upda
     return profile;
 }
 
-function apply_server_thinking_one_breath(state: PlaceBreathState): ThinkingBreathProfile {
+function apply_server_thinking_one_breath(state: PlaceBreathState, options?: MovementPulseOptions): ThinkingBreathProfile {
     const profile = make_empty_thinking_breath_profile();
     const place_any: any = state.place_base;
     if (!place_any) return profile;
@@ -4755,6 +4769,7 @@ function apply_server_thinking_one_breath(state: PlaceBreathState): ThinkingBrea
     for (const [k, ctl0] of move_ctl) {
         if (ctl0.slot !== state.slot) continue;
         if (ctl0.place_id !== state.place_id) continue;
+        if (should_skip_entity_ambient_breath(state.slot, ctl0.entity_ref, options)) continue;
         profile.controllers_considered += 1;
 
         const intent_active = !!get_controller_active_intent(ctl0);
@@ -4784,7 +4799,7 @@ function apply_server_thinking_one_breath(state: PlaceBreathState): ThinkingBrea
     return profile;
 }
 
-function apply_server_brain_one_breath(state: PlaceBreathState): BrainBreathProfile {
+function apply_server_brain_one_breath(state: PlaceBreathState, options?: MovementPulseOptions): BrainBreathProfile {
     const profile = make_empty_brain_breath_profile();
     const place_any: any = state.place_base;
     if (!place_any) return profile;
@@ -4804,7 +4819,7 @@ function apply_server_brain_one_breath(state: PlaceBreathState): BrainBreathProf
     const npc_loop_started_ms = Date.now();
     for (const n of npcs) {
         const npc_ref = String(n?.npc_ref ?? "");
-        if (!npc_ref) continue;
+        if (!npc_ref || should_skip_entity_ambient_breath(state.slot, npc_ref, options)) continue;
         profile.npcs_considered += 1;
 
         // Don't wander if NPC is in conversation.
@@ -6127,7 +6142,7 @@ function handoff_slot_from_timed_event_to_free_roam(slot: number, now: number): 
         }
     }
 
-    debug_log('TIMED_EVENT_BREATH', 'handed slot back to free-roam scheduler', {
+    timed_event_diag('important', 'BREATH', 'handed slot back to free-roam scheduler', {
         slot,
         resumed_places: Array.from(place_breath.values())
             .filter((state) => state.slot === slot)
@@ -8611,6 +8626,39 @@ function apply_gravity_to_place_characters(state: PlaceBreathState): void {
     }
 }
 
+function run_timed_event_initiative_turn_if_needed(
+    slot: number,
+    now: number,
+    movement_updates: any[],
+): void {
+    if (!is_timed_event_active(slot)) return;
+    if (get_timed_event_phase(slot) !== 'initiative_turn') return;
+
+    const active_actor_ref = get_active_actor_ref(slot);
+    if (!active_actor_ref) return;
+    const active_any = get_entity_any_cached_or_load(slot, active_actor_ref);
+    const active_place_id = String(active_any?.location?.place_id ?? '');
+    if (!active_place_id) return;
+
+    const touched = touch_place_breath_by_id(slot, active_place_id);
+    if (!touched.ok) return;
+    const active_state = place_breath.get(place_breath_key(slot, active_place_id));
+    if (!active_state) return;
+
+    active_state.last_seen_ms = now;
+    active_state.last_tick_ms = now;
+    run_place_breaths(active_state, 1, now, movement_updates, 'timed_event_initiative_turn_routed', {
+        entity_filter_ref: active_actor_ref,
+        skip_brain: true,
+        skip_thinking: true,
+        skip_gravity: true,
+        skip_reactive_tags: true,
+    });
+    if (active_state.place_dirty) {
+        persist_place_breath_if_needed(active_state);
+    }
+}
+
 function run_timed_event_world_sim_interstitial_if_needed(
     slot: number,
     now: number,
@@ -8625,7 +8673,7 @@ function run_timed_event_world_sim_interstitial_if_needed(
             debug_warn('TIMED_EVENT_BREATH', 'failed to finalize empty world sim interstitial', { slot, error: finalized.error });
             return;
         }
-        debug_log('TIMED_EVENT_BREATH', 'world sim interstitial complete', {
+        timed_event_diag('important', 'BREATH', 'world sim interstitial complete', {
             slot,
             applied_breaths: 0,
             world_breath_index: get_timed_event_world_breath_index(slot),
@@ -8643,7 +8691,7 @@ function run_timed_event_world_sim_interstitial_if_needed(
             debug_warn('TIMED_EVENT_BREATH', 'failed to advance empty world sim interstitial', { slot, error: advanced.error });
             return;
         }
-        debug_log('TIMED_EVENT_BREATH', 'world sim interstitial advanced without loaded places', {
+        timed_event_diag('verbose', 'BREATH', 'world sim interstitial advanced without loaded places', {
             slot,
             applied_breaths: 1,
             world_breath_index: advanced.world_breath_index,
@@ -8657,7 +8705,7 @@ function run_timed_event_world_sim_interstitial_if_needed(
             debug_warn('TIMED_EVENT_BREATH', 'failed to finalize world sim interstitial without active places', { slot, error: finalized.error });
             return;
         }
-        debug_log('TIMED_EVENT_BREATH', 'world sim interstitial complete without loaded places', {
+        timed_event_diag('important', 'BREATH', 'world sim interstitial complete without loaded places', {
             slot,
             applied_breaths: 1,
             world_breath_index: advanced.world_breath_index,
@@ -8668,7 +8716,7 @@ function run_timed_event_world_sim_interstitial_if_needed(
         return;
     }
 
-    debug_log('TIMED_EVENT_BREATH', 'running world sim interstitial breath', {
+    timed_event_diag('trace', 'BREATH', 'running world sim interstitial breath', {
         slot,
         place_count: interstitial_states.length,
         remaining_interstitial_breaths: interstitial_remaining,
@@ -8679,13 +8727,15 @@ function run_timed_event_world_sim_interstitial_if_needed(
         state.last_seen_ms = now;
         state.last_tick_ms = now;
         const before_breath = state.breath_index;
-        const ticks = run_place_breaths(state, 1, now, movement_updates, 'timed_event_world_sim');
+        const ticks = run_place_breaths(state, 1, now, movement_updates, 'timed_event_world_sim', {
+            suppress_timed_event_participants: true,
+        });
         breath_ticks.push(...ticks);
         applied_any = applied_any || ticks.length > 0;
         if (state.place_dirty) {
             persist_place_breath_if_needed(state);
         }
-        debug_log('TIMED_EVENT_BREATH', 'applied world interstitial breath to place', {
+        timed_event_diag('trace', 'BREATH', 'applied world interstitial breath to place', {
             slot,
             place_id: state.place_id,
             before_breath,
@@ -8700,7 +8750,7 @@ function run_timed_event_world_sim_interstitial_if_needed(
         return;
     }
 
-    debug_log('TIMED_EVENT_BREATH', 'world sim interstitial breath complete', {
+    timed_event_diag('verbose', 'BREATH', 'world sim interstitial breath complete', {
         slot,
         applied_breaths: applied_any ? 1 : 0,
         world_breath_index: advanced.world_breath_index,
@@ -8715,7 +8765,7 @@ function run_timed_event_world_sim_interstitial_if_needed(
         return;
     }
 
-    debug_log('TIMED_EVENT_BREATH', 'world sim interstitial complete', {
+    timed_event_diag('important', 'BREATH', 'world sim interstitial complete', {
         slot,
         applied_breaths: applied_any ? 1 : 0,
         world_breath_index: advanced.world_breath_index,
@@ -8760,7 +8810,7 @@ function emit_timed_event_breath_state_if_needed(slot: number, now: number): voi
     if (!changed) return;
     last_timed_event_breath_state_key = comparison_key;
     void emitBridgeMessage('TIMED_EVENT_BREATH_STATE', payload);
-    debug_log('TIMED_EVENT_BREATH', 'emitted timed event breath state', payload);
+    timed_event_diag('trace', 'STATE', 'emitted timed event breath state', payload);
 }
 
 setInterval(() => {
@@ -8784,31 +8834,19 @@ setInterval(() => {
             if (is_timed_event_active(state.slot)) {
                 const timed_event_phase = get_timed_event_phase(state.slot);
                 const active_actor_ref = get_active_actor_ref(state.slot);
-                const active_any = active_actor_ref ? get_entity_any_cached_or_load(state.slot, active_actor_ref) : null;
-                const active_place_id = String(active_any?.location?.place_id ?? '');
-                const is_active_turn_place = timed_event_phase === 'initiative_turn'
-                    && !!active_actor_ref
-                    && active_place_id.length > 0
-                    && state.place_id === active_place_id;
                 if (state.realtime_visible && breath_interval_sample_count % 30 === 0) {
-                    debug_log('TIMED_EVENT_BREATH', is_active_turn_place
-                        ? 'running canonical place breaths for active turn place'
-                        : 'suppressing normal place breaths during timed event', {
+                    timed_event_diag('trace', 'BREATH', 'suppressing normal place breaths during timed event interval', {
                         slot: state.slot,
                         place_id: state.place_id,
                         timed_event_phase,
                         place_breath_index: state.breath_index,
                         world_breath_index: get_timed_event_world_breath_index(state.slot),
-                        is_active_turn_place,
                         active_actor_ref,
                     });
                 }
-                if (!is_active_turn_place) {
-                    state.last_tick_ms = now;
-                    state.sim_accum_ms = 0;
-                    continue;
-                }
-                timed_event_cause = state.realtime_visible ? 'timed_event_initiative_turn_visible' : 'timed_event_initiative_turn';
+                state.last_tick_ms = now;
+                state.sim_accum_ms = 0;
+                continue;
             }
 
             // Fixed-step simulation with catch-up.
@@ -8897,6 +8935,7 @@ setInterval(() => {
         }
     }
 
+    run_timed_event_initiative_turn_if_needed(data_slot_number, now, movement_updates);
     run_timed_event_world_sim_interstitial_if_needed(data_slot_number, now, breath_ticks, movement_updates);
     emit_timed_event_breath_state_if_needed(data_slot_number, now);
 
@@ -12632,7 +12671,7 @@ function start_http_server(log_path: string): void {
                 const movement_gate = get_timed_event_movement_gate(slot, entity_ref);
                 const is_release = dx === 0 && dy === 0;
                 if (!is_release && movement_gate.active && !movement_gate.allowed) {
-                    debug_log('TIMED_EVENT_MOVE', 'movement intent blocked by gate', {
+                    timed_event_diag('verbose', 'POLICY', 'movement intent blocked by gate', {
                         slot,
                         entity_ref,
                         place_id,
@@ -12650,7 +12689,7 @@ function start_http_server(log_path: string): void {
                     return;
                 }
                 if (is_release && movement_gate.active && !movement_gate.allowed) {
-                    debug_log('TIMED_EVENT_MOVE', 'movement release allowed despite gate block', {
+                    timed_event_diag('trace', 'POLICY', 'movement release allowed despite gate block', {
                         slot,
                         entity_ref,
                         place_id,
@@ -12785,7 +12824,7 @@ function start_http_server(log_path: string): void {
                 // Intent updates only mutate controller/input state.
                 // Authoritative movement advancement must come from the canonical breath scheduler.
 
-                debug_log('TIMED_EVENT_MOVE', 'movement intent accepted', {
+                timed_event_diag('verbose', 'MOVE', 'movement intent accepted', {
                     slot,
                     entity_ref,
                     place_id,
@@ -12892,7 +12931,7 @@ function start_http_server(log_path: string): void {
 
                 const movement_gate = get_timed_event_movement_gate(slot, entity_ref);
                 if (movement_gate.active && !movement_gate.allowed) {
-                    debug_log('TIMED_EVENT_MOVE', 'move_to blocked by gate', {
+                    timed_event_diag('verbose', 'POLICY', 'move_to blocked by gate', {
                         slot,
                         entity_ref,
                         place_id,
@@ -13070,7 +13109,7 @@ function start_http_server(log_path: string): void {
                     active_goal: ctl.goal,
                     mode,
                 });
-                debug_log('TIMED_EVENT_MOVE', 'move_to accepted', {
+                timed_event_diag('verbose', 'MOVE', 'move_to accepted', {
                     slot,
                     entity_ref,
                     place_id,
