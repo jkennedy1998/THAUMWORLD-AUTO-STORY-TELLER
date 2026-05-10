@@ -33,6 +33,15 @@ const UI_ROLE_DEFAULTS: Record<UiSemanticColorRole, ColorName> = {
 
 let current_ui_customization: UiCustomizationState = build_default_ui_customization();
 
+function emit_ui_customization_changed(state: UiCustomizationState): void {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function' || typeof CustomEvent === 'undefined') return;
+  try {
+    window.dispatchEvent(new CustomEvent('thaumworld_ui_customization_changed', { detail: { state: get_ui_customization_state() } }));
+  } catch {
+    // ignore non-browser/event dispatch failures
+  }
+}
+
 function clone_rgb(rgb: Rgb): Rgb {
   return { r: rgb.r, g: rgb.g, b: rgb.b };
 }
@@ -91,7 +100,9 @@ export function get_ui_semantic_rgb(role: UiSemanticColorRole): Rgb {
 
 export function set_ui_customization_state(next: UiCustomizationState): UiCustomizationState {
   current_ui_customization = sanitize_ui_customization_file(next, build_default_ui_customization());
-  return get_ui_customization_state();
+  const sanitized = get_ui_customization_state();
+  emit_ui_customization_changed(sanitized);
+  return sanitized;
 }
 
 export function set_ui_customization_role_color(role: UiSemanticColorRole, rgb: Rgb): UiCustomizationState {
@@ -103,17 +114,28 @@ export function set_ui_customization_role_color(role: UiSemanticColorRole, rgb: 
 export async function load_ui_customization_state(slot: number, opts?: { vivid_seed_rgb?: Rgb | null; profile_scope?: ProfileScope | null }): Promise<UiCustomizationState> {
   const defaults = build_default_ui_customization(opts);
   const scoped_response = opts?.profile_scope ? await read_slot_json_file<UiCustomizationFile>(slot, opts.profile_scope.files.ui_customization) : null;
-  const response = scoped_response?.data ? scoped_response : await read_slot_json_file<UiCustomizationFile>(slot, UI_CUSTOMIZATION_FILE_NAME);
+  const legacy_profile_response = !scoped_response?.data && opts?.profile_scope
+    ? await read_slot_json_file<UiCustomizationFile>(slot, opts.profile_scope.legacy_profile_files.ui_customization)
+    : null;
+  const response = scoped_response?.data
+    ? scoped_response
+    : legacy_profile_response?.data
+      ? legacy_profile_response
+      : await read_slot_json_file<UiCustomizationFile>(slot, UI_CUSTOMIZATION_FILE_NAME);
   if (!response.data) {
     current_ui_customization = defaults;
     await write_slot_json_file(slot, opts?.profile_scope?.files.ui_customization ?? UI_CUSTOMIZATION_FILE_NAME, current_ui_customization).catch(() => null);
-    return get_ui_customization_state();
+    const next = get_ui_customization_state();
+    emit_ui_customization_changed(next);
+    return next;
   }
   current_ui_customization = sanitize_ui_customization_file(response.data, defaults);
   if (opts?.profile_scope && !scoped_response?.data) {
     await write_slot_relative_json_file(slot, opts.profile_scope.files.ui_customization, current_ui_customization).catch(() => null);
   }
-  return get_ui_customization_state();
+  const next = get_ui_customization_state();
+  emit_ui_customization_changed(next);
+  return next;
 }
 
 export async function save_ui_customization_state(slot: number, next: UiCustomizationState, profile_scope?: ProfileScope | null): Promise<UiCustomizationState> {

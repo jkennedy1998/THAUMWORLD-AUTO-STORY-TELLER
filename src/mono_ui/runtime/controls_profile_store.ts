@@ -18,6 +18,13 @@ function is_controls_profile(value: unknown): value is ControlsProfile {
 export async function load_controls_profile(data_slot: number, profile_scope?: ProfileScope | null): Promise<ControlsProfile | null> {
   const scoped = profile_scope ? await read_controls_profile<ControlsProfile>(data_slot, profile_scope.files.controls) : null;
   if (is_controls_profile(scoped)) return scoped;
+  const legacy_profile = profile_scope ? await read_controls_profile<ControlsProfile>(data_slot, profile_scope.legacy_profile_files.controls) : null;
+  if (is_controls_profile(legacy_profile)) {
+    if (profile_scope) {
+      await write_slot_relative_json_file(data_slot, profile_scope.files.controls, legacy_profile).catch(() => null);
+    }
+    return legacy_profile;
+  }
   const legacy = await read_controls_profile<ControlsProfile>(data_slot, get_legacy_controls_profile_path());
   if (!is_controls_profile(legacy)) return null;
   if (profile_scope) {

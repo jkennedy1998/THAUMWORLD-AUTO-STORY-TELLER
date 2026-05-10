@@ -144,6 +144,7 @@ export type PainterCanvasOptions = {
   get_selection_status?: () => string | null;
   on_step_view_action?: (action: PainterViewAction) => void;
   on_step_depth?: (dir: -1 | 1) => void;
+  handle_text_mode_reserved_shortcut?: (e: KeyboardEvent) => boolean;
   get_camera_frame_anchor_world?: () => { x: number; y: number; z: number };
   set_camera_frame_anchor_world?: (anchor: { x: number; y: number; z: number }, context: { source: 'screen_drag' | 'axis_step'; detach_follow: boolean }) => void;
   get_pan_step_size_px?: () => { x: number; y: number };
@@ -3837,6 +3838,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
             moveTextCursorByScreenDelta(opts.get_text_spacing(), opts.get_text_charlead());
             setCurrentLineEndWorld(getTextCurrentWorld());
           }
+          e.preventDefault();
+          return;
+        }
+
+        if (opts.handle_text_mode_reserved_shortcut?.(e)) {
           e.preventDefault();
           return;
         }

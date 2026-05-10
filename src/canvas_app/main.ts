@@ -18,7 +18,7 @@ import type { PainterLaunchIntent } from './painter_launch_types.js';
 import { diag_log } from '../shared/diagnostics.js';
 import type { EngineJoinSelection } from '../engine_multiplayer/connection_types.js';
 import type { ToolAssistedInputsJoinSnapshot } from '../mono_ui/runtime/automation_interfaces.js';
-import { load_ui_customization_state } from '../mono_ui/runtime/ui_customization_store.js';
+import { get_ui_customization_state, load_ui_customization_state, type UiCustomizationState } from '../mono_ui/runtime/ui_customization_store.js';
 import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
 import { loadToolProperties } from '../ascii_painter/save_system.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
@@ -836,6 +836,22 @@ function update_texture_filter_for_scale(scale: number): void {
     }
 }
 
+function rgb_to_css_hex(rgb: { r: number; g: number; b: number }): string {
+    const to_hex = (value: number) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0');
+    return `#${to_hex(rgb.r)}${to_hex(rgb.g)}${to_hex(rgb.b)}`;
+}
+
+function apply_ui_customization_to_document(state: UiCustomizationState): void {
+    try {
+        const background = state.colors.background;
+        const dimmest = state.colors.dimmest;
+        document.documentElement.style.setProperty('--ui-background', rgb_to_css_hex(background));
+        document.documentElement.style.setProperty('--ui-dimmest-rgb', `${dimmest.r}, ${dimmest.g}, ${dimmest.b}`);
+    } catch {
+        // ignore
+    }
+}
+
 function update_background_for_scale(scale: number): void {
     const s = clamp_ui_scale(scale);
     try {
@@ -872,6 +888,15 @@ function load_saved_ui_scale(): number {
 
 async function boot() {
     const saved_scale = load_saved_ui_scale();
+    apply_ui_customization_to_document(get_ui_customization_state());
+    try {
+        window.addEventListener('thaumworld_ui_customization_changed', ((ev: CustomEvent) => {
+            const next = ev.detail?.state as UiCustomizationState | undefined;
+            if (next) apply_ui_customization_to_document(next);
+        }) as EventListener);
+    } catch {
+        // ignore
+    }
     if ((document as any).fonts?.load) {
         try {
             await (document as any).fonts.load(`${config.base_font_size_px * saved_scale}px "${config.font_family}"`);

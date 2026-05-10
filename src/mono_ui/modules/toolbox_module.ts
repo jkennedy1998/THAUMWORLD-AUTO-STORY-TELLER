@@ -22,6 +22,8 @@ export type ToolboxOptions<TTool extends string = ToolType> = {
   on_tool_select: (tool: TTool) => void;
   on_left_click_tool_change: (tool: TTool) => void;
   on_right_click_tool_change: (tool: TTool) => void;
+  matches_tool_shortcut?: (tool: TTool, e: KeyboardEvent) => boolean;
+  on_tool_shortcut?: (tool: TTool) => void;
   title?: string;
   tool_defs?: Array<ToolboxToolDef<TTool>>;
   on_move?: (new_rect: Rect) => void;
@@ -191,5 +193,35 @@ export function make_toolbox_module<TTool extends string = ToolType>(opts: Toolb
       scroll_offset += e.delta_y > 0 ? 1 : -1;
       clamp_scroll(rect);
     },
+    on_global_key_down(e: KeyboardEvent): void {
+      for (const tool of tool_defs) {
+        const matched = opts.matches_tool_shortcut
+          ? opts.matches_tool_shortcut(tool.tool, e)
+          : tool.shortcut === e.key.toUpperCase();
+        if (!matched) continue;
+        if (opts.on_tool_shortcut) {
+          opts.on_tool_shortcut(tool.tool);
+        } else {
+          opts.on_tool_select(tool.tool);
+        }
+        e.preventDefault();
+        return;
+      }
+    },
+    on_key_down(e: KeyboardEvent): void {
+      for (const tool of tool_defs) {
+        const matched = opts.matches_tool_shortcut
+          ? opts.matches_tool_shortcut(tool.tool, e)
+          : tool.shortcut === e.key.toUpperCase();
+        if (!matched) continue;
+        if (opts.on_tool_shortcut) {
+          opts.on_tool_shortcut(tool.tool);
+        } else {
+          opts.on_tool_select(tool.tool);
+        }
+        e.preventDefault();
+        return;
+      }
+    }
   });
 }

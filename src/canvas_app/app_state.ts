@@ -758,7 +758,6 @@ export function create_app_state(): AppState {
     }
 
     const WHITE: Rgb = get_color_by_name('off_white').rgb;
-    const DEEP_RED: Rgb = get_color_by_name('deep_red').rgb;
 
     const ui_state = {
         text_windows: new Map<string, { messages: (string | TextWindowMessage)[]; rev: number }>(),
@@ -10156,14 +10155,6 @@ export function create_app_state(): AppState {
 
     const modules: Module[] = [
         // Action lock helpers for communicate/inspect during timed events.
-        make_fill_module({
-            id: 'bg',
-            rect: { x0: 0, y0: 0, x1: APP_CONFIG.grid_width - 1, y1: APP_CONFIG.grid_height - 1 },
-            char: '.',
-            rgb: DEEP_RED,
-            style: 'regular',
-        }),
-
         make_controls_module({
             id: 'controls_panel',
             rect: get_persisted_rect('controls_panel', { x0: 138, y0: 8, x1: 198, y1: 38 }),
@@ -11251,6 +11242,36 @@ export function create_app_state(): AppState {
             id: 'camera_control',
             rect: get_persisted_rect('camera_control', { x0: 126, y0: 10, x1: 158, y1: 42 }),
             getCamera: () => get_camera_control_space().camera,
+            action_rows: [
+                [
+                    { id: 'roll_left', label: 'R.L' },
+                    { id: 'swing_up', label: '↑' },
+                    { id: 'roll_right', label: 'R.R' },
+                ],
+                [
+                    { id: 'swing_left', label: '←' },
+                    { id: 'pan_placeholder', label: '·' },
+                    { id: 'swing_right', label: '→' },
+                ],
+                [
+                    { id: 'depth_prev', label: '-' },
+                    { id: 'swing_down', label: '↓' },
+                    { id: 'depth_next', label: '+' },
+                ],
+            ],
+            onAction: (id) => {
+                if (id === 'swing_left' || id === 'swing_right' || id === 'swing_up' || id === 'swing_down' || id === 'roll_left' || id === 'roll_right') {
+                    step_place_camera_view_action(id);
+                    return;
+                }
+                if (id === 'depth_prev') {
+                    step_place_focus_depth(-1);
+                    return;
+                }
+                if (id === 'depth_next') {
+                    step_place_focus_depth(1);
+                }
+            },
             slider_specs: get_camera_slider_specs_for_app(WORLD_CAMERA_APP_ID),
             onParallaxMoveToggle: (enabled) => {
                 update_camera_control_spaces((space) => { space.camera.parallax_move_enabled = enabled; });

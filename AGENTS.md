@@ -1,5 +1,25 @@
 # THAUMWORLD Agent Documentation
 
+## Highest-Priority Operational Systems
+
+When working in this repo, keep these systems top-of-mind before diving into feature code:
+
+1. **Standard structured logs**
+   - World/game logs: `local_data/data_slot_<N>/logs/YYYY-MM-DD/`
+   - Painter logs: `local_data/data_slot_<N>/logs_ascii_painter/YYYY-MM-DD/`
+   - Always check the relevant `latest.log` reference first.
+   - Treat logs as source of truth before forming UI/input hypotheses.
+
+2. **TAI / automation coverage**
+   - Canonical scripts live under: `local_data/tool_assisted_inputs/`
+   - Slot-local automation inputs can also appear under: `local_data/data_slot_<N>/automation/inputs/`
+   - When fixing regressions, prefer updating or adding a focused smoke/regression TAI where practical.
+   - Keep product/runtime failures separate from TAI-framework failures.
+
+3. **App-scoped profile persistence**
+   - Preference/config payloads now live under app-scoped profile paths.
+   - When debugging persistence, check app-scoped files before legacy migration files.
+
 ## Log File System
 
 ### Overview
@@ -156,6 +176,63 @@ npm run logs:fix       # Fix it automatically
 - `npm run logs:clean` - Remove old log files
 - `npm run launch` - Production mode with logs
 - `npm run dev:logs` - Development mode with logs
+
+## Tool-Assisted Inputs (TAI)
+
+### Primary locations
+
+- Canonical shared TAI scripts: `local_data/tool_assisted_inputs/`
+- Slot-local automation inputs: `local_data/data_slot_<N>/automation/inputs/`
+
+### Guidance
+
+1. **Use TAI to lock in regressions**
+   - If a bug has a stable repro, prefer capturing it as a focused smoke/regression script.
+
+2. **Check logs before blaming automation**
+   - Correlate TAI-visible failure with the relevant world or painter session log first.
+
+3. **Keep failure buckets separate**
+   - THAUMWORLD runtime bug
+   - Painter runtime bug
+   - join/bootstrap bug
+   - TAI framework/driver bug
+
+4. **Prefer existing scripts when extending coverage**
+   - Search `local_data/tool_assisted_inputs/` for nearby smokes before creating a new one.
+
+## Profile-Scoped App Settings
+
+App-owned preference/config files are now scoped by both profile and app.
+
+Current live authority paths:
+
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_world/ui_customization.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_world/controls.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_world/camera_settings.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_world/module_layouts.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_painter/ui_customization.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_painter/controls.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_painter/camera_settings.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_painter/module_layouts.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/thaum_painter/indexed_palette.json`
+
+Shared profile registry remains at:
+
+- `local_data/data_slot_<N>/profiles/index.json`
+
+Legacy migration sources may still exist and may be read once during cutover, but they are not the intended ongoing live authority:
+
+- `local_data/data_slot_<N>/ui_customization.json`
+- `local_data/data_slot_<N>/camera_settings.json`
+- `local_data/data_slot_<N>/profiles/controls.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/ui_customization.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/camera_settings.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/controls.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/module_layouts.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/indexed_palette.json`
+
+When debugging settings persistence, prefer the app-scoped paths first.
 
 ## Development Guidelines
 

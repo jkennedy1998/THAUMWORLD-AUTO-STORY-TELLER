@@ -90,11 +90,15 @@ Replace the current flat per-app layout blob with a slot-aware shape.
 
 ## File location
 
-Keep using profile-scoped layout persistence:
+Original plan assumption:
 
 - `profiles/<profile_id>/module_layouts.json`
 
-This avoids adding new files yet while still supporting future slot expansion.
+Current implemented authority:
+
+- `profiles/<profile_id>/apps/<app_id>/module_layouts.json`
+
+Legacy profile-root `module_layouts.json` may still be read once for migration, but app-scoped files are now the intended live authority.
 
 ## Proposed shape
 
@@ -416,11 +420,11 @@ The migration should preserve existing users’ layouts.
 
 ### Read compatibility
 
-Support these sources in order:
+Current migration-compatible read order:
 
-1. profile-scoped `module_layouts.json`
-2. legacy slot-root `module_layouts.json`
-3. local cache fallback if present
+1. app-scoped `profiles/<profile_id>/apps/<app_id>/module_layouts.json`
+2. legacy profile-root `profiles/<profile_id>/module_layouts.json`
+3. no local cache authority
 
 ### Upgrade behavior
 

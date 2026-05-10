@@ -186,7 +186,13 @@ function require_profile_scope(profile_scope?: ProfileScope | null): ProfileScop
 async function read_module_layout_file(slot: number, profile_scope?: ProfileScope | null): Promise<ModuleLayoutFileV2> {
   const scoped = require_profile_scope(profile_scope);
   const response = await read_slot_json_file<ModuleLayoutFile>(slot, scoped.files.module_layouts);
-  return response.data ? sanitize_module_layout_file(response.data) : { version: 2, apps: {} };
+  if (response.data) return sanitize_module_layout_file(response.data);
+  const legacy = await read_slot_json_file<ModuleLayoutFile>(slot, scoped.legacy_profile_files.module_layouts);
+  const next: ModuleLayoutFileV2 = legacy.data ? sanitize_module_layout_file(legacy.data) : { version: 2, apps: {} };
+  if (legacy.data) {
+    await write_slot_json_file(slot, scoped.files.module_layouts, next).catch(() => null);
+  }
+  return next;
 }
 
 export async function load_active_module_layout(slot: number, app_id: CameraSettingsAppId, profile_scope?: ProfileScope | null): Promise<{ positions: ModulePositions; visibility: ModuleVisibility }> {

@@ -98,13 +98,18 @@ type ControlsProfile = {
 
 ## Persistence
 
-Current target path:
+Original plan target path:
 
 - `local_data/data_slot_<N>/profiles/controls.json`
 
-Later target path:
+Current implemented app-scoped profile path:
 
-- `local_data/data_slot_<N>/profiles/<user_id>/controls.json`
+- `local_data/data_slot_<N>/profiles/<profile_id>/apps/<app_id>/controls.json`
+
+Legacy migration sources still tolerated during cutover:
+
+- `local_data/data_slot_<N>/profiles/<profile_id>/controls.json`
+- `local_data/data_slot_<N>/profiles/controls.json`
 
 Implementation goals:
 

@@ -20,16 +20,20 @@ The intended outcome is a reusable profile foundation that can eventually group 
 
 Current persistence is split across several slot-scoped stores, but there is no named profile envelope tying them together.
 
-Existing stores:
+Existing stores at time of writing originally used slot-root / profile-root files, but current implementation has moved these app-owned payloads to app-scoped profile files:
 
 - `src/mono_ui/runtime/controls_profile_store.ts`
-  - persists `profiles/controls.json`
+  - current authority: `profiles/<profile_id>/apps/<app_id>/controls.json`
 - `src/mono_ui/runtime/ui_customization_store.ts`
-  - persists `ui_customization.json`
+  - current authority: `profiles/<profile_id>/apps/<app_id>/ui_customization.json`
 - `src/mono_ui/runtime/module_layout_store.ts`
-  - persists `module_layouts.json`
+  - current authority: `profiles/<profile_id>/apps/<app_id>/module_layouts.json`
 - `src/mono_ui/runtime/camera_customization_store.ts`
-  - persists `camera_settings.json`
+  - current authority: `profiles/<profile_id>/apps/<app_id>/camera_settings.json`
+- `src/mono_ui/runtime/indexed_palette_store.ts`
+  - current authority: `profiles/<profile_id>/apps/<app_id>/indexed_palette.json`
+
+Legacy migration sources may still be read once during cutover from older installs, but they are no longer the intended live authority.
 
 This means the codebase can persist preferences, but not yet as a first-class swappable user profile.
 

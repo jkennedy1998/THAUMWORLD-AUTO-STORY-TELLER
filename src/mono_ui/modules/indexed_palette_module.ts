@@ -22,6 +22,7 @@ export type IndexedPaletteModuleOptions = {
   on_reorder_entries: (next_ids: string[]) => void;
   on_duplicate_entry: (id: string) => void;
   on_delete_entry: (id: string) => void;
+  on_flatten_document?: () => void;
   on_move?: (new_rect: Rect) => void;
   on_close?: () => void;
 };
@@ -83,7 +84,7 @@ export function make_indexed_palette_module(opts: IndexedPaletteModuleOptions): 
   let drag_state: DragState = { active: false, source_id: null, source_index: -1, drop_index: null };
 
   function get_bounds(rect: Rect): { top: number; bottom: number; visible_rows: number } {
-    const top = rect.y1 - 2;
+    const top = rect.y1 - 3;
     const bottom = rect.y0 + 2;
     return { top, bottom, visible_rows: Math.max(1, top - bottom + 1) };
   }
@@ -134,6 +135,7 @@ export function make_indexed_palette_module(opts: IndexedPaletteModuleOptions): 
       c.fill_rect(rect, { char: ' ', rgb: bg, style: 'regular', weight_index: 1, render_index: 0 });
 
       const helper = trim_text('DRAG ROWS  + DUP  - DEL', Math.max(0, rect.x1 - rect.x0 - 1));
+      const flatten_button_id = 'flatten_document';
       for (let i = 0; i < helper.length; i += 1) {
         c.set(rect.x0 + 1 + i, rect.y0 + 1, { char: helper[i]!, rgb: bright, style: 'regular', weight_index: 1, render_index: 6 });
       }
@@ -176,6 +178,20 @@ export function make_indexed_palette_module(opts: IndexedPaletteModuleOptions): 
           c.set(x, indicator_y, { char: '─', rgb: vivid, style: 'regular', weight_index: 2, render_index: 7 });
         }
       }
+
+      if (opts.on_flatten_document) {
+        draw_plain_text_control(c, {
+          id: flatten_button_id,
+          text: 'FLATTEN->INDEX',
+          x: rect.x0 + 1,
+          y: rect.y1 - 1,
+          state: text_controls,
+          hitbox: 'text_only',
+          custom_idle_rgb: vivid,
+          idle_role: 'custom',
+          pressed_role: 'bright',
+        });
+      }
     },
     on_pointer_down_content(e: PointerEvent, rect: Rect): void {
       const pressed = press_plain_text_control(text_controls, e.x, e.y);
@@ -206,6 +222,11 @@ export function make_indexed_palette_module(opts: IndexedPaletteModuleOptions): 
       }
       if (hit_id?.startsWith('minus:')) {
         opts.on_delete_entry(hit_id.slice('minus:'.length));
+        drag_state = { active: false, source_id: null, source_index: -1, drop_index: null };
+        return;
+      }
+      if (hit_id === 'flatten_document') {
+        opts.on_flatten_document?.();
         drag_state = { active: false, source_id: null, source_index: -1, drop_index: null };
         return;
       }

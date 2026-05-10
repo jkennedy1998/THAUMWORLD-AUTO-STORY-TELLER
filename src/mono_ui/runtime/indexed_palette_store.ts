@@ -155,7 +155,17 @@ export function delete_indexed_palette_entry(entry_id: string): IndexedPaletteSt
 
 export async function load_indexed_palette_state(slot: number, profile_scope?: ProfileScope | null): Promise<IndexedPaletteState> {
   const defaults = build_default_indexed_palette_state();
-  const response = await read_slot_json_file<IndexedPaletteFile>(slot, profile_scope?.files.indexed_palette ?? INDEXED_PALETTE_FILE_NAME);
+  const scoped_response = await read_slot_json_file<IndexedPaletteFile>(slot, profile_scope?.files.indexed_palette ?? INDEXED_PALETTE_FILE_NAME);
+  const legacy_profile_response = !scoped_response.data && profile_scope
+    ? await read_slot_json_file<IndexedPaletteFile>(slot, profile_scope.legacy_profile_files.indexed_palette)
+    : null;
+  const response = scoped_response.data
+    ? scoped_response
+    : legacy_profile_response?.data
+      ? legacy_profile_response
+      : profile_scope
+        ? await read_slot_json_file<IndexedPaletteFile>(slot, INDEXED_PALETTE_FILE_NAME)
+        : scoped_response;
   if (!response.data) {
     current_indexed_palette_state = defaults;
     sync_active_palette_colors(current_indexed_palette_state);
@@ -164,6 +174,9 @@ export async function load_indexed_palette_state(slot: number, profile_scope?: P
   }
   current_indexed_palette_state = sanitize_indexed_palette_file(response.data, defaults);
   sync_active_palette_colors(current_indexed_palette_state);
+  if (profile_scope && !scoped_response.data) {
+    await write_slot_json_file(slot, profile_scope.files.indexed_palette, current_indexed_palette_state).catch(() => null);
+  }
   return get_indexed_palette_state();
 }
 

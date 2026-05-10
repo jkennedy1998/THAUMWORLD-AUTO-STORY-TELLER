@@ -40,6 +40,8 @@
             --pan-y: 0px;
             --tile-w: 12px;
             --tile-h: 16px;
+            --ui-background: #120a1a;
+            --ui-dimmest-rgb: 42, 42, 65;
 
             /* Background dot grid: tied to canvas pan + tile size. */
             --dot-step-mult: 1;
@@ -50,14 +52,7 @@
         body {
             margin: 0;
             height: 100%;
-            /* indexed color 0 (off_black) from src/mono_ui/colors.ts */
-            background-color: #120a1a;
-            /* Subtle indexed texture (deep_red) to make deformation readable */
-            background-image: radial-gradient(circle,
-                    rgba(61, 35, 41, 0.38) 0,
-                    rgba(61, 35, 41, 0.38) calc(1.1px * var(--ui-scale)),
-                    transparent calc(1.6px * var(--ui-scale)));
-            background-size: calc(var(--bg-dot-step-px) * 1px * var(--ui-scale)) calc(var(--bg-dot-step-px) * 1px * var(--ui-scale));
+            background-color: var(--ui-background);
             overflow: hidden;
         }
 
@@ -73,10 +68,9 @@
             position: absolute;
             inset: 0;
             pointer-events: none;
-            /* Subtle indexed texture (deep_red) to make deformation readable */
             background-image: radial-gradient(circle,
-                    rgba(61, 35, 41, 0.38) 0,
-                    rgba(61, 35, 41, 0.38) calc(var(--dot-r) * var(--ui-scale)),
+                    rgba(var(--ui-dimmest-rgb), 0.42) 0,
+                    rgba(var(--ui-dimmest-rgb), 0.42) calc(var(--dot-r) * var(--ui-scale)),
                     transparent calc((var(--dot-r) + 0.8px) * var(--ui-scale)));
 
             /* Move WITH the canvas (and lock step to tile sizes). */

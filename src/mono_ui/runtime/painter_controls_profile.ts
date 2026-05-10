@@ -8,6 +8,8 @@ export const PAINTER_CONTROLS_PROFILE: ControlActionDefinition[] = [
   { id: 'painter.view.swing_down', label: 'Swing View Down', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad2' } },
   { id: 'painter.view.roll_left', label: 'Roll View Left', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad7' } },
   { id: 'painter.view.roll_right', label: 'Roll View Right', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad9' } },
+  { id: 'painter.view.depth_prev', label: 'Focus Depth Previous', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad1' } },
+  { id: 'painter.view.depth_next', label: 'Focus Depth Next', category: 'Camera', system: 'painter', default_binding: { kind: 'keyboard', code: 'Numpad3' } },
   { id: 'painter.breath.step_back', label: 'Step Breath Back', category: 'Timing', system: 'painter', default_binding: { kind: 'keyboard', code: 'Comma' } },
   { id: 'painter.breath.step_forward', label: 'Step Breath Forward', category: 'Timing', system: 'painter', default_binding: { kind: 'keyboard', code: 'Period' } },
   { id: 'painter.breath.play_pause', label: 'Toggle Playback', category: 'Timing', system: 'painter', default_binding: { kind: 'keyboard', code: 'Space' } },

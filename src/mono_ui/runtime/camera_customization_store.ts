@@ -34,7 +34,14 @@ export function get_camera_settings_for_app(app_id: CameraSettingsAppId): Partia
 
 export async function load_camera_settings(slot: number, app_id: CameraSettingsAppId, profile_scope?: ProfileScope | null): Promise<Partial<CameraConfig>> {
   const scoped_response = profile_scope ? await read_slot_json_file<CameraSettingsFile>(slot, profile_scope.files.camera_settings) : null;
-  const response = scoped_response?.data ? scoped_response : await read_slot_json_file<CameraSettingsFile>(slot, CAMERA_SETTINGS_FILE_NAME);
+  const legacy_profile_response = !scoped_response?.data && profile_scope
+    ? await read_slot_json_file<CameraSettingsFile>(slot, profile_scope.legacy_profile_files.camera_settings)
+    : null;
+  const response = scoped_response?.data
+    ? scoped_response
+    : legacy_profile_response?.data
+      ? legacy_profile_response
+      : await read_slot_json_file<CameraSettingsFile>(slot, CAMERA_SETTINGS_FILE_NAME);
   current_camera_settings = response.data ? sanitize_camera_settings_file(response.data) : { version: 1, apps: {} };
   if (profile_scope && !scoped_response?.data && response.data) {
     await write_slot_relative_json_file(slot, profile_scope.files.camera_settings, current_camera_settings).catch(() => null);

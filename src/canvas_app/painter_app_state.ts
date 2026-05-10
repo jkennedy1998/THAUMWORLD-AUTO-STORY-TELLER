@@ -10,7 +10,7 @@ import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_r
 import type { AppearanceSlotTargetMask, AppearanceSlotValue, Grid, Brush, ToolEditTarget, ToolType, GridCell } from '../ascii_painter/types.js';
 import { clone_appearance_slot_assignments, createGrid, exportGrid, get_enabled_appearance_slots, importGrid } from '../ascii_painter/types.js';
 import { createHistoryManager, logCellAction, logGroupAction, clearHistory, canUndoGroup, canRedoGroup, getGroupHistoryState, popRedoGroupAction, popUndoGroupAction, type HistoryAction, type HistoryManager } from '../ascii_painter/history.js';
-import { get_color_by_name, nearest_indexed_lerp_rgb } from '../mono_ui/colors.js';
+import { get_color_by_name, nearest_indexed_lerp_rgb, nearest_indexed_rgb } from '../mono_ui/colors.js';
 import { resolve_material_rgb } from '../mono_ui/runtime/material_registry.js';
 import type { SelectionMode } from '../ascii_painter/selection.js';
 import { clearSelection, createSelectionBitmap, invertSelection, isSelected, selectAll, setSelected, type SelectionBitmap } from '../ascii_painter/selection.js';
@@ -96,6 +96,7 @@ import { get_camera_settings_for_app, load_camera_settings, reset_camera_setting
 function normalize_painter_tool(tool: ToolType): ToolType {
   return tool;
 }
+
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
 import { clone_projected_scene, commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection, type PainterProjectedScene } from '../ascii_painter/painter_view_projection_adapter.js';
@@ -1088,6 +1089,73 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         history_size: get_total_group_history_entries(),
       });
     log_runtime_summary('authored group cell changes applied summary');
+    return true;
+  }
+
+  function quantizeCellDirectColorsToIndexed(cell: GridCell): GridCell {
+    const next: GridCell = {
+      char: cell.char,
+      graphic: cell.graphic ? { ...cell.graphic } : undefined,
+      appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+      materials: cell.materials ? { ...cell.materials } : undefined,
+      rgb: nearest_indexed_rgb(cell.rgb),
+      weight_index: cell.weight_index,
+      render_index: cell.render_index,
+    };
+    if (next.appearance_slots) {
+      for (const [slot, value] of Object.entries(next.appearance_slots)) {
+        if (!value || value.kind !== 'flat_rgb') continue;
+        next.appearance_slots[Number(slot) as 1 | 2 | 3] = { kind: 'flat_rgb', rgb: nearest_indexed_rgb(value.rgb) };
+      }
+    }
+    return next;
+  }
+
+  function cells_match_for_flatten(a: GridCell, b: GridCell): boolean {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+
+  function flattenPainterDocumentColorsToIndexed(): boolean {
+    finalizePendingPainterCanvasChanges();
+    commitProjectedGridToWorld();
+    const ordered_group_ids = painter_document_runtime.document.group_order.filter((group_id) => !!painter_document_runtime.document.groups[group_id]);
+    let applied_any = false;
+    for (const group_id of ordered_group_ids) {
+      const group = painter_document_runtime.document.groups[group_id];
+      if (!group || group.locked || !group.visible) continue;
+      const visible_voxels = painter_document_runtime.group_voxel_index.get(group_id);
+      if (!visible_voxels || visible_voxels.size < 1) continue;
+      const changes: Array<{ worldX: number; worldY: number; worldZ: number; newCell: GridCell }> = [];
+      for (const voxel of visible_voxels.values()) {
+        const oldCell = make_history_cell_from_runtime_record(voxel);
+        const newCell = quantizeCellDirectColorsToIndexed(oldCell);
+        if (cells_match_for_flatten(oldCell, newCell)) continue;
+        changes.push({
+          worldX: voxel.x,
+          worldY: voxel.y,
+          worldZ: voxel.z,
+          newCell,
+        });
+      }
+      if (changes.length < 1) continue;
+      const { applied, history_changes, rejected_reason } = painter_session_core.apply_cell_changes(group_id, painter_current_breath, changes, {
+        auto_key: painter_groups_auto_key_enabled,
+      });
+      if (!applied) {
+        painterDiag('flatten to indexed rejected for group', { group_id, rejected_reason, change_count: changes.length, active_breath: painter_current_breath });
+        continue;
+      }
+      if (history_changes.length > 0) {
+        logCellAction(history, 'draw_cells', `Flatten ${group.name} To Indexed`, { group_id }, history_changes);
+      }
+      applied_any = true;
+    }
+    if (!applied_any) return false;
+    sync_local_session_state_from_core();
+    sync_lineage_state_from_core();
+    sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
+    log_runtime_summary('flatten painter document to indexed summary');
+    schedule_auto_save();
     return true;
   }
 
@@ -3452,11 +3520,29 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let left_click_tool: ToolType = normalize_painter_tool(saved_tool_props.left_click_tool as ToolType || 'pencil');
   let right_click_tool: ToolType = normalize_painter_tool(saved_tool_props.right_click_tool as ToolType || 'eraser');
 
+  function select_current_tool(tool: ToolType): void {
+    current_tool = normalize_painter_tool(tool);
+    if (current_tool === 'text') {
+      activatePainterTextCursorCameraPolicy();
+      refreshPainterProjectionPreservingCameraFrame();
+    } else {
+      syncPainterToolCameraPolicy();
+    }
+    painterDiag('selected tool', { tool: current_tool });
+  }
+
   function assign_left_click_tool(tool: ToolType): void {
     tool = normalize_painter_tool(tool);
     left_click_tool = tool;
     active_property_side = 'left';
     saveToolProperties({ left_click_tool: tool, active_property_side: 'left' });
+    painterDiag('left-click tool changed', { tool });
+  }
+
+  function assign_primary_tool(tool: ToolType): void {
+    tool = normalize_painter_tool(tool);
+    select_current_tool(tool);
+    assign_left_click_tool(tool);
   }
 
   function assign_right_click_tool(tool: ToolType): void {
@@ -3464,10 +3550,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     right_click_tool = tool;
     active_property_side = 'right';
     saveToolProperties({ right_click_tool: tool, active_property_side: 'right' });
+    painterDiag('right-click tool changed', { tool });
   }
 
   const painter_tool_shortcut_interpreter = create_painter_tool_shortcut_interpreter({
-    on_assign_primary: assign_left_click_tool,
+    on_assign_primary: assign_primary_tool,
     on_assign_secondary: assign_right_click_tool,
   });
   
@@ -4849,6 +4936,31 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     on_step_depth: (dir) => {
       stepPainterDepth(dir);
     },
+    handle_text_mode_reserved_shortcut: (e) => {
+      const cameraActionBindings: Array<{ id: string; action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right' }> = [
+        { id: 'painter.view.swing_left', action: 'swing_left' },
+        { id: 'painter.view.swing_right', action: 'swing_right' },
+        { id: 'painter.view.swing_up', action: 'swing_up' },
+        { id: 'painter.view.swing_down', action: 'swing_down' },
+        { id: 'painter.view.roll_left', action: 'roll_left' },
+        { id: 'painter.view.roll_right', action: 'roll_right' },
+      ];
+      for (const binding of cameraActionBindings) {
+        if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+        stepPainterViewAction(binding.action);
+        return true;
+      }
+      const depthActionBindings: Array<{ id: string; dir: -1 | 1 }> = [
+        { id: 'painter.view.depth_prev', dir: -1 },
+        { id: 'painter.view.depth_next', dir: 1 },
+      ];
+      for (const binding of depthActionBindings) {
+        if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+        stepPainterDepth(binding.dir);
+        return true;
+      }
+      return false;
+    },
     get_camera_frame_anchor_world: () => getPainterCanvasFrameAnchorWorld(),
     set_camera_frame_anchor_world: (anchor, context) => {
       setPainterCameraFrameAnchorFromPan(anchor, context);
@@ -5690,29 +5802,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       get_current_tool: () => current_tool,
       get_left_click_tool: () => left_click_tool,
       get_right_click_tool: () => right_click_tool,
-      on_tool_select: (tool) => {
-        current_tool = normalize_painter_tool(tool);
-        if (current_tool === 'text') {
-          activatePainterTextCursorCameraPolicy();
-          refreshPainterProjectionPreservingCameraFrame();
-        } else {
-          syncPainterToolCameraPolicy();
-        }
-        painterDiag('selected tool', { tool });
-      },
-      on_left_click_tool_change: (tool) => {
-        tool = normalize_painter_tool(tool);
-        active_property_side = 'left';
-        left_click_tool = tool;
-        saveToolProperties({ left_click_tool: tool, active_property_side: 'left' });
-        painterDiag('left-click tool changed', { tool });
-      },
-      on_right_click_tool_change: (tool) => {
-        tool = normalize_painter_tool(tool);
-        active_property_side = 'right';
-        right_click_tool = tool;
-        saveToolProperties({ right_click_tool: tool, active_property_side: 'right' });
-        painterDiag('right-click tool changed', { tool });
+      on_tool_select: select_current_tool,
+      on_left_click_tool_change: assign_left_click_tool,
+      on_right_click_tool_change: assign_right_click_tool,
+      matches_tool_shortcut: (tool, e) => painter_controls.matches_tool_shortcut(tool, e),
+      on_tool_shortcut: (tool) => {
+        if (isPainterTextCaptureActive()) return;
+        painter_tool_shortcut_interpreter.trigger(tool);
       },
       on_move: (new_rect) => {
         if (toolbox_module) {
@@ -6413,6 +6509,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         active_indexed_palette_entry_id = fallback?.id ?? active_indexed_palette_entry_id;
         void persist_indexed_palette_runtime(delete_indexed_palette_entry(id)).catch(() => null);
       },
+      on_flatten_document: () => {
+        flattenPainterDocumentColorsToIndexed();
+      },
       on_move: (new_rect) => {
         if (indexed_palette_module) indexed_palette_module.rect = new_rect;
         saveModulePosition('indexed_palette_panel', new_rect);
@@ -6766,8 +6865,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let layer_palette_open = getInitialModuleVisibility('layer_palette', true);
   let layer_palette_module: Module | null = null;
 
+  function isPainterCanvasTextCaptureActive(): boolean {
+    return Boolean((canvas_module as any)?.WantsTextCapture?.());
+  }
+
   function isPainterTextCaptureActive(): boolean {
-    return Boolean((layer_palette_module as any)?.WantsTextCapture?.());
+    return isPainterCanvasTextCaptureActive() || Boolean((layer_palette_module as any)?.WantsTextCapture?.());
   }
   
   function create_layer_palette_module(): Module {
@@ -6904,6 +7007,36 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       rect: camera_control_rect,
       title: 'Painter Camera',
       getCamera: () => voxelSpace.camera,
+      action_rows: [
+        [
+          { id: 'roll_left', label: 'R.L' },
+          { id: 'swing_up', label: '↑' },
+          { id: 'roll_right', label: 'R.R' },
+        ],
+        [
+          { id: 'swing_left', label: '←' },
+          { id: 'pan_placeholder', label: '·' },
+          { id: 'swing_right', label: '→' },
+        ],
+        [
+          { id: 'depth_prev', label: '-' },
+          { id: 'swing_down', label: '↓' },
+          { id: 'depth_next', label: '+' },
+        ],
+      ],
+      onAction: (id) => {
+        if (id === 'swing_left' || id === 'swing_right' || id === 'swing_up' || id === 'swing_down' || id === 'roll_left' || id === 'roll_right') {
+          stepPainterViewAction(id);
+          return;
+        }
+        if (id === 'depth_prev') {
+          stepPainterDepth(-1);
+          return;
+        }
+        if (id === 'depth_next') {
+          stepPainterDepth(1);
+        }
+      },
       slider_specs: {
         movement_per_layer: { ...PAINTER_CAMERA_LIMITS.movement_per_layer, step: 1, digits: 0 },
         scale_per_layer: { ...PAINTER_CAMERA_LIMITS.scale_per_layer, step: 0.01, digits: 2 },
@@ -7133,19 +7266,31 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         return;
       }
     }
-    const cameraActionBindings: Array<{ id: string; action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right' }> = [
-      { id: 'painter.view.swing_left', action: 'swing_left' },
-      { id: 'painter.view.swing_right', action: 'swing_right' },
-      { id: 'painter.view.swing_up', action: 'swing_up' },
-      { id: 'painter.view.swing_down', action: 'swing_down' },
-      { id: 'painter.view.roll_left', action: 'roll_left' },
-      { id: 'painter.view.roll_right', action: 'roll_right' },
-    ];
-    for (const binding of cameraActionBindings) {
-      if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
-      e.preventDefault();
-      stepPainterViewAction(binding.action);
-      return;
+    if (!isPainterCanvasTextCaptureActive()) {
+      const cameraActionBindings: Array<{ id: string; action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right' }> = [
+        { id: 'painter.view.swing_left', action: 'swing_left' },
+        { id: 'painter.view.swing_right', action: 'swing_right' },
+        { id: 'painter.view.swing_up', action: 'swing_up' },
+        { id: 'painter.view.swing_down', action: 'swing_down' },
+        { id: 'painter.view.roll_left', action: 'roll_left' },
+        { id: 'painter.view.roll_right', action: 'roll_right' },
+      ];
+      for (const binding of cameraActionBindings) {
+        if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+        e.preventDefault();
+        stepPainterViewAction(binding.action);
+        return;
+      }
+      const depthActionBindings: Array<{ id: string; dir: -1 | 1 }> = [
+        { id: 'painter.view.depth_prev', dir: -1 },
+        { id: 'painter.view.depth_next', dir: 1 },
+      ];
+      for (const binding of depthActionBindings) {
+        if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+        e.preventDefault();
+        stepPainterDepth(binding.dir);
+        return;
+      }
     }
     const groupNudgeHandlers: Array<{ id: string; direction: 'left' | 'right' | 'up' | 'down' }> = [
       { id: 'painter.group.nudge_left', direction: 'left' },
