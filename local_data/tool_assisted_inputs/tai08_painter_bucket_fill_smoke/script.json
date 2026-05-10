@@ -1,0 +1,20 @@
+{
+  "id": "painter_bucket_fill_smoke",
+  "test_name": "paint_test_bucket_fill_changes_connected_region",
+  "clock_mode": "realtime_ms",
+  "open_ms": 14000,
+  "description": "Verify the bucket tool can be selected and that a fill updates at least a connected nearby region on the active plane.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 150, "type": "invoke_helper", "helper": "reset_painter_module_layout" },
+    { "at_ms": 450, "type": "key_tap", "code": "KeyB", "key": "b", "hold_ms": 30 },
+    { "at_ms": 800, "type": "assert_painter_primary_tool", "tool": "bucket" },
+    { "at_ms": 950, "type": "capture_painter_cell", "slot": "fill_origin_before", "x": 60, "y": 24, "z": 0 },
+    { "at_ms": 1000, "type": "capture_painter_cell", "slot": "fill_neighbor_before", "x": 61, "y": 24, "z": 0 },
+    { "at_ms": 1300, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1900, "type": "assert_painter_cell_changed", "slot": "fill_origin_before", "x": 60, "y": 24, "z": 0 },
+    { "at_ms": 1950, "type": "assert_painter_cell_changed", "slot": "fill_neighbor_before", "x": 61, "y": 24, "z": 0 }
+  ]
+}

@@ -42,6 +42,7 @@ export type ToolAssistedInputsTraceEvent =
   | 'action_skipped'
   | 'action_failed'
   | 'run_summary'
+  | 'compact_report'
   | 'completed'
   | 'failed'
   | 'stopped';

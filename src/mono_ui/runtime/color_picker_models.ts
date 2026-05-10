@@ -105,10 +105,18 @@ export function normalize_picker_axes(adapter: ColorPickerAxisAdapter, axes: Col
   return adapter.normalize_axes(axes);
 }
 
+export function sample_picker_rgb(adapter: ColorPickerAxisAdapter, axes: ColorPickerAxes): Rgb {
+  return adapter.to_rgb(normalize_picker_axes(adapter, axes));
+}
+
 export function sample_indexed_picker_color(adapter: ColorPickerAxisAdapter, axes: ColorPickerAxes): IndexedColor {
-  return nearest_indexed_color(adapter.to_rgb(normalize_picker_axes(adapter, axes)));
+  return nearest_indexed_color(sample_picker_rgb(adapter, axes));
+}
+
+export function axes_from_rgb(adapter: ColorPickerAxisAdapter, rgb: Rgb): ColorPickerAxes {
+  return normalize_picker_axes(adapter, adapter.from_rgb(rgb));
 }
 
 export function axes_from_indexed_rgb(adapter: ColorPickerAxisAdapter, rgb: Rgb): ColorPickerAxes {
-  return normalize_picker_axes(adapter, adapter.from_rgb(rgb));
+  return axes_from_rgb(adapter, rgb);
 }

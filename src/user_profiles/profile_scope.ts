@@ -10,6 +10,7 @@ export type ProfileScope = {
   files: {
     controls: string;
     ui_customization: string;
+    indexed_palette: string;
     module_layouts: string;
     camera_settings: string;
   };
@@ -31,6 +32,7 @@ export function create_profile_scope(slot: number, app_id: CameraSettingsAppId, 
     files: {
       controls: `${base_dir}/controls.json`,
       ui_customization: `${base_dir}/ui_customization.json`,
+      indexed_palette: `${base_dir}/indexed_palette.json`,
       module_layouts: `${base_dir}/module_layouts.json`,
       camera_settings: `${base_dir}/camera_settings.json`,
     },

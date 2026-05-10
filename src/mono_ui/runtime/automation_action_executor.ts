@@ -27,6 +27,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function get_check_label(action: ToolAssistedInputsScriptAction): string | null {
+  if (action.type === 'assert_painter_primary_tool') return `${action.tool} tool`;
+  if (action.type === 'assert_painter_secondary_tool') return `${action.tool} secondary tool`;
+  if (action.type === 'assert_painter_anchor_in_bounds') return 'anchor in bounds';
+  if (action.type === 'assert_painter_focus_plane') return `focus plane ${action.z}`;
+  if (action.type === 'assert_painter_anchor_cell_changed' || action.type === 'assert_painter_cell_changed') return `${action.slot} changed`;
+  if (action.type === 'assert_painter_anchor_cell_equals' || action.type === 'assert_painter_cell_equals') return `${action.slot} restored`;
+  if (action.type === 'assert_text_value_changed') return `${String(action.field ?? action.source)} changed`;
+  if (action.type === 'assert_text_value_equals') return `${String(action.field ?? action.source)} unchanged`;
+  if (action.type === 'assert_text_value_literal') return `${String(action.field ?? action.source)} literal`;
+  if (action.type === 'wait_for_text_value_literal') return `${String(action.field ?? action.source)} wait`;
+  if (action.type === 'assert_movement_trace_ready') return 'movement trace ready';
+  if (action.type === 'assert_actor_tile_equals') return `${action.slot} tile unchanged`;
+  if (action.type === 'assert_actor_tile_changed') return `${action.slot} tile changed`;
+  return null;
+}
+
+function record_check_result(
+  diagnostic_report: ReturnType<typeof import('./automation_diagnostic_report.js').create_tool_assisted_inputs_diagnostic_report>,
+  action: ToolAssistedInputsScriptAction,
+  status: 'pass' | 'fail',
+): void {
+  const label = get_check_label(action);
+  if (label) diagnostic_report.record_check(label, status);
+}
+
 function get_timing_profile_settings(timing_profile: ToolAssistedInputsTimingProfile): { text_char_delay_ms: number; key_tap_hold_ms: number } {
   if (timing_profile === 'fast') return { text_char_delay_ms: 0, key_tap_hold_ms: 0 };
   if (timing_profile === 'slow_debug') return { text_char_delay_ms: 80, key_tap_hold_ms: 60 };
@@ -60,6 +86,7 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
     } else if (action.type === 'invoke_helper') {
       await Promise.resolve(runtime_probe.invoke_helper?.(action.helper, action.payload));
     } else if (action.type === 'marker') {
+      diagnostic_report.record_marker(action.label);
       // trace only
     } else if (action.type === 'capture_actor_tile') {
       const tile = runtime_probe.get_current_actor_tile();
@@ -195,10 +222,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       const same_tile = expected.x === actual.x && expected.y === actual.y && expected.z === actual.z;
       const passed = action.type === 'assert_actor_tile_equals' ? same_tile : !same_tile;
       if (!passed) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, slot: action.slot, expected_tile: expected, actual_tile: actual });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, slot: action.slot, error: action.type === 'assert_actor_tile_equals' ? 'tool_assisted_inputs_assert_actor_tile_equals_failed' : 'tool_assisted_inputs_assert_actor_tile_changed_failed', expected_tile: expected, actual_tile: actual, delta_x: actual.x - expected.x, delta_y: actual.y - expected.y, delta_z: actual.z - expected.z, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), actor_ref: context.actor_ref, place_id: context.place_id, slot: action.slot, expected_tile: expected, actual_tile: actual });
       mark_action_completed();
       return true;
@@ -208,10 +237,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       const same = expected === actual;
       const passed = action.type === 'assert_text_value_equals' ? same : !same;
       if (!passed) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, slot: action.slot, source: action.source, field: action.field ?? null, expected_text: expected, actual_text: actual });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: action.type === 'assert_text_value_equals' ? 'tool_assisted_inputs_assert_text_value_equals_failed' : 'tool_assisted_inputs_assert_text_value_changed_failed', slot: action.slot, source: action.source, field: action.field ?? null, expected_text: expected, actual_text: actual, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), slot: action.slot, source: action.source, field: action.field ?? null, expected_text: expected, actual_text: actual });
       mark_action_completed();
       return true;
@@ -219,10 +250,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       const actual = runtime_probe.get_text_value?.(action.source, action.field ?? null) ?? null;
       const passed = actual === action.value;
       if (!passed) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, source: action.source, field: action.field ?? null, expected_text: action.value, actual_text: actual });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: 'tool_assisted_inputs_assert_text_value_literal_failed', source: action.source, field: action.field ?? null, expected_text: action.value, actual_text: actual, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), source: action.source, field: action.field ?? null, actual_text: actual });
       mark_action_completed();
       return true;
@@ -236,10 +269,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
         poll_ms: action.poll_ms ?? 50,
       });
       if (!result.ok) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, source: action.source, field: action.field ?? null, expected_text: action.value, actual_text: result.actual, timeout_ms: action.timeout_ms ?? 4000 });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: 'tool_assisted_inputs_wait_for_text_value_literal_timeout', source: action.source, field: action.field ?? null, expected_text: action.value, actual_text: result.actual, timeout_ms: action.timeout_ms ?? 4000, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), source: action.source, field: action.field ?? null, actual_text: result.actual, timeout_ms: action.timeout_ms ?? 4000 });
       mark_action_completed();
       return true;
@@ -258,10 +293,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       if (typeof action.max_input_to_visible_ms === 'number' && trace.input_to_visible_ms > action.max_input_to_visible_ms) failures.push('input_to_visible_too_slow');
       if (typeof action.max_accept_to_visible_ms === 'number' && trace.accept_to_visible_ms > action.max_accept_to_visible_ms) failures.push('accept_to_visible_too_slow');
       if (failures.length > 0) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, failures, trace });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: 'tool_assisted_inputs_assert_movement_trace_ready_failed', failures, movement_trace: trace, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), actor_ref: context.actor_ref, place_id: context.place_id, movement_trace: trace });
       mark_action_completed();
       return true;
@@ -269,20 +306,24 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       const tool_state = runtime_probe.get_painter_tool_state?.() ?? null;
       const actual = action.type === 'assert_painter_primary_tool' ? tool_state?.left_click_tool : tool_state?.right_click_tool;
       if (!tool_state || actual !== action.tool) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, expected_tool: action.tool, actual_tool: actual ?? null });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: 'tool_assisted_inputs_assert_painter_tool_failed', expected_tool: action.tool, actual_tool: actual ?? null, painter_tool_state: tool_state, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), expected_tool: action.tool, painter_tool_state: tool_state });
       mark_action_completed();
       return true;
     } else if (action.type === 'assert_painter_focus_plane') {
       const z = runtime_probe.get_painter_focus_plane?.() ?? null;
       if (z !== action.z) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, expected_z: action.z, actual_z: z });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: 'tool_assisted_inputs_assert_painter_focus_plane_failed', expected_z: action.z, actual_z: z, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), focus_plane: z });
       mark_action_completed();
       return true;
@@ -295,10 +336,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
         && world.x < bounds.width && world.y < bounds.height
         && world.z >= bounds.min_z && world.z <= bounds.max_z);
       if (!in_bounds) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, anchor_slot: action.anchor_slot ?? null, painter_anchor: anchor, painter_bounds: bounds });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: 'tool_assisted_inputs_assert_painter_anchor_in_bounds_failed', anchor_slot: action.anchor_slot ?? null, painter_anchor: anchor, painter_bounds: bounds, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), anchor_slot: action.anchor_slot ?? null, painter_anchor: anchor, painter_bounds: bounds });
       mark_action_completed();
       return true;
@@ -310,10 +353,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       const same = JSON.stringify(expected) === JSON.stringify(actual);
       const passed = action.type === 'assert_painter_anchor_cell_equals' ? same : !same;
       if (!world || !passed) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, slot: action.slot, anchor_slot: action.anchor_slot ?? null, painter_anchor: anchor, expected_cell: expected, actual_cell: actual });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: action.type === 'assert_painter_anchor_cell_equals' ? 'tool_assisted_inputs_assert_painter_anchor_cell_equals_failed' : 'tool_assisted_inputs_assert_painter_anchor_cell_changed_failed', slot: action.slot, anchor_slot: action.anchor_slot ?? null, painter_anchor: anchor, expected_cell: expected, actual_cell: actual, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), slot: action.slot, anchor_slot: action.anchor_slot ?? null, painter_anchor: anchor, expected_cell: expected, actual_cell: actual });
       mark_action_completed();
       return true;
@@ -323,10 +368,12 @@ export async function execute_tool_assisted_inputs_action(options: ActionExecuto
       const same = JSON.stringify(expected) === JSON.stringify(actual);
       const passed = action.type === 'assert_painter_cell_equals' ? same : !same;
       if (!passed) {
+        record_check_result(diagnostic_report, action, 'fail');
         diagnostic_report.record_failure({ action_index, action_type: action.type, slot: action.slot, expected_cell: expected, actual_cell: actual, x: action.x, y: action.y, z: action.z ?? null });
         emit('action_failed', { action_index, action_type: action.type, target_breath, current_breath: current_tick, error: action.type === 'assert_painter_cell_equals' ? 'tool_assisted_inputs_assert_painter_cell_equals_failed' : 'tool_assisted_inputs_assert_painter_cell_changed_failed', slot: action.slot, expected_cell: expected, actual_cell: actual, x: action.x, y: action.y, z: action.z ?? null, nonfatal: true });
         return true;
       }
+      record_check_result(diagnostic_report, action, 'pass');
       emit('action_fired', { action_index, action_type: action.type, target_breath, current_breath: current_tick, late_by: Math.max(0, current_tick - target_breath), slot: action.slot, expected_cell: expected, actual_cell: actual, x: action.x, y: action.y, z: action.z ?? null });
       mark_action_completed();
       return true;

@@ -41,9 +41,10 @@ export type ColorName =
 
 export type IndexedColor = {
     index: number;
-    name: ColorName;
+    name: string;
     hex: string;
     rgb: Rgb;
+    id?: string;
 };
 
 function hex_to_rgb(hex: string): Rgb {
@@ -104,12 +105,14 @@ export const INDEXED_COLORS: IndexedColor[] = [
 ];
 
 const COLOR_BY_NAME = new Map<ColorName, IndexedColor>(
-    INDEXED_COLORS.map((c) => [c.name, c]),
+    INDEXED_COLORS.map((c) => [c.name as ColorName, c]),
 );
 
 const COLOR_BY_INDEX = new Map<number, IndexedColor>(
     INDEXED_COLORS.map((c) => [c.index, c]),
 );
+
+let ACTIVE_INDEXED_COLORS: IndexedColor[] = INDEXED_COLORS.map((c) => ({ ...c, rgb: { ...c.rgb } }));
 
 const COLOR_ALIASES = new Map<string, ColorName>([
     ["vivid_orange", "pumpkin"],
@@ -134,42 +137,72 @@ export function get_color_by_index(index: number): IndexedColor {
     return found;
 }
 
-export function list_indexed_colors(): readonly IndexedColor[] {
-    return INDEXED_COLORS;
+function clone_indexed_color(color: IndexedColor): IndexedColor {
+    return { ...color, rgb: { ...color.rgb } };
 }
 
-export function get_darkest_indexed_rgb(): Rgb {
-    return { ...INDEXED_COLORS[0]!.rgb };
-}
-
-export function get_brightest_indexed_rgb(): Rgb {
-    return { ...INDEXED_COLORS[1]!.rgb };
-}
-
-export function find_indexed_color_by_rgb(rgb: Rgb): IndexedColor | null {
-    const safe = {
+function sanitize_rgb(rgb: Rgb): Rgb {
+    return {
         r: Number.isFinite(rgb?.r) ? Math.max(0, Math.min(255, Math.round(rgb.r))) : 0,
         g: Number.isFinite(rgb?.g) ? Math.max(0, Math.min(255, Math.round(rgb.g))) : 0,
         b: Number.isFinite(rgb?.b) ? Math.max(0, Math.min(255, Math.round(rgb.b))) : 0,
     };
-    for (const color of INDEXED_COLORS) {
+}
+
+function rgb_to_hex(rgb: Rgb): string {
+    const safe = sanitize_rgb(rgb);
+    return `#${safe.r.toString(16).padStart(2, '0')}${safe.g.toString(16).padStart(2, '0')}${safe.b.toString(16).padStart(2, '0')}`;
+}
+
+export function list_indexed_colors(): readonly IndexedColor[] {
+    return INDEXED_COLORS;
+}
+
+export function list_active_indexed_colors(): readonly IndexedColor[] {
+    return ACTIVE_INDEXED_COLORS;
+}
+
+export function set_active_indexed_colors(colors: readonly IndexedColor[]): readonly IndexedColor[] {
+    const source = Array.isArray(colors) && colors.length > 0 ? colors : INDEXED_COLORS;
+    ACTIVE_INDEXED_COLORS = source.map((color, index) => ({
+        id: color.id ?? `indexed_${index}`,
+        index,
+        name: String(color.name ?? `COLOR ${index + 1}`).trim() || `COLOR ${index + 1}`,
+        hex: rgb_to_hex(color.rgb),
+        rgb: sanitize_rgb(color.rgb),
+    }));
+    return list_active_indexed_colors();
+}
+
+export function reset_active_indexed_colors(): readonly IndexedColor[] {
+    return set_active_indexed_colors(INDEXED_COLORS);
+}
+
+export function get_darkest_indexed_rgb(): Rgb {
+    return { ...(ACTIVE_INDEXED_COLORS[0] ?? INDEXED_COLORS[0])!.rgb };
+}
+
+export function get_brightest_indexed_rgb(): Rgb {
+    return { ...(ACTIVE_INDEXED_COLORS[1] ?? ACTIVE_INDEXED_COLORS[0] ?? INDEXED_COLORS[1] ?? INDEXED_COLORS[0])!.rgb };
+}
+
+export function find_indexed_color_by_rgb(rgb: Rgb): IndexedColor | null {
+    const safe = sanitize_rgb(rgb);
+    for (const color of ACTIVE_INDEXED_COLORS) {
         if (color.rgb.r === safe.r && color.rgb.g === safe.g && color.rgb.b === safe.b) {
-            return color;
+            return clone_indexed_color(color);
         }
     }
     return null;
 }
 
 export function nearest_indexed_color(rgb: Rgb): IndexedColor {
-    const safe = {
-        r: Number.isFinite(rgb?.r) ? Math.max(0, Math.min(255, Math.round(rgb.r))) : 0,
-        g: Number.isFinite(rgb?.g) ? Math.max(0, Math.min(255, Math.round(rgb.g))) : 0,
-        b: Number.isFinite(rgb?.b) ? Math.max(0, Math.min(255, Math.round(rgb.b))) : 0,
-    };
-    let best = INDEXED_COLORS[0] ?? { index: 0, name: 'off_white', hex: '#ffffff', rgb: { r: 255, g: 255, b: 255 } };
+    const safe = sanitize_rgb(rgb);
+    const colors = ACTIVE_INDEXED_COLORS.length > 0 ? ACTIVE_INDEXED_COLORS : INDEXED_COLORS;
+    let best = colors[0] ?? { index: 0, name: 'COLOR 1', hex: '#ffffff', rgb: { r: 255, g: 255, b: 255 }, id: 'indexed_0' };
     let best_d = Number.POSITIVE_INFINITY;
 
-    for (const c of INDEXED_COLORS) {
+    for (const c of colors) {
         const dr = c.rgb.r - safe.r;
         const dg = c.rgb.g - safe.g;
         const db = c.rgb.b - safe.b;
@@ -180,7 +213,7 @@ export function nearest_indexed_color(rgb: Rgb): IndexedColor {
         }
     }
 
-    return best;
+    return clone_indexed_color(best);
 }
 
 export function nearest_indexed_rgb(rgb: Rgb): Rgb {

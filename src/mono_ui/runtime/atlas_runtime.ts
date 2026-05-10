@@ -1,7 +1,7 @@
 import type { AppearanceSlotAssignments, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from '../../render_shaders/graphics_contract.js';
-import { get_brightest_indexed_rgb, get_darkest_indexed_rgb, nearest_indexed_rgb } from '../colors.js';
-import { resolve_material_rgb } from './material_registry.js';
-import { project_lit_semantic_value, resolve_light_mag, type SemanticValue } from '../../mag/light.js';
+import { get_brightest_indexed_rgb, get_darkest_indexed_rgb } from '../colors.js';
+import { blend_resolved_rgb, resolve_appearance_slot_rgb } from './appearance_resolver.js';
+import { resolve_light_mag, type SemanticValue } from '../../mag/light.js';
 
 export type AtlasSheetRef = {
   id: string;
@@ -326,22 +326,15 @@ function decode_sprite_pixel(r: number, g: number, b: number): DecodedSpritePixe
   return DECODED_SPRITE_PIXEL_BY_RGB.get(`${r},${g},${b}`) ?? null;
 }
 
-function blend_channel(a: number, b: number, mix: number): number {
-  return Math.max(0, Math.min(255, Math.round((a * (1 - mix)) + (b * mix))));
-}
-
 function resolve_slot_rgb(slot: 1 | 2 | 3, semantic_value: SemanticValue, materials: InlineMaterialAssignments, appearance_slots: AppearanceSlotAssignments | undefined, light_mag: number) {
-  const appearance = appearance_slots?.[slot] ?? appearance_slots?.[1];
-  if (appearance?.kind === 'flat_rgb') return nearest_indexed_rgb(appearance.rgb);
-  if (appearance?.kind === 'material') {
-    const lit_value = project_lit_semantic_value(semantic_value, light_mag);
-    const resolved = resolve_material_rgb(appearance.material_id, lit_value);
-    return resolved ? nearest_indexed_rgb(resolved) : null;
-  }
-  const material_id = materials[slot] ?? materials[1];
-  const lit_value = project_lit_semantic_value(semantic_value, light_mag);
-  const resolved = resolve_material_rgb(material_id, lit_value);
-  return resolved ? nearest_indexed_rgb(resolved) : null;
+  return resolve_appearance_slot_rgb({
+    slot,
+    semantic_value,
+    materials,
+    appearance_slots,
+    light_mag,
+    rgb_policy: 'quantize_to_active_palette',
+  });
 }
 
 function resolve_decoded_band_rgb(decoded: Extract<DecodedSpritePixel, { kind: 'band' | 'interpolated_band' }>, materials: InlineMaterialAssignments, appearance_slots: AppearanceSlotAssignments | undefined, light_mag: number) {
@@ -351,11 +344,7 @@ function resolve_decoded_band_rgb(decoded: Extract<DecodedSpritePixel, { kind: '
   const lower_rgb = resolve_slot_rgb(decoded.band, decoded.lower, materials, appearance_slots, light_mag);
   const upper_rgb = resolve_slot_rgb(decoded.band, decoded.upper, materials, appearance_slots, light_mag);
   if (!lower_rgb || !upper_rgb) return null;
-  return nearest_indexed_rgb({
-    r: blend_channel(lower_rgb.r, upper_rgb.r, decoded.mix),
-    g: blend_channel(lower_rgb.g, upper_rgb.g, decoded.mix),
-    b: blend_channel(lower_rgb.b, upper_rgb.b, decoded.mix),
-  });
+  return blend_resolved_rgb(lower_rgb, upper_rgb, decoded.mix, 'quantize_to_active_palette');
 }
 
 function render_tinted_frame(sheet: LoadedSheet, frame: AtlasWeightFrameRef, graphic: RenderGraphicRef, materials: InlineMaterialAssignments, appearance_slots: AppearanceSlotAssignments | undefined, family: AtlasFamilyManifest, light_mag?: number): HTMLCanvasElement {

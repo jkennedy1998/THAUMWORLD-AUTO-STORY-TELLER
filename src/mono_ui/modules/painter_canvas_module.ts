@@ -1117,7 +1117,9 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       || module_id === 'color_selector'
       || module_id === 'color_block'
       || module_id === 'tool_properties'
-      || module_id === 'camera_control';
+      || module_id === 'camera_control'
+      || module_id === 'indexed_palette_panel'
+      || module_id === 'indexed_palette_picker';
   }
 
   function exitTextMode(commitPending: boolean): void {

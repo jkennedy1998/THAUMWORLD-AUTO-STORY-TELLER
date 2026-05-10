@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // File dialogs
   showOpenDialog: (options) => ipcRenderer.invoke('show-open-dialog', options),
+  requestAppQuit: () => ipcRenderer.invoke('request-app-quit'),
 
   // App mode (game or ascii_painter) - set before page loads
   appMode: appMode,

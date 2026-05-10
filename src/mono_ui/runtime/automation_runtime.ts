@@ -61,6 +61,19 @@ function with_timeout<T>(promise: Promise<T>, timeout_ms: number, error_message:
   });
 }
 
+function should_request_tai_auto_exit(): boolean {
+  return Boolean((window as Window).electronAPI?.toolAssistedInputsBootConfig?.enabled);
+}
+
+async function request_tai_app_quit(): Promise<void> {
+  if (!should_request_tai_auto_exit()) return;
+  try {
+    await Promise.resolve((window as Window).electronAPI?.requestAppQuit?.());
+  } catch {
+    // ignore quit request failures; launcher can still terminate children
+  }
+}
+
 export function create_tool_assisted_inputs_runtime(options: ToolAssistedInputsRuntimeOptions): {
   start: (script_ref: string) => Promise<void>;
   start_configured: () => Promise<void>;
@@ -157,13 +170,9 @@ export function create_tool_assisted_inputs_runtime(options: ToolAssistedInputsR
 
   async function fail(message: string): Promise<void> {
     error = message;
-    emit('failed', { error: message });
-    await cleanup('failed');
-  }
-
-  async function complete(): Promise<void> {
     const actual_open_ms = run_started_at_ms !== null ? Math.max(0, Date.now() - run_started_at_ms) : null;
     const actual_end_delay_ms = last_action_completed_at_ms !== null ? Math.max(0, Date.now() - last_action_completed_at_ms) : null;
+    const compact_report = diagnostic_report.get_compact_report();
     emit('run_summary', {
       diagnostic_passed: diagnostic_report.passed(),
       diagnostic_failure_count: diagnostic_report.failure_count(),
@@ -174,8 +183,33 @@ export function create_tool_assisted_inputs_runtime(options: ToolAssistedInputsR
       end_delay_ms: running_script?.end_delay_ms ?? null,
       actual_open_ms,
       actual_end_delay_ms,
+      compact_report,
+      error: message,
     });
+    emit('compact_report', { ...compact_report, error: message });
+    emit('failed', { error: message });
+    await cleanup('failed');
+  }
+
+  async function complete(): Promise<void> {
+    const actual_open_ms = run_started_at_ms !== null ? Math.max(0, Date.now() - run_started_at_ms) : null;
+    const actual_end_delay_ms = last_action_completed_at_ms !== null ? Math.max(0, Date.now() - last_action_completed_at_ms) : null;
+    const compact_report = diagnostic_report.get_compact_report();
+    emit('run_summary', {
+      diagnostic_passed: diagnostic_report.passed(),
+      diagnostic_failure_count: diagnostic_report.failure_count(),
+      captured_slots: capture_store.list_tile_slots(),
+      captured_trace_slots: capture_store.list_movement_trace_slots(),
+      captured_visible_step_slots: capture_store.list_visible_step_slots(),
+      open_ms: running_script?.open_ms ?? null,
+      end_delay_ms: running_script?.end_delay_ms ?? null,
+      actual_open_ms,
+      actual_end_delay_ms,
+      compact_report,
+    });
+    emit('compact_report', compact_report);
     emit('completed');
+    await request_tai_app_quit();
     await cleanup('completed');
   }
 

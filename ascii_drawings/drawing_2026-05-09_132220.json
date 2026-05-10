@@ -1,0 +1,135 @@
+{
+  "version": 6,
+  "bounds": {
+    "minX": 0,
+    "minY": 0,
+    "width": 1,
+    "height": 1,
+    "depth": 1,
+    "minZ": 0,
+    "maxZ": 0
+  },
+  "occupied_bounds": {
+    "minX": 0,
+    "minY": 0,
+    "minZ": 0,
+    "maxX": 0,
+    "maxY": 0,
+    "maxZ": 0
+  },
+  "groups": {
+    "group_1778350942047_usyjqjxn": {
+      "id": "group_1778350942047_usyjqjxn",
+      "name": "Group 1",
+      "visible": true,
+      "locked": false,
+      "opacity": 1,
+      "start": 0,
+      "cropped_start": 0,
+      "cropped_end": 0,
+      "breath_start": 0,
+      "breath_end": 0,
+      "property_ids": [
+        "raster_1"
+      ],
+      "properties": {
+        "raster_1": {
+          "id": "raster_1",
+          "kind": "raster",
+          "label": "content",
+          "process_mode": "add",
+          "blocks": [
+            {
+              "id": "property_block_1778350943345_pctie7",
+              "type": "content",
+              "start": 0,
+              "end": 0,
+              "value": {
+                "kind": "raster",
+                "voxels": [
+                  {
+                    "key": "0:0:0",
+                    "x": 0,
+                    "y": 0,
+                    "z": 0,
+                    "char": "█",
+                    "rgb": {
+                      "r": 255,
+                      "g": 255,
+                      "b": 255
+                    },
+                    "weight_index": 1
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "metadata": {
+        "created_at": "2026-05-09T18:22:22.047Z",
+        "modified_at": "2026-05-09T18:22:22.047Z"
+      }
+    }
+  },
+  "group_order": [
+    "group_1778350942047_usyjqjxn"
+  ],
+  "breath": {
+    "start": 0,
+    "cropped_start": 0,
+    "cropped_end": 0,
+    "range_start": 0,
+    "range_end": 0
+  },
+  "playback": {
+    "frames_per_breath": 1,
+    "loop_enabled": true
+  },
+  "camera": {
+    "mode": "rotated_ortho",
+    "orientation": "xy",
+    "principal_view": "top",
+    "roll_quarter_turn": 0,
+    "focus_plane": 0,
+    "parallax_intensity": 0.7,
+    "show_all_layers": false,
+    "use_focus_layer_opacity": true,
+    "center_target_in_view": false,
+    "parallax_move_enabled": false,
+    "parallax_size_enabled": false,
+    "euler_rotation": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "transition_euler": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    },
+    "visual_pivot_px": {
+      "x": 0,
+      "y": 0
+    },
+    "calibration": {
+      "x": 0,
+      "y": 0
+    },
+    "scale_per_layer": 0.12,
+    "movement_per_layer": 29,
+    "mouse_angle_yaw_deg": 18,
+    "mouse_angle_pitch_deg": 14,
+    "mouse_angle_spring": 12,
+    "render_distance_planes": 2,
+    "base_layer_scale": 1,
+    "char_spacing_x": 1,
+    "char_spacing_y": 1,
+    "pan_x": 0,
+    "pan_y": 0
+  },
+  "metadata": {
+    "created_at": "2026-05-09T18:22:22.047Z",
+    "modified_at": "2026-05-09T18:22:23.345Z"
+  }
+}

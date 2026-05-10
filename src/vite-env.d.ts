@@ -35,6 +35,7 @@ interface ElectronAPI {
   getDataSlotDir?: (slot: number | string) => Promise<string>;
   getAsciiDrawingsDir?: () => Promise<string>;
   showOpenDialog?: (options: any) => Promise<any>;
+  requestAppQuit?: () => Promise<any>;
   appMode?: string;
   dataSlot?: number;
   clientInstanceId?: string;

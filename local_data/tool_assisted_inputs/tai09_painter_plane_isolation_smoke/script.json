@@ -1,0 +1,29 @@
+{
+  "id": "painter_plane_isolation_smoke",
+  "test_name": "paint_test_plane_specific_paint_isolation",
+  "clock_mode": "realtime_ms",
+  "open_ms": 16000,
+  "description": "Verify painter edits stay on the active focus plane by painting once on z0, advancing focus to z1, and painting without mutating the earlier plane cell again.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1200,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_module_layout" },
+    { "at_ms": 200, "type": "invoke_helper", "helper": "clear_painter_cells", "payload": { "cells": [
+      { "x": 60, "y": 24, "z": 0 },
+      { "x": 60, "y": 24, "z": 1 }
+    ] } },
+    { "at_ms": 500, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 850, "type": "capture_text_value", "slot": "focus_plane_before", "source": "runtime_value", "field": "focus_plane" },
+    { "at_ms": 900, "type": "capture_painter_cell", "slot": "plane0_before", "x": 60, "y": 24, "z": 0 },
+    { "at_ms": 950, "type": "capture_painter_cell", "slot": "plane1_before", "x": 60, "y": 24, "z": 1 },
+    { "at_ms": 1200, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1700, "type": "assert_painter_cell_changed", "slot": "plane0_before", "x": 60, "y": 24, "z": 0 },
+    { "at_ms": 1750, "type": "assert_painter_cell_equals", "slot": "plane1_before", "x": 60, "y": 24, "z": 1 },
+    { "at_ms": 1850, "type": "capture_painter_cell", "slot": "plane0_after_first_paint", "x": 60, "y": 24, "z": 0 },
+    { "at_ms": 2100, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": -120 },
+    { "at_ms": 2500, "type": "assert_text_value_changed", "slot": "focus_plane_before", "source": "runtime_value", "field": "focus_plane" },
+    { "at_ms": 2750, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 3300, "type": "assert_painter_cell_changed", "slot": "plane1_before", "x": 60, "y": 24, "z": 1 },
+    { "at_ms": 3350, "type": "assert_painter_cell_equals", "slot": "plane0_after_first_paint", "x": 60, "y": 24, "z": 0 }
+  ]
+}

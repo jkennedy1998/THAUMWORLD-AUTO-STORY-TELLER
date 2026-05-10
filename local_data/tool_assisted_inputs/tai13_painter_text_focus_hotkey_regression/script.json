@@ -1,0 +1,24 @@
+{
+  "id": "painter_text_focus_hotkey_regression",
+  "test_name": "paint_test_text_focus_blocks_tool_hotkeys_then_restores",
+  "clock_mode": "realtime_ms",
+  "open_ms": 15000,
+  "description": "Verify focused painter text entry consumes text-like hotkeys without switching tools, then returns hotkey control after focus exits.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 150, "type": "invoke_helper", "helper": "reset_painter_module_layout" },
+    { "at_ms": 450, "type": "key_tap", "code": "KeyB", "key": "b", "hold_ms": 30 },
+    { "at_ms": 800, "type": "assert_painter_primary_tool", "tool": "bucket" },
+    { "at_ms": 900, "type": "capture_text_value", "slot": "layer_name_before", "source": "layer_name", "field": "0" },
+    { "at_ms": 1150, "type": "invoke_helper", "helper": "start_layer_rename", "payload": { "z": 0 } },
+    { "at_ms": 1500, "type": "text_input", "text": "PX" },
+    { "at_ms": 1950, "type": "assert_text_value_changed", "slot": "layer_name_before", "source": "layer_name", "field": "0" },
+    { "at_ms": 2200, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 2550, "type": "assert_painter_primary_tool", "tool": "bucket" },
+    { "at_ms": 2900, "type": "key_tap", "code": "Escape", "key": "Escape", "hold_ms": 30 },
+    { "at_ms": 3300, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 3650, "type": "assert_painter_primary_tool", "tool": "pencil" }
+  ]
+}

@@ -841,6 +841,21 @@ ipcMain.handle('show-open-dialog', async (event, options) => {
     }
 });
 
+ipcMain.handle('request-app-quit', async () => {
+    try {
+        setTimeout(() => {
+            try {
+                app.quit();
+            } catch {
+                // ignore
+            }
+        }, 0);
+        return { success: true };
+    } catch (error) {
+        return { success: false, error: error.message };
+    }
+});
+
 ipcMain.handle('get-data-slot-dir', async (event, slot) => {
     return join(process.cwd(), 'local_data', `data_slot_${slot}`);
 });

@@ -1,0 +1,25 @@
+{
+  "id": "painter_anchor_smoke",
+  "test_name": "paint_test_anchor_updates_and_cell_binding_smoke",
+  "clock_mode": "realtime_ms",
+  "open_ms": 14000,
+  "description": "Verify painter pointer hover updates the interaction anchor, keeps anchors in bounds, and binds anchor-cell capture to the hovered world location.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 150, "type": "invoke_helper", "helper": "reset_painter_module_layout" },
+    { "at_ms": 450, "type": "key_tap", "code": "KeyP", "key": "p", "hold_ms": 30 },
+    { "at_ms": 750, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 900, "type": "capture_painter_interaction_anchor", "slot": "anchor_a" },
+    { "at_ms": 950, "type": "assert_painter_anchor_in_bounds", "anchor_slot": "anchor_a" },
+    { "at_ms": 1050, "type": "capture_painter_anchor_cell", "slot": "anchor_a_before", "anchor_slot": "anchor_a" },
+    { "at_ms": 1300, "type": "pointer_click", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 1700, "type": "assert_painter_anchor_cell_changed", "slot": "anchor_a_before", "anchor_slot": "anchor_a" },
+    { "at_ms": 1850, "type": "capture_painter_anchor_cell", "slot": "anchor_a_after", "anchor_slot": "anchor_a" },
+    { "at_ms": 2100, "type": "pointer_move", "space": "grid", "x": 68, "y": 28, "pointer_action": "primary" },
+    { "at_ms": 2250, "type": "capture_painter_interaction_anchor", "slot": "anchor_b" },
+    { "at_ms": 2300, "type": "assert_painter_anchor_in_bounds", "anchor_slot": "anchor_b" },
+    { "at_ms": 2450, "type": "assert_painter_anchor_cell_changed", "slot": "anchor_a_after", "anchor_slot": "anchor_b" }
+  ]
+}

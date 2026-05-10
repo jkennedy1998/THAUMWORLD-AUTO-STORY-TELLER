@@ -15,6 +15,9 @@ export type ColorPickerOptions = {
   on_preview_change?: (rgb: Rgb, button?: number) => void;
   on_commit: (rgb: Rgb, button?: number) => void;
   adapter?: ColorPickerAxisAdapter;
+  get_preview_rgb?: (adapter: ColorPickerAxisAdapter, axes: ColorPickerAxes) => Rgb;
+  get_axes_from_rgb?: (adapter: ColorPickerAxisAdapter, rgb: Rgb) => ColorPickerAxes;
+  get_status_text?: (rgb: Rgb) => string;
   commit_on_wheel?: boolean;
   show_field_marker?: boolean;
   show_slider_marker?: boolean;
@@ -89,6 +92,8 @@ function resolve_selected_cell_style(color_rgb: Rgb, left_rgb: Rgb | null | unde
 
 export function make_color_picker_module(opts: ColorPickerOptions): Module {
   const adapter = opts.adapter ?? HSV_SV_HUE_PICKER_ADAPTER;
+  const resolve_preview_rgb = (axes: ColorPickerAxes): Rgb => ({ ...(opts.get_preview_rgb?.(adapter, axes) ?? sample_indexed_picker_color(adapter, axes).rgb) });
+  const resolve_axes_from_rgb = (rgb: Rgb): ColorPickerAxes => opts.get_axes_from_rgb?.(adapter, rgb) ?? axes_from_indexed_rgb(adapter, rgb);
   const gizmo_config: ModuleGizmosConfig = {
     enabled: ['move', 'resize', 'close', 'seamless'],
     can_close: true,
@@ -98,9 +103,9 @@ export function make_color_picker_module(opts: ColorPickerOptions): Module {
     on_move: opts.on_move,
   };
 
-  let preview_axes = axes_from_indexed_rgb(adapter, nearest_indexed_color(opts.get_committed_rgb()).rgb);
+  let preview_axes = resolve_axes_from_rgb(opts.get_committed_rgb());
   let committed_axes = { ...preview_axes };
-  let preview_rgb = sample_indexed_picker_color(adapter, preview_axes).rgb;
+  let preview_rgb = resolve_preview_rgb(preview_axes);
   let committed_rgb = { ...preview_rgb };
   let drag_target: DragTarget = null;
   let active_button = 0;
@@ -108,13 +113,13 @@ export function make_color_picker_module(opts: ColorPickerOptions): Module {
   function sync_from_rgb(next_rgb: Rgb): void {
     committed_rgb = { ...next_rgb };
     preview_rgb = { ...next_rgb };
-    committed_axes = axes_from_indexed_rgb(adapter, next_rgb);
+    committed_axes = resolve_axes_from_rgb(next_rgb);
     preview_axes = { ...committed_axes };
   }
 
   function sync_from_external(): void {
     if (drag_target) return;
-    const next_rgb = nearest_indexed_color(opts.get_committed_rgb(active_button)).rgb;
+    const next_rgb = { ...opts.get_committed_rgb(active_button) };
     if (rgb_eq(next_rgb, committed_rgb)) return;
     sync_from_rgb(next_rgb);
   }
@@ -125,7 +130,7 @@ export function make_color_picker_module(opts: ColorPickerOptions): Module {
 
   function update_preview_axes(next_axes: ColorPickerAxes): void {
     preview_axes = normalize_picker_axes(adapter, next_axes);
-    preview_rgb = { ...sample_indexed_picker_color(adapter, preview_axes).rgb };
+    preview_rgb = resolve_preview_rgb(preview_axes);
     opts.on_preview_change?.({ ...preview_rgb }, active_button);
   }
 
@@ -182,16 +187,16 @@ export function make_color_picker_module(opts: ColorPickerOptions): Module {
       for (let y = layout.field.y0; y <= layout.field.y1; y += 1) {
         for (let x = layout.field.x0; x <= layout.field.x1; x += 1) {
           const axes = field_axes_from_point(layout.field, x, y);
-          const color = sample_indexed_picker_color(adapter, axes);
-          const cell = resolve_selected_cell_style(color.rgb, left_selected_rgb, right_selected_rgb);
-          c.set(x, y, { char: cell.char, rgb: color.rgb, style: 'regular', weight_index: cell.weight_index, render_index: 6 });
+          const color_rgb = resolve_preview_rgb(axes);
+          const cell = resolve_selected_cell_style(color_rgb, left_selected_rgb, right_selected_rgb);
+          c.set(x, y, { char: cell.char, rgb: color_rgb, style: 'regular', weight_index: cell.weight_index, render_index: 6 });
         }
       }
 
       for (let y = layout.slider.y0; y <= layout.slider.y1; y += 1) {
-        const color = sample_indexed_picker_color(adapter, slider_axes_from_point(layout.slider, y));
-        const cell = resolve_selected_cell_style(color.rgb, left_selected_rgb, right_selected_rgb);
-        c.set(layout.slider.x0, y, { char: cell.char, rgb: color.rgb, style: 'regular', weight_index: cell.weight_index, render_index: 6 });
+        const color_rgb = resolve_preview_rgb(slider_axes_from_point(layout.slider, y));
+        const cell = resolve_selected_cell_style(color_rgb, left_selected_rgb, right_selected_rgb);
+        c.set(layout.slider.x0, y, { char: cell.char, rgb: color_rgb, style: 'regular', weight_index: cell.weight_index, render_index: 6 });
       }
 
       const preview_x = Math.round(layout.field.x0 + preview_axes.x * Math.max(0, layout.field.x1 - layout.field.x0));
@@ -206,7 +211,7 @@ export function make_color_picker_module(opts: ColorPickerOptions): Module {
       }
 
       const indexed = find_indexed_color_by_rgb(preview_rgb) ?? nearest_indexed_color(preview_rgb);
-      const status = trim_text(`${indexed.name.toUpperCase()} ${indexed.hex}`, Math.max(0, rect.x1 - rect.x0 - 2));
+      const status = trim_text(opts.get_status_text?.(preview_rgb) ?? `${indexed.name.toUpperCase()} ${indexed.hex}`, Math.max(0, rect.x1 - rect.x0 - 2));
       const axes_text = trim_text(`${adapter.axis_x_label}/${adapter.axis_y_label} ${adapter.axis_scroll_label}`, Math.max(0, rect.x1 - rect.x0 - 2));
       draw_text(c, rect.x0 + 1, layout.info_y, status, medium, 1);
       draw_text(c, rect.x0 + 1, layout.status_y, axes_text, bright, 1);

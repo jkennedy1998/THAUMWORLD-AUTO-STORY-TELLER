@@ -7,7 +7,7 @@
 
 import type { Canvas, Cell, Module, Rect, PointerEvent, WheelEvent, Rgb } from '../types.js';
 import { get_enabled_appearance_slots, type AppearanceSlotTargetMask } from '../../ascii_painter/types.js';
-import { get_color_by_name, INDEXED_COLORS } from '../colors.js';
+import { get_color_by_name, list_active_indexed_colors } from '../colors.js';
 import { list_material_defs, resolve_material_rgb } from '../runtime/material_registry.js';
 import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
@@ -160,7 +160,7 @@ function build_rows(rect: Rect): PaletteRow[] {
   const medium = get_ui_semantic_rgb('medium');
   const bright = get_ui_semantic_rgb('bright');
   const material_entries: PaletteEntry[] = MATERIAL_DEFS.map((material) => ({ kind: 'material', key: `material:${material.id}`, material_id: material.id }));
-  const color_entries: PaletteEntry[] = INDEXED_COLORS.map((color) => ({ kind: 'color', key: `color:${color.index}`, rgb: color.rgb }));
+  const color_entries: PaletteEntry[] = list_active_indexed_colors().map((color) => ({ kind: 'color', key: `color:${color.id ?? color.index}`, rgb: color.rgb }));
 
   rows.push({ kind: 'text', text: '[MATERIALS]', rgb: bright, weight_index: 5 });
   const material_columns = get_entry_columns(rect, false);

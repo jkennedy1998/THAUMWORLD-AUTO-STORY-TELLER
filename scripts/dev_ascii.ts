@@ -45,25 +45,26 @@ const diag_profile = (diag_profile_arg ? String(diag_profile_arg.split("=")[1] ?
 const baseDir = path.join(__dirname, "..");
 const tai_entry = tai_id ? resolveToolAssistedInputsEntry(baseDir, tai_id) : null;
 const remote_transport = preferred_host ? build_multiplayer_transport_config({ host: preferred_host }) : null;
+let stdio_broken_pipe_detected = false;
 
-console.log("Starting THAUMWORLD ASCII Painter...");
-console.log(`Data slot: ${data_slot}`);
-console.log(`Diagnostics profile: ${diag_profile}`);
-console.log(`Launch mode: ${launch_mode}`);
-if (preferred_host) console.log(`Preferred host: ${preferred_host}`);
+safeConsoleLog("Starting THAUMWORLD ASCII Painter...");
+safeConsoleLog(`Data slot: ${data_slot}`);
+safeConsoleLog(`Diagnostics profile: ${diag_profile}`);
+safeConsoleLog(`Launch mode: ${launch_mode}`);
+if (preferred_host) safeConsoleLog(`Preferred host: ${preferred_host}`);
 if (tai_entry) {
-  console.log(`Tool Assisted Inputs: tai${tai_entry.id}`);
-  console.log(`TAS test: ${tai_entry.testName}`);
-  console.log(`TAS open ms: ${tai_entry.openMs}`);
-  if (tai_entry.lane) console.log(`TAS lane: ${tai_entry.lane}`);
-  if (tai_entry.status) console.log(`TAS status: ${tai_entry.status}`);
-  if (tai_entry.purpose) console.log(`TAS purpose: ${tai_entry.purpose}`);
-  if (tai_entry.notes) console.warn(`[TAI] ${tai_entry.notes}`);
-  if (tai_timing_profile) console.log(`TAS timing profile: ${tai_timing_profile}`);
-  if (tai_join_code) console.log(`TAS remote join code: ${tai_join_code}`);
-  if (tai_join_relay_origin) console.log(`TAS remote relay origin: ${tai_join_relay_origin}`);
+  safeConsoleLog(`Tool Assisted Inputs: tai${tai_entry.id}`);
+  safeConsoleLog(`TAS test: ${tai_entry.testName}`);
+  safeConsoleLog(`TAS open ms: ${tai_entry.openMs}`);
+  if (tai_entry.lane) safeConsoleLog(`TAS lane: ${tai_entry.lane}`);
+  if (tai_entry.status) safeConsoleLog(`TAS status: ${tai_entry.status}`);
+  if (tai_entry.purpose) safeConsoleLog(`TAS purpose: ${tai_entry.purpose}`);
+  if (tai_entry.notes) safeConsoleError(`[TAI] ${tai_entry.notes}`);
+  if (tai_timing_profile) safeConsoleLog(`TAS timing profile: ${tai_timing_profile}`);
+  if (tai_join_code) safeConsoleLog(`TAS remote join code: ${tai_join_code}`);
+  if (tai_join_relay_origin) safeConsoleLog(`TAS remote relay origin: ${tai_join_relay_origin}`);
 }
-console.log("");
+safeConsoleLog("");
 
 const session = initLogSession(data_slot, "painter", {
   launcher: 'dev_ascii',
@@ -93,20 +94,72 @@ function verifyLatestPointer(): void {
       taiId: tai_entry?.id ?? null,
       testName: tai_entry?.testName ?? null,
     });
-    console.warn(`[launcher] repaired latest.log -> ${path.basename(mainLog)}`);
+    safeConsoleError(`[launcher] repaired latest.log -> ${path.basename(mainLog)}`);
     return;
   }
-  console.warn(`[launcher] latest.log verification failed for ${path.basename(mainLog)}`);
+  safeConsoleError(`[launcher] latest.log verification failed for ${path.basename(mainLog)}`);
 }
 
 verifyLatestPointer();
 
-console.log(`Logging to: ${logDir}`);
-console.log(`Main log: ${mainLog}`);
-console.log(`Session ID: ${sessionId}`);
-console.log("");
+safeConsoleLog(`Logging to: ${logDir}`);
+safeConsoleLog(`Main log: ${mainLog}`);
+safeConsoleLog(`Session ID: ${sessionId}`);
+safeConsoleLog("");
 
 const childProcesses: ChildProcess[] = [];
+let shutdown_started = false;
+let tai_auto_exit_timer: NodeJS.Timeout | null = null;
+let tai_completion_detected = false;
+const tai_auto_exit_grace_ms = Math.max(2000, (tai_entry?.endDelayMs ?? 1200) + 1500);
+
+function isBrokenPipeError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = 'code' in err ? String((err as { code?: unknown }).code ?? '') : '';
+  return code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED';
+}
+
+function safeConsoleLog(...args: unknown[]): void {
+  if (stdio_broken_pipe_detected) return;
+  try {
+    console.log(...args);
+  } catch (err) {
+    if (isBrokenPipeError(err)) {
+      stdio_broken_pipe_detected = true;
+      return;
+    }
+    throw err;
+  }
+}
+
+function safeConsoleError(...args: unknown[]): void {
+  if (stdio_broken_pipe_detected) return;
+  try {
+    console.error(...args);
+  } catch (err) {
+    if (isBrokenPipeError(err)) {
+      stdio_broken_pipe_detected = true;
+      return;
+    }
+    throw err;
+  }
+}
+
+process.stdout.on('error', (err) => {
+  if (isBrokenPipeError(err)) {
+    stdio_broken_pipe_detected = true;
+    return;
+  }
+  throw err;
+});
+
+process.stderr.on('error', (err) => {
+  if (isBrokenPipeError(err)) {
+    stdio_broken_pipe_detected = true;
+    return;
+  }
+  throw err;
+});
 
 async function detectPainterVite(): Promise<boolean> {
   try {
@@ -126,8 +179,18 @@ function appendToLog(entry: string): void {
   try {
     fs.appendFileSync(mainLog, entry + "\n");
   } catch (err) {
-    console.error("Failed to write to log:", err);
+    safeConsoleError("Failed to write to log:", err);
   }
+}
+
+function scheduleTaiAutoExit(reason: string): void {
+  if (!tai_entry || shutdown_started || tai_auto_exit_timer) return;
+  tai_completion_detected = true;
+  appendToLog(formatLogEntry("LAUNCHER", "INFO", `TAI auto-exit scheduled ${JSON.stringify({ reason, grace_ms: tai_auto_exit_grace_ms, session_id: sessionId, tai_id: tai_entry.id })}`));
+  tai_auto_exit_timer = setTimeout(() => {
+    tai_auto_exit_timer = null;
+    void shutdown('tai_auto_exit');
+  }, tai_auto_exit_grace_ms);
 }
 
 appendToLog(formatLogEntry("LAUNCHER", "INFO", `dev_ascii session ${JSON.stringify({
@@ -199,7 +262,11 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       if (!line.trim()) continue;
       const entry = formatLogEntry(name, "INFO", line);
       appendToLog(entry);
-      console.log(entry);
+      safeConsoleLog(entry);
+      if (name === 'electron' && tai_entry) {
+        if (line.includes('SCRIPT_TRACE completed')) scheduleTaiAutoExit('script_trace_completed');
+        else if (line.includes('SCRIPT_TRACE failed')) scheduleTaiAutoExit('script_trace_failed');
+      }
     }
   });
   child.stderr?.on("data", (data: Buffer | string) => {
@@ -208,7 +275,7 @@ function spawnWithLogging(name: string, command: string, args: string[], options
       if (!line.trim()) continue;
       const entry = formatLogEntry(name, "ERROR", line);
       appendToLog(entry);
-      console.error(entry);
+      safeConsoleError(entry);
     }
   });
   child.on("close", (code) => {
@@ -216,14 +283,14 @@ function spawnWithLogging(name: string, command: string, args: string[], options
     const index = childProcesses.indexOf(child);
     if (index > -1) childProcesses.splice(index, 1);
     if (childProcesses.length === 0) {
-      console.log("\nAll processes exited");
+      safeConsoleLog("\nAll processes exited");
       process.exit(code || 0);
     }
   });
   child.on("error", (err) => {
     const entry = formatLogEntry(name, "ERROR", `Process error: ${err.message}`);
     appendToLog(entry);
-    console.error(entry);
+    safeConsoleError(entry);
   });
   return child;
 }
@@ -272,7 +339,7 @@ function logLaunchDecision(payload: Record<string, unknown>): void {
 }
 
 async function startPainter(): Promise<void> {
-  console.log("Starting painter...");
+  safeConsoleLog("Starting painter...");
   const hostProbeOptions = remote_transport ? { apiBaseUrl: remote_transport.api_base_url } : undefined;
   let hostExists = remote_transport ? await detectHost(data_slot, hostProbeOptions) : await detectLocalHost(data_slot);
   const initialHostExists = hostExists;
@@ -285,7 +352,7 @@ async function startPainter(): Promise<void> {
   const existingLock = readHostLaunchLock(baseDir, data_slot);
   if (!remote_transport && !hostExists && existingLock) {
     const recovered = await recoverHostLaunchLock(baseDir, data_slot, { timeoutMs: 5000, probeFirst: true });
-    console.log(`Host lock recovery: ${recovered.reason}${recovered.cleared ? ' (cleared stale lock)' : ''}`);
+    safeConsoleLog(`Host lock recovery: ${recovered.reason}${recovered.cleared ? ' (cleared stale lock)' : ''}`);
     hostExists = await detectLocalHost(data_slot);
   }
   let rendererBootRole: '' | 'host' | 'client' = '';
@@ -308,7 +375,7 @@ async function startPainter(): Promise<void> {
     startupJoinAutoOpen = Boolean(preferred_host);
     if (remote_transport) {
       hostExists = await waitForHost(data_slot, 20000, hostProbeOptions);
-      console.log(`Remote host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
+      safeConsoleLog(`Remote host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
       if (!hostExists) decisionReason = 'explicit_client_remote_unreachable';
     }
   } else if (launch_mode === 'host' || launch_mode === 'host-only') {
@@ -348,7 +415,7 @@ async function startPainter(): Promise<void> {
       throw new Error(`painter_host_mode_lock_conflict:slot_${data_slot}`);
     }
     lockAcquired = true;
-    console.log(`Host lock acquired at ${lock.lockPath}`);
+    safeConsoleLog(`Host lock acquired at ${lock.lockPath}`);
     appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter host owner elected ${JSON.stringify({
       data_slot,
       lock_path: lock.lockPath,
@@ -359,7 +426,7 @@ async function startPainter(): Promise<void> {
     setTimeout(() => releaseHostLaunchLock(lock.lockPath), 20000);
     startHostServices = true;
     hostExists = await waitForLocalHost(data_slot, 20000);
-    console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
+    safeConsoleLog(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
       rendererBootRole = 'host';
       spawnRenderer = launch_mode === 'host';
       startupJoinAutoOpen = false;
@@ -370,7 +437,7 @@ async function startPainter(): Promise<void> {
     hostLockPath = lock.lockPath;
     if (lock.ok) {
       lockAcquired = true;
-      console.log(`Host lock acquired at ${lock.lockPath}`);
+      safeConsoleLog(`Host lock acquired at ${lock.lockPath}`);
       appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter host owner elected ${JSON.stringify({
         data_slot,
         lock_path: lock.lockPath,
@@ -381,19 +448,19 @@ async function startPainter(): Promise<void> {
       setTimeout(() => releaseHostLaunchLock(lock.lockPath), 20000);
       startHostServices = true;
       hostExists = await waitForLocalHost(data_slot, 20000);
-      console.log(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
+      safeConsoleLog(`Host wait result after start: ${hostExists ? 'ready' : 'not_reachable'}`);
       rendererBootRole = '';
       spawnRenderer = true;
       startupJoinAutoOpen = false;
       decisionReason = hostExists ? 'smart_shell_started_local_host' : 'smart_shell_started_local_host_unreachable';
     } else {
-      console.log('Another launcher is starting the local host; waiting to attach...');
+      safeConsoleLog('Another launcher is starting the local host; waiting to attach...');
       appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach waiting for existing host ${JSON.stringify({
         data_slot,
         lock_path: lock.lockPath,
       })}`));
       hostExists = await waitForLocalHost(data_slot, 20000);
-      console.log(`Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
+      safeConsoleLog(`Host wait result while attaching: ${hostExists ? 'ready' : 'not_reachable'}`);
       rendererBootRole = '';
       spawnRenderer = true;
       startupJoinAutoOpen = false;
@@ -405,7 +472,7 @@ async function startPainter(): Promise<void> {
     startHostServices = false;
     startupJoinAutoOpen = false;
     decisionReason = remote_transport ? 'smart_shell_remote_host_available' : 'smart_shell_local_host_available';
-    console.log(remote_transport ? 'Remote host detected; opening neutral painter shell' : 'Local host detected; opening neutral painter shell');
+    safeConsoleLog(remote_transport ? 'Remote host detected; opening neutral painter shell' : 'Local host detected; opening neutral painter shell');
     appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter attach-only launch ${JSON.stringify({
       data_slot,
       session_id: sessionId,
@@ -430,8 +497,8 @@ async function startPainter(): Promise<void> {
   });
 
   if (!spawnRenderer) {
-    console.log('Painter host services started');
-    console.log("Press Ctrl+C to stop");
+    safeConsoleLog('Painter host services started');
+    safeConsoleLog("Press Ctrl+C to stop");
     return;
   }
   appendToLog(formatLogEntry("LAUNCHER", "INFO", `Painter renderer boot role resolved ${JSON.stringify({
@@ -444,13 +511,19 @@ async function startPainter(): Promise<void> {
     startup_join_auto_open: startupJoinAutoOpen,
   })}`));
   startPainterClientProcesses(viteExists, rendererBootRole, startupJoinAutoOpen);
-  console.log(hostExists ? 'Painter multiplayer compatibility boot ready' : 'Painter host unavailable; client will fall back locally');
-  console.log("Press Ctrl+C to stop");
+  safeConsoleLog(hostExists ? 'Painter multiplayer compatibility boot ready' : 'Painter host unavailable; client will fall back locally');
+  safeConsoleLog("Press Ctrl+C to stop");
 }
 
-async function shutdown(): Promise<void> {
-  console.log("\nShutting down painter...");
-  appendToLog(formatLogEntry("LAUNCHER", "INFO", "Shutdown initiated by user"));
+async function shutdown(reason: string = 'user'): Promise<void> {
+  if (shutdown_started) return;
+  shutdown_started = true;
+  if (tai_auto_exit_timer) {
+    clearTimeout(tai_auto_exit_timer);
+    tai_auto_exit_timer = null;
+  }
+  safeConsoleLog("\nShutting down painter...");
+  appendToLog(formatLogEntry("LAUNCHER", "INFO", `Shutdown initiated ${JSON.stringify({ reason, tai_completion_detected, session_id: sessionId, tai_id: tai_entry?.id ?? null })}`));
   for (const child of childProcesses) {
     if (!child.killed) child.kill("SIGTERM");
   }
@@ -459,24 +532,24 @@ async function shutdown(): Promise<void> {
     if (!child.killed) child.kill("SIGKILL");
   }
   appendToLog(formatLogEntry("LAUNCHER", "INFO", "All processes terminated"));
-  console.log("Goodbye!");
+  safeConsoleLog("Goodbye!");
   process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => { void shutdown('sigint'); });
+process.on("SIGTERM", () => { void shutdown('sigterm'); });
 process.on("uncaughtException", (err) => {
-  console.error("Uncaught exception:", err);
-  void shutdown();
+  safeConsoleError("Uncaught exception:", err);
+  void shutdown('uncaught_exception');
 });
 process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled rejection:", reason);
-  void shutdown();
+  safeConsoleError("Unhandled rejection:", reason);
+  void shutdown('unhandled_rejection');
 });
 
 try {
   void startPainter();
 } catch (err) {
-  console.error("Failed to start painter:", err);
+  safeConsoleError("Failed to start painter:", err);
   process.exit(1);
 }

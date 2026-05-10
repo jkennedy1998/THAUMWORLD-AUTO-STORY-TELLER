@@ -2,8 +2,7 @@ import { THAUMWORLD_RENDER_THEME, resolve_render_backend, type RenderBackendKind
 import { clamp_weight_index } from '../weight_system.js';
 import { get_cached_resolved_atlas_frame, load_resolved_atlas_frame } from './atlas_runtime.js';
 import type { AppearanceSlotAssignments, InlineMaterialAssignments, RenderGraphicRef } from '../../render_shaders/graphics_contract.js';
-import { resolve_material_rgb } from './material_registry.js';
-import { project_lit_semantic_value, resolve_light_mag } from '../../mag/light.js';
+import { resolve_primary_cell_rgb } from './appearance_resolver.js';
 import { diag_log } from '../../shared/diagnostics.js';
 
 type RenderableCell = {
@@ -49,14 +48,15 @@ const loggedAtlasGraphics = new Set<string>();
 const loggedAtlasOutcomes = new Set<string>();
 
 function resolve_font_cell_rgb(cell: RenderableCell): { r: number; g: number; b: number } {
-  const slot_1 = cell.appearance_slots?.[1];
-  if (slot_1?.kind === 'flat_rgb') return slot_1.rgb;
-  if (slot_1?.kind === 'material') {
-    const lit_value = project_lit_semantic_value('2nd_lightest', resolve_light_mag(cell.light_mag));
-    const resolved = resolve_material_rgb(slot_1.material_id, lit_value);
-    if (resolved) return resolved;
-  }
-  return cell.rgb;
+  return resolve_primary_cell_rgb({
+    rgb: cell.rgb,
+    appearance_slots: cell.appearance_slots,
+    materials: cell.materials,
+    light_mag: cell.light_mag,
+    slot: 1,
+    semantic_value: '2nd_lightest',
+    rgb_policy: 'preserve',
+  });
 }
 
 function draw_font_cell(opts: DrawCellOpts, cache?: FontDrawStateCache): void {

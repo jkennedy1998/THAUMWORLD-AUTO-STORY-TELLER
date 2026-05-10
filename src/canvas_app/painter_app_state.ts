@@ -21,6 +21,8 @@ import { make_brush_preview_module } from '../mono_ui/modules/brush_preview_modu
 import { make_brush_color_block_module } from '../mono_ui/modules/brush_color_block_module.js';
 import { make_color_selector_module } from '../mono_ui/modules/color_selector_module.js';
 import { make_color_picker_module } from '../mono_ui/modules/color_picker_module.js';
+import { make_indexed_palette_module } from '../mono_ui/modules/indexed_palette_module.js';
+import { make_palette_slot_color_picker_module } from '../mono_ui/modules/palette_slot_color_picker_module.js';
 import { make_toolbox_module } from '../mono_ui/modules/toolbox_module.js';
 import { make_tool_properties_module, type ToolPropertyRow } from '../mono_ui/modules/tool_properties_module.js';
 import { make_controls_module } from '../mono_ui/modules/controls_module.js';
@@ -87,6 +89,7 @@ import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session
 import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
 import { diag_log } from '../shared/diagnostics.js';
 import { get_ui_customization_state, get_ui_semantic_rgb, load_ui_customization_state, save_ui_customization_role_color, set_ui_customization_role_color, type UiCustomizationState, type UiSemanticColorRole } from '../mono_ui/runtime/ui_customization_store.js';
+import { delete_indexed_palette_entry, duplicate_indexed_palette_entry, get_indexed_palette_state, load_indexed_palette_state, reorder_indexed_palette_entries, save_indexed_palette_state, update_indexed_palette_entry_rgb, type IndexedPaletteState } from '../mono_ui/runtime/indexed_palette_store.js';
 import { get_camera_limit_profile, sanitize_camera_config_for_app } from '../mono_ui/runtime/camera_limits.js';
 import { get_camera_settings_for_app, load_camera_settings, reset_camera_settings, save_camera_settings } from '../mono_ui/runtime/camera_customization_store.js';
 
@@ -363,6 +366,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const DEFAULT_USER_SELECTION_COLOR_RGB: Rgb = { ...get_color_by_name('pumpkin').rgb };
   const saved_tool_props = loadToolProperties();
   let ui_customization_state: UiCustomizationState = get_ui_customization_state();
+  let indexed_palette_state: IndexedPaletteState = get_indexed_palette_state();
+  let active_indexed_palette_entry_id: string | null = indexed_palette_state.entries[0]?.id ?? null;
   let user_selection_color_rgb: Rgb = { ...ui_customization_state.colors.vivid };
   type PainterSelectionChannelState = {
     connection_id: string;
@@ -432,6 +437,25 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     apply_ui_customization_runtime(next);
   }).catch(() => {
     // ignore slot customization load failures and keep defaults in memory
+  });
+
+  function apply_indexed_palette_runtime(next: IndexedPaletteState): void {
+    indexed_palette_state = next;
+    if (!indexed_palette_state.entries.some((entry) => entry.id === active_indexed_palette_entry_id)) {
+      active_indexed_palette_entry_id = indexed_palette_state.entries[0]?.id ?? null;
+    }
+  }
+
+  async function persist_indexed_palette_runtime(next: IndexedPaletteState): Promise<void> {
+    apply_indexed_palette_runtime(next);
+    const saved = await save_indexed_palette_state(PAINTER_APP_CONFIG.selected_data_slot, next, active_profile_scope);
+    apply_indexed_palette_runtime(saved);
+  }
+
+  void profile_scope_ready.then((profile_scope) => load_indexed_palette_state(PAINTER_APP_CONFIG.selected_data_slot, profile_scope)).then((next) => {
+    apply_indexed_palette_runtime(next);
+  }).catch(() => {
+    // ignore indexed palette load failures and keep defaults in memory
   });
 
   function clear_all_selection_channels(options?: { publish?: boolean }): void {
@@ -4334,6 +4358,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     applyModuleRect('tool_properties');
     applyModuleRect('customization_panel');
     applyModuleRect('customization_picker');
+    applyModuleRect('indexed_palette_panel');
+    applyModuleRect('indexed_palette_picker');
     applyModuleRect('selection_panel');
     applyModuleRect('layer_palette');
     applyModuleRect('camera_control');
@@ -4347,6 +4373,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     tool_properties_open = getInitialModuleVisibility('tool_properties', true);
     customization_open = getInitialModuleVisibility('customization_panel', false);
     customization_picker_open = getInitialModuleVisibility('customization_picker', false);
+    indexed_palette_open = getInitialModuleVisibility('indexed_palette_panel', false);
+    indexed_palette_picker_open = getInitialModuleVisibility('indexed_palette_picker', false);
     selection_panel_open = getInitialModuleVisibility('selection_panel', true);
     layer_palette_open = getInitialModuleVisibility('layer_palette', true);
     camera_control_open = getInitialModuleVisibility('camera_control', false);
@@ -4360,6 +4388,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (registry.has('tool_properties')) registry.set_visibility('tool_properties', tool_properties_open);
     if (registry.has('customization_panel')) registry.set_visibility('customization_panel', customization_open);
     if (registry.has('customization_picker')) registry.set_visibility('customization_picker', customization_picker_open);
+    if (registry.has('indexed_palette_panel')) registry.set_visibility('indexed_palette_panel', indexed_palette_open);
+    if (registry.has('indexed_palette_picker')) registry.set_visibility('indexed_palette_picker', indexed_palette_picker_open);
     if (registry.has('selection_panel')) registry.set_visibility('selection_panel', selection_panel_open);
     if (registry.has('layer_palette')) registry.set_visibility('layer_palette', layer_palette_open);
     if (registry.has('camera_control')) registry.set_visibility('camera_control', camera_control_open);
@@ -5021,6 +5051,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let tool_properties_open = getInitialModuleVisibility('tool_properties', true);
   let customization_open = getInitialModuleVisibility('customization_panel', false);
   let customization_picker_open = getInitialModuleVisibility('customization_picker', false);
+  let indexed_palette_open = getInitialModuleVisibility('indexed_palette_panel', false);
+  let indexed_palette_picker_open = getInitialModuleVisibility('indexed_palette_picker', false);
   let selection_panel_open = getInitialModuleVisibility('selection_panel', true);
   let controls_open = getInitialModuleVisibility('controls_panel', false);
 
@@ -5056,6 +5088,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let tool_properties_module: Module | null = null;
   let customization_module: Module | null = null;
   let customization_picker_module: Module | null = null;
+  let indexed_palette_module: Module | null = null;
+  let indexed_palette_picker_module: Module | null = null;
   let selection_panel_module: Module | null = null;
   let controls_module: Module | null = null;
   let active_customization_role: UiSemanticColorRole = 'vivid';
@@ -5131,6 +5165,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         if (key === 'group_order') return painter_document_runtime.document.group_order.join(',');
         if (key === 'contributor_coords') return String(painter_document_runtime.coordinate_group_index.size);
         if (key === 'resolved_coords') return String(painter_document_runtime.resolved_visible_index.size);
+        if (key === 'local_selection_count') return String(get_local_world_selection().cells.size);
+        if (key === 'clipboard_cell_count') return String(world_clipboard_data?.cells.length ?? 0);
+        if (key === 'active_group_bounds') {
+          const bounds = get_active_group_world_bounds();
+          return bounds ? `${bounds.minX},${bounds.minY},${bounds.minZ}:${bounds.maxX},${bounds.maxY},${bounds.maxZ}` : '';
+        }
         if (key === 'authority_mode') return painter_sync.get_state().authority_mode;
         if (key === 'last_patch_command_kind') return painter_sync.get_state().last_patch_command_kind ?? '';
         if (key === 'last_patch_group_id') return painter_sync.get_state().last_patch_group_id ?? '';
@@ -5284,6 +5324,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       if (helper === 'clear_anchor_cell') {
         return clear_current_anchor_cell();
       }
+      if (helper === 'clear_selection') {
+        clear_all_selection_channels();
+        refreshPainterProjectionFromWorld();
+        return true;
+      }
       if (helper === 'reset_painter_document') {
         return reset_painter_document_state();
       }
@@ -5426,6 +5471,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     y0: 10,
     x1: 114,
     y1: 28,
+  });
+
+  const indexed_palette_rect: Rect = getModuleRectWithSave('indexed_palette_panel', {
+    x0: 52,
+    y0: 22,
+    x1: 88,
+    y1: 38,
+  });
+
+  const indexed_palette_picker_rect: Rect = getModuleRectWithSave('indexed_palette_picker', {
+    x0: 90,
+    y0: 22,
+    x1: 124,
+    y1: 40,
   });
   
   // Layer Palette - positioned on the right side
@@ -6315,6 +6374,79 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
   }
 
+  function getActiveIndexedPaletteEntry() {
+    return indexed_palette_state.entries.find((entry) => entry.id === active_indexed_palette_entry_id) ?? indexed_palette_state.entries[0] ?? null;
+  }
+
+  function open_indexed_palette_picker(): void {
+    if (!registry.has('indexed_palette_picker')) {
+      indexed_palette_picker_module = create_indexed_palette_picker_module();
+      registry.register(indexed_palette_picker_module);
+    }
+    setModuleOpen('indexed_palette_picker', true, (v) => { indexed_palette_picker_open = v; });
+  }
+
+  function create_indexed_palette_module(): Module {
+    return make_indexed_palette_module({
+      id: 'indexed_palette_panel',
+      rect: indexed_palette_rect,
+      get_palette_state: () => indexed_palette_state,
+      get_active_entry_id: () => active_indexed_palette_entry_id,
+      on_select_entry: (id) => {
+        active_indexed_palette_entry_id = id;
+        open_indexed_palette_picker();
+      },
+      on_reorder_entries: (next_ids) => {
+        void persist_indexed_palette_runtime(reorder_indexed_palette_entries(next_ids)).catch(() => null);
+      },
+      on_duplicate_entry: (id) => {
+        const next = duplicate_indexed_palette_entry(id);
+        const source_index = indexed_palette_state.entries.findIndex((entry) => entry.id === id);
+        const duplicated = source_index >= 0 ? next.entries[source_index + 1] ?? next.entries[source_index] ?? next.entries[0] ?? null : next.entries[0] ?? null;
+        active_indexed_palette_entry_id = duplicated?.id ?? active_indexed_palette_entry_id;
+        open_indexed_palette_picker();
+        void persist_indexed_palette_runtime(next).catch(() => null);
+      },
+      on_delete_entry: (id) => {
+        const current_index = indexed_palette_state.entries.findIndex((entry) => entry.id === id);
+        const fallback = indexed_palette_state.entries[current_index - 1] ?? indexed_palette_state.entries[current_index + 1] ?? indexed_palette_state.entries[0] ?? null;
+        active_indexed_palette_entry_id = fallback?.id ?? active_indexed_palette_entry_id;
+        void persist_indexed_palette_runtime(delete_indexed_palette_entry(id)).catch(() => null);
+      },
+      on_move: (new_rect) => {
+        if (indexed_palette_module) indexed_palette_module.rect = new_rect;
+        saveModulePosition('indexed_palette_panel', new_rect);
+      },
+      on_close: () => {
+        setModuleOpen('indexed_palette_panel', false, (v) => { indexed_palette_open = v; });
+      },
+    });
+  }
+
+  function create_indexed_palette_picker_module(): Module {
+    return make_palette_slot_color_picker_module({
+      id: 'indexed_palette_picker',
+      rect: indexed_palette_picker_rect,
+      title: () => {
+        const entry = getActiveIndexedPaletteEntry();
+        return entry ? `SET ${(entry.label ?? 'COLOR').toUpperCase()}` : 'SET PALETTE COLOR';
+      },
+      get_active_entry: () => getActiveIndexedPaletteEntry(),
+      on_commit: (rgb) => {
+        const entry = getActiveIndexedPaletteEntry();
+        if (!entry) return;
+        void persist_indexed_palette_runtime(update_indexed_palette_entry_rgb(entry.id, rgb)).catch(() => null);
+      },
+      on_move: (new_rect) => {
+        if (indexed_palette_picker_module) indexed_palette_picker_module.rect = new_rect;
+        saveModulePosition('indexed_palette_picker', new_rect);
+      },
+      on_close: () => {
+        setModuleOpen('indexed_palette_picker', false, (v) => { indexed_palette_picker_open = v; });
+      },
+    });
+  }
+
   function create_controls_panel_module(): Module {
     return make_controls_module({
       id: 'controls_panel',
@@ -6594,6 +6726,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         (v) => { customization_open = v; },
         'customization_panel',
         create_customization_module
+      );
+    },
+    on_toggle_indexed_palette: () => {
+      toggleModule(
+        indexed_palette_open,
+        (v) => { indexed_palette_open = v; },
+        'indexed_palette_panel',
+        create_indexed_palette_module
       );
     },
     on_toggle_layer_palette: () => {
@@ -6922,6 +7062,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   tool_properties_module = create_tool_properties_module();
   customization_module = create_customization_module();
   customization_picker_module = create_customization_picker_module();
+  indexed_palette_module = create_indexed_palette_module();
+  indexed_palette_picker_module = create_indexed_palette_picker_module();
   selection_panel_module = create_selection_panel_module();
   camera_control_module = create_camera_control_module();
   controls_module = create_controls_panel_module();
@@ -6933,6 +7075,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.register(tool_properties_module);
   registry.register(customization_module);
   registry.register(customization_picker_module);
+  registry.register(indexed_palette_module);
+  registry.register(indexed_palette_picker_module);
   registry.register(selection_panel_module);
   registry.register(camera_control_module);
   registry.register(controls_module);
@@ -6945,6 +7089,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   registry.set_visibility('tool_properties', tool_properties_open);
   registry.set_visibility('customization_panel', customization_open);
   registry.set_visibility('customization_picker', customization_picker_open);
+  registry.set_visibility('indexed_palette_panel', indexed_palette_open);
+  registry.set_visibility('indexed_palette_picker', indexed_palette_picker_open);
   registry.set_visibility('selection_panel', selection_panel_open);
   registry.set_visibility('layer_palette', layer_palette_open);
   registry.set_visibility('camera_control', camera_control_open);

@@ -29,6 +29,7 @@ export type FileMenuOptions = {
   on_toggle_brush_preview?: () => void;
   on_toggle_tool_properties?: () => void;
   on_toggle_customization?: () => void;
+  on_toggle_indexed_palette?: () => void;
   on_toggle_layer_palette?: () => void;
   on_toggle_camera?: () => void;
   on_toggle_controls?: () => void;
@@ -47,6 +48,7 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
   if (opts.on_toggle_brush_preview) module_items.push(make_toggle_action({ id: 'swatch', label: 'SWATCH', onPress: opts.on_toggle_brush_preview }));
   if (opts.on_toggle_tool_properties) module_items.push(make_toggle_action({ id: 'props', label: 'PROPS', onPress: opts.on_toggle_tool_properties }));
   if (opts.on_toggle_customization) module_items.push(make_toggle_action({ id: 'custom', label: 'CUSTOM', onPress: opts.on_toggle_customization }));
+  if (opts.on_toggle_indexed_palette) module_items.push(make_toggle_action({ id: 'indexed_palette', label: 'IPAL', onPress: opts.on_toggle_indexed_palette }));
   if (opts.on_toggle_layer_palette) module_items.push(make_toggle_action({ id: 'layers', label: 'LAYERS', onPress: opts.on_toggle_layer_palette }));
   if (opts.on_toggle_camera) module_items.push(make_toggle_action({ id: 'camera', label: 'CAMERA', onPress: opts.on_toggle_camera }));
   if (opts.on_toggle_controls) module_items.push(make_toggle_action({ id: 'controls', label: 'CTRLS', onPress: opts.on_toggle_controls }));
