@@ -173,6 +173,36 @@ export type RasterMoveChangeDescriptor = {
   newCell: GridCell;
 };
 
+export type PainterCanvasModule = Module & {
+  clearSelection: () => void;
+  selectAll: () => void;
+  invertSelection: () => void;
+  hasSelection: () => boolean;
+  getSelectionBitmap: () => SelectionBitmap;
+  setSelectionBitmap: (bitmap: SelectionBitmap) => void;
+  emitViewport: () => void;
+  getPanTargetAdapter: () => ReturnType<typeof create_painter_canvas_pan_adapter>;
+  getTextCursorInteractionAnchor: () => PainterInteractionAnchor | null;
+  resolveInteractionTargets: (x: number, y: number) => OrderedResolvedTargets;
+  finalizePendingChanges: () => void;
+  copySelection: () => void;
+  nudgeSelectionByWorldDelta: (delta: { x: number; y: number; z: number }) => boolean;
+  nudgeTextCursorByWorldDelta: (delta: { x: number; y: number; z: number }) => boolean;
+  nudgePastePreviewByWorldDelta: (delta: { x: number; y: number; z: number }) => boolean;
+  hasPastePreview: () => boolean;
+  commitPastePreview: () => boolean;
+  leavePastePreview: () => boolean;
+  ensureMovePreviewFromSelection: () => boolean;
+  hasMovePreview: () => boolean;
+  nudgeMovePreviewByWorldDelta: (delta: { x: number; y: number; z: number }) => boolean;
+  commitMovePreview: () => boolean;
+  leaveMovePreview: () => boolean;
+  handleDepthStepDuringActiveStroke: (nextPlane: number) => void;
+  hasWorldPastePreview: () => boolean;
+  stepPasteViewAction: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => void;
+  setPasteAngleMode: () => void;
+};
+
 function cloneRasterMoveCell(cell: GridCell): GridCell {
   return {
     char: cell.char,
@@ -230,7 +260,7 @@ export function build_raster_move_change_descriptors(
   return changes;
 }
 
-export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
+export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterCanvasModule {
   let rect = opts.rect;
   const view_id = opts.view_id ?? `${opts.id}_view`;
 
@@ -354,6 +384,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     move_preview_anchor_world = null;
     move_preview_plane = null;
     move_preview_depth_offset = 0;
+    move_preview_delta = { x: 0, y: 0, z: 0 };
     move_preview_source_voxels = [];
     move_preview_source_selection = [];
     move_preview_group_snapshot.clear();
@@ -380,10 +411,14 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     };
   }
 
-  function updateMovePreviewAt(grid_x: number, grid_y: number, options?: { force?: boolean }): void {
-    const delta = resolveMoveDeltaAt(grid_x, grid_y);
-    if (!delta || !move_preview_mode) return;
-    const deltaKey = `${delta.x},${delta.y},${delta.z}`;
+  function applyMovePreviewDelta(delta: { x: number; y: number; z: number }, options?: { force?: boolean }): void {
+    if (!move_preview_mode || !move_preview_anchor_world) return;
+    const normalized = {
+      x: Math.floor(delta.x),
+      y: Math.floor(delta.y),
+      z: Math.floor(delta.z),
+    };
+    const deltaKey = `${normalized.x},${normalized.y},${normalized.z}`;
     if (!options?.force && deltaKey === last_move_preview_delta_key) return;
     if (!options?.force && move_preview_mode !== 'selection_mask') {
       const now = Date.now();
@@ -392,74 +427,117 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     } else if (options?.force) {
       last_move_preview_at = Date.now();
     }
+    move_preview_delta = normalized;
     last_move_preview_delta_key = deltaKey;
     if (move_preview_mode === 'selection_mask') {
-      opts.on_move_preview_selection_change?.(translateWorldCells(move_preview_source_selection, delta));
+      opts.on_move_preview_selection_change?.(translateWorldCells(move_preview_source_selection, normalized));
       return;
     }
-    const previewChanges = buildMoveContentCommitChanges(move_preview_source_voxels, delta);
+    const previewChanges = buildMoveContentCommitChanges(move_preview_source_voxels, normalized);
     replacePendingPreviewChanges(previewChanges, move_preview_anchor_world, move_preview_anchor_world?.z ?? null);
+  }
+
+  function updateMovePreviewAt(grid_x: number, grid_y: number, options?: { force?: boolean }): void {
+    const delta = resolveMoveDeltaAt(grid_x, grid_y);
+    if (!delta) return;
+    applyMovePreviewDelta(delta, options);
+  }
+
+  function buildSelectionAnchorWorld(): { x: number; y: number; z: number } | null {
+    const selection = opts.get_local_world_selection_cells?.() ?? [];
+    if (selection.length < 1) return null;
+    return selection.reduce((best, cell) => {
+      if (!best) return { x: cell.x, y: cell.y, z: cell.z };
+      if (cell.z < best.z) return { x: cell.x, y: cell.y, z: cell.z };
+      if (cell.z > best.z) return best;
+      if (cell.y < best.y) return { x: cell.x, y: cell.y, z: cell.z };
+      if (cell.y > best.y) return best;
+      if (cell.x < best.x) return { x: cell.x, y: cell.y, z: cell.z };
+      return best;
+    }, null as { x: number; y: number; z: number } | null);
+  }
+
+  function startMovePreviewFromAnchor(anchorWorld: { x: number; y: number; z: number }): boolean {
+    const selection = opts.get_local_world_selection_cells?.() ?? [];
+    if (selection.length < 1) return false;
+    const selected = opts.get_active_group_selected_world_voxels?.() ?? [];
+    const wholeGroup = opts.get_active_group_world_voxels?.() ?? [];
+    move_preview_group_snapshot = new Map(wholeGroup.map((entry) => [worldKey(entry), cloneGridCell(entry.cell)]));
+    move_preview_source_selection = selection;
+    move_preview_source_voxels = selected.map((entry) => ({
+      x: entry.x,
+      y: entry.y,
+      z: entry.z,
+      cell: cloneGridCell(entry.cell),
+    }));
+    move_preview_mode = move_preview_source_voxels.length > 0 ? 'selection_content' : 'selection_mask';
+    move_preview_anchor_world = { x: anchorWorld.x, y: anchorWorld.y, z: anchorWorld.z };
+    move_preview_plane = getWorldPointPlaneCoordinate(anchorWorld) ?? opts.get_selected_z();
+    move_preview_depth_offset = 0;
+    move_preview_delta = { x: 0, y: 0, z: 0 };
+    last_move_preview_at = 0;
+    last_move_preview_delta_key = null;
+    applyMovePreviewDelta({ x: 0, y: 0, z: 0 }, { force: true });
+    return true;
   }
 
   function startMovePreview(grid_x: number, grid_y: number): boolean {
     const anchorWorld = getWorldPointForEditPlane(grid_x, grid_y, opts.get_selected_z()) ?? opts.get_world_point_for_grid?.(grid_x, grid_y) ?? null;
     if (!anchorWorld) return false;
-    const maskOnly = opts.get_move_mask_modifier_held?.() ?? false;
-    if (maskOnly) {
-      const selection = opts.get_local_world_selection_cells?.() ?? [];
-      if (selection.length < 1) return false;
-      move_preview_mode = 'selection_mask';
-      move_preview_source_selection = selection;
-    } else {
-      const selected = opts.get_active_group_selected_world_voxels?.() ?? [];
-      const wholeGroup = opts.get_active_group_world_voxels?.() ?? [];
-      move_preview_mode = selected.length > 0 ? 'selection_content' : 'group';
-      move_preview_group_snapshot = new Map(wholeGroup.map((entry) => [worldKey(entry), cloneGridCell(entry.cell)]));
-      move_preview_source_voxels = (selected.length > 0 ? selected : wholeGroup).map((entry) => ({
-        x: entry.x,
-        y: entry.y,
-        z: entry.z,
-        cell: cloneGridCell(entry.cell),
-      }));
-      if (move_preview_source_voxels.length < 1) return false;
+    return startMovePreviewFromAnchor(anchorWorld);
+  }
+
+  function ensureMovePreviewFromSelection(): boolean {
+    if (isMovePreviewActive()) return true;
+    const anchorWorld = buildSelectionAnchorWorld();
+    if (!anchorWorld) return false;
+    return startMovePreviewFromAnchor(anchorWorld);
+  }
+
+  function commitMovePreviewFromDelta(delta: { x: number; y: number; z: number }): boolean {
+    if (!move_preview_mode) {
+      clearMovePreview();
+      return false;
     }
-    move_preview_anchor_world = anchorWorld;
-    move_preview_plane = getWorldPointPlaneCoordinate(anchorWorld) ?? opts.get_selected_z();
-    move_preview_depth_offset = 0;
-    last_move_preview_at = 0;
-    last_move_preview_delta_key = null;
-    updateMovePreviewAt(grid_x, grid_y, { force: true });
+    const normalized = {
+      x: Math.floor(delta.x),
+      y: Math.floor(delta.y),
+      z: Math.floor(delta.z),
+    };
+    if (normalized.x === 0 && normalized.y === 0 && normalized.z === 0) {
+      clearMovePreview();
+      return false;
+    }
+    if (move_preview_mode === 'selection_mask') {
+      opts.on_move_selection_commit?.(translateWorldCells(move_preview_source_selection, normalized));
+      clearMovePreview();
+      showStatus(`Moved selection ${normalized.x},${normalized.y},${normalized.z}`);
+      return true;
+    }
+    const previewChanges = buildMoveContentCommitChanges(move_preview_source_voxels, normalized);
+    pending_changes = previewChanges;
+    if (pending_changes.length > 0) {
+      const selected_z = move_preview_anchor_world?.z ?? opts.get_selected_z();
+      commitLoggedCellChanges('draw_cells', 'Move', selected_z);
+      const movedSelection = translateWorldCells(move_preview_source_selection, normalized);
+      opts.on_move_selection_commit?.(movedSelection);
+    }
+    clearMovePreview();
+    showStatus(`Moved content ${normalized.x},${normalized.y},${normalized.z}`);
     return true;
   }
 
   function commitMovePreviewAt(grid_x: number, grid_y: number): void {
     const delta = resolveMoveDeltaAt(grid_x, grid_y);
-    if (!delta || !move_preview_mode) {
+    if (!delta) {
       clearMovePreview();
       return;
     }
-    if (delta.x === 0 && delta.y === 0 && delta.z === 0) {
-      clearMovePreview();
-      return;
-    }
-    if (move_preview_mode === 'selection_mask') {
-      opts.on_move_selection_commit?.(translateWorldCells(move_preview_source_selection, delta));
-      clearMovePreview();
-      showStatus(`Moved selection ${delta.x},${delta.y},${delta.z}`);
-      return;
-    }
-    const previewChanges = buildMoveContentCommitChanges(move_preview_source_voxels, delta);
-    pending_changes = previewChanges;
-    if (pending_changes.length > 0) {
-      const selected_z = move_preview_anchor_world?.z ?? opts.get_selected_z();
-      commitLoggedCellChanges('draw_cells', 'Move', selected_z);
-      if (move_preview_mode === 'selection_content') {
-        const movedSelection = translateWorldCells(move_preview_source_voxels, delta);
-        opts.on_move_selection_commit?.(movedSelection);
-      }
-    }
-    clearMovePreview();
-    showStatus(`Moved content ${delta.x},${delta.y},${delta.z}`);
+    commitMovePreviewFromDelta(delta);
+  }
+
+  function leaveMovePreview(): boolean {
+    return commitMovePreviewFromDelta(move_preview_delta);
   }
 
   function getPreviewBrush(): Brush {
@@ -618,10 +696,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
   let paste_preview_world_anchor: { x: number; y: number; z: number } | null = null;
   let paste_preview_rotation_view: PlaceViewState | null = null;
   let paste_preview_loading = false;
-  let move_preview_mode: 'group' | 'selection_content' | 'selection_mask' | null = null;
+  let move_preview_mode: 'selection_content' | 'selection_mask' | null = null;
   let move_preview_anchor_world: { x: number; y: number; z: number } | null = null;
   let move_preview_plane: number | null = null;
   let move_preview_depth_offset = 0;
+  let move_preview_delta: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 };
   let move_preview_source_voxels: Array<{ x: number; y: number; z: number; cell: GridCell }> = [];
   let move_preview_source_selection: Array<{ x: number; y: number; z: number }> = [];
   let move_preview_group_snapshot = new Map<string, GridCell>();
@@ -1032,6 +1111,55 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const preview = buildFlatPastePreviewChanges(paste_preview_data, paste_preview_pos);
       replacePendingPreviewChanges(preview.changes, anchorWorld, anchorWorld.z);
     }
+  }
+
+  function hasPastePreview(): boolean {
+    return Boolean(paste_preview_data || paste_preview_world_data);
+  }
+
+  function commitPastePreview(): boolean {
+    if (paste_preview_world_data && paste_preview_world_anchor) {
+      if (opts.get_active_group_locked?.()) {
+        showStatus('Cannot paste: active group is locked');
+        return false;
+      }
+      const preview = buildWorldPastePreviewChanges(paste_preview_world_data, paste_preview_world_anchor);
+      pending_changes = preview.changes;
+      if (pending_changes.length > 0) {
+        const selected_z = opts.get_selected_z();
+        commitLoggedCellChanges('paste', 'Paste', selected_z);
+      }
+      const zLabel = Number.isFinite(preview.minPasteZ) && Number.isFinite(preview.maxPasteZ) ? ` Z:${preview.minPasteZ}->${preview.maxPasteZ}` : '';
+      showStatus(`Pasted 3D (${preview.placed} placed, ${preview.skippedIgnored} ignored, ${preview.preserved} preserved, ${preview.cleared} cleared${zLabel})`);
+      paste_preview_world_data = null;
+      paste_preview_world_anchor = null;
+      paste_preview_rotation_view = null;
+      clearPendingPreviewChanges();
+      return true;
+    }
+    if (paste_preview_data && paste_preview_pos) {
+      if (opts.get_active_group_locked?.()) {
+        showStatus('Cannot paste: active group is locked');
+        return false;
+      }
+      const preview = buildFlatPastePreviewChanges(paste_preview_data, paste_preview_pos);
+      pending_changes = preview.changes;
+      if (pending_changes.length > 0) {
+        const selected_z = opts.get_selected_z();
+        commitLoggedCellChanges('draw_cells', 'Paste', selected_z);
+      }
+      painterCanvasImportant('paste complete', { placed: preview.placed, ignored_preserved: preview.skippedIgnored, cleared: preview.cleared, preserved: preview.preserved });
+      showStatus(`Pasted ${paste_preview_data.width}x${paste_preview_data.height} (placed:${preview.placed}, ignored:${preview.skippedIgnored}, preserved:${preview.preserved}, cleared:${preview.cleared})`);
+      paste_preview_data = null;
+      paste_preview_pos = null;
+      clearPendingPreviewChanges();
+      return true;
+    }
+    return false;
+  }
+
+  function leavePastePreview(): boolean {
+    return commitPastePreview();
   }
 
   function ensurePastePreviewAtGrid(grid_x: number, grid_y: number): void {
@@ -2494,23 +2622,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     }
   }
 
-  const module: Module & {
-    clearSelection: () => void;
-    selectAll: () => void;
-    invertSelection: () => void;
-    hasSelection: () => boolean;
-    getSelectionBitmap: () => SelectionBitmap;
-    setSelectionBitmap: (bitmap: SelectionBitmap) => void;
-    emitViewport: () => void;
-    getPanTargetAdapter: () => ReturnType<typeof create_painter_canvas_pan_adapter>;
-    getTextCursorInteractionAnchor: () => PainterInteractionAnchor | null;
-    resolveInteractionTargets: (x: number, y: number) => OrderedResolvedTargets;
-    finalizePendingChanges: () => void;
-    handleDepthStepDuringActiveStroke: (nextPlane: number) => void;
-    hasWorldPastePreview: () => boolean;
-    stepPasteViewAction: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => void;
-    setPasteAngleMode: () => void;
-  } = {
+  const module: PainterCanvasModule = {
     id: opts.id,
     get rect() { return rect; },
     set rect(next_rect: Rect) { updateRect(next_rect); },
@@ -2561,6 +2673,80 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
     resolveInteractionTargets: (x: number, y: number) => buildResolvedTargetsForPointer(x, y),
 
     finalizePendingChanges: () => finalizePendingChanges(),
+
+    copySelection: () => copyCurrentSelection(),
+
+    nudgeSelectionByWorldDelta: (delta) => {
+      const cells = opts.get_local_world_selection_cells?.() ?? [];
+      if (cells.length < 1) return false;
+      if (delta.x === 0 && delta.y === 0 && delta.z === 0) return false;
+      opts.on_move_selection_commit?.(translateWorldCells(cells, delta));
+      return true;
+    },
+
+    nudgeTextCursorByWorldDelta: (delta) => {
+      if (!text_mode_active) return false;
+      if (delta.x === 0 && delta.y === 0 && delta.z === 0) return false;
+      const current = getTextCurrentWorld();
+      return tryMoveTextCursorToWorld({
+        x: current.x + Math.floor(delta.x),
+        y: current.y + Math.floor(delta.y),
+        z: current.z + Math.floor(delta.z),
+      });
+    },
+
+    nudgePastePreviewByWorldDelta: (delta) => {
+      if (delta.x === 0 && delta.y === 0 && delta.z === 0) return false;
+      if (paste_preview_world_data && paste_preview_world_anchor) {
+        paste_preview_world_anchor = {
+          x: paste_preview_world_anchor.x + Math.floor(delta.x),
+          y: paste_preview_world_anchor.y + Math.floor(delta.y),
+          z: paste_preview_world_anchor.z + Math.floor(delta.z),
+        };
+        const gridPoint = opts.get_grid_point_for_world?.(paste_preview_world_anchor) ?? null;
+        if (gridPoint) updatePastePreviewAtGrid(gridPoint.x, gridPoint.y);
+        return true;
+      }
+      if (paste_preview_pos) {
+        const horizontal = Math.floor(delta.x);
+        const vertical = Math.floor(delta.y);
+        if (horizontal === 0 && vertical === 0) return false;
+        paste_preview_pos = { x: paste_preview_pos.x + horizontal, y: paste_preview_pos.y + vertical };
+        updatePastePreviewAtGrid(paste_preview_pos.x, paste_preview_pos.y);
+        return true;
+      }
+      if (current_mouse_pos) {
+        const gridPoint = localToGrid(current_mouse_pos.x - rect.x0, current_mouse_pos.y - rect.y0);
+        ensurePastePreviewAtGrid(gridPoint.x, gridPoint.y);
+        return module.nudgePastePreviewByWorldDelta(delta);
+      }
+      return false;
+    },
+
+    hasPastePreview: () => hasPastePreview(),
+
+    commitPastePreview: () => commitPastePreview(),
+
+    leavePastePreview: () => leavePastePreview(),
+
+    ensureMovePreviewFromSelection: () => ensureMovePreviewFromSelection(),
+
+    hasMovePreview: () => isMovePreviewActive(),
+
+    nudgeMovePreviewByWorldDelta: (delta) => {
+      if (!ensureMovePreviewFromSelection()) return false;
+      const next = {
+        x: move_preview_delta.x + Math.floor(delta.x),
+        y: move_preview_delta.y + Math.floor(delta.y),
+        z: move_preview_delta.z + Math.floor(delta.z),
+      };
+      applyMovePreviewDelta(next, { force: true });
+      return true;
+    },
+
+    commitMovePreview: () => commitMovePreviewFromDelta(move_preview_delta),
+
+    leaveMovePreview: () => leaveMovePreview(),
 
     handleDepthStepDuringActiveStroke: (nextPlane: number) => handleDepthStepDuringActiveStroke(nextPlane),
 
@@ -2931,16 +3117,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
       const tool_for_button = e.button === 2 ? opts.get_right_click_tool() : opts.get_left_click_tool();
       const tool_target = getToolTargetForButton(e.button, tool_for_button);
 
-      if (tool_for_button !== 'paste' && !isPasteToolActiveForAnyHand() && (paste_preview_data || paste_preview_world_data)) {
-        clearPendingPreviewChanges();
-        paste_preview_data = null;
-        paste_preview_pos = null;
-        paste_preview_world_data = null;
-        paste_preview_world_anchor = null;
-        paste_preview_rotation_view = null;
+      if (tool_for_button !== 'paste' && !isPasteToolActiveForAnyHand() && hasPastePreview()) {
+        commitPastePreview();
       }
       if (tool_for_button !== 'move' && isMovePreviewActive()) {
-        clearMovePreview();
+        commitMovePreviewFromDelta(move_preview_delta);
       }
 
       if (text_mode_active) {
@@ -3128,11 +3309,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         }
 
         if (tool_for_button === 'move') {
-          if (startGroupLocationDrag(grid_x, grid_y)) {
-            return;
-          }
           if (startMovePreview(grid_x, grid_y)) {
-            showStatus((opts.get_move_mask_modifier_held?.() ?? false) ? 'Move selection preview' : 'Move content preview');
+            showStatus('Move selection preview');
+          } else {
+            showStatus('Nothing selected to move');
           }
           return;
         }
@@ -3399,42 +3579,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnPointerUp(e: PointerEvent): void {
       pressed_canvas_nav_button = null;
-      if (isPasteToolActiveForAnyHand() && paste_preview_world_data && paste_preview_world_anchor) {
-        if (opts.get_active_group_locked?.()) {
-          showStatus('Cannot paste: active group is locked');
-          return;
-        }
-        const preview = buildWorldPastePreviewChanges(paste_preview_world_data, paste_preview_world_anchor);
-        pending_changes = preview.changes;
-        if (pending_changes.length > 0) {
-          const selected_z = opts.get_selected_z();
-          commitLoggedCellChanges('paste', 'Paste', selected_z);
-        }
-        const zLabel = Number.isFinite(preview.minPasteZ) && Number.isFinite(preview.maxPasteZ) ? ` Z:${preview.minPasteZ}->${preview.maxPasteZ}` : '';
-        showStatus(`Pasted 3D (${preview.placed} placed, ${preview.skippedIgnored} ignored, ${preview.preserved} preserved, ${preview.cleared} cleared${zLabel})`);
-        paste_preview_world_data = null;
-        paste_preview_world_anchor = null;
-        paste_preview_rotation_view = null;
-        return;
-      }
-
-      // Handle paste placement
-      if (isPasteToolActiveForAnyHand() && paste_preview_data && paste_preview_pos) {
-        if (opts.get_active_group_locked?.()) {
-          showStatus('Cannot paste: active group is locked');
-          return;
-        }
-        
-        const preview = buildFlatPastePreviewChanges(paste_preview_data, paste_preview_pos);
-        pending_changes = preview.changes;
-        if (pending_changes.length > 0) {
-          const selected_z = opts.get_selected_z();
-          commitLoggedCellChanges('draw_cells', 'Paste', selected_z);
-        }
-        painterCanvasImportant('paste complete', { placed: preview.placed, ignored_preserved: preview.skippedIgnored, cleared: preview.cleared, preserved: preview.preserved });
-        showStatus(`Pasted ${paste_preview_data.width}x${paste_preview_data.height} (placed:${preview.placed}, ignored:${preview.skippedIgnored}, preserved:${preview.preserved}, cleared:${preview.cleared})`);
-        paste_preview_data = null;
-        paste_preview_pos = null;
+      if (isPasteToolActiveForAnyHand() && hasPastePreview()) {
+        commitPastePreview();
         return;
       }
 
@@ -3673,60 +3819,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnKeyDown(e: KeyboardEvent): void {
       ensureGridShapeState();
-      if (isMovePreviewActive()) {
-        const currentGrid = current_mouse_pos ? localToGrid(current_mouse_pos.x - rect.x0, current_mouse_pos.y - rect.y0) : { x: 0, y: 0 };
-        const nudgeByCode: Partial<Record<string, { x: number; y: number; z: number }>> = {
-          Numpad1: { x: -1, y: 0, z: 0 },
-          Numpad3: { x: 1, y: 0, z: 0 },
-          NumpadAdd: { x: 0, y: 0, z: 1 },
-          NumpadSubtract: { x: 0, y: 0, z: -1 },
-        };
-        const nudge = nudgeByCode[e.code];
-        if (nudge) {
-          move_preview_depth_offset += nudge.z;
-          if (move_preview_anchor_world) {
-            move_preview_anchor_world = { ...move_preview_anchor_world, x: move_preview_anchor_world.x - nudge.x, y: move_preview_anchor_world.y - nudge.y, z: move_preview_anchor_world.z };
-          }
-          updateMovePreviewAt(currentGrid.x, currentGrid.y, { force: true });
-          e.preventDefault();
-          return;
-        }
-      }
-      // Undo - Ctrl+Z
-      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
-        finalizePendingChanges();
-        const description = opts.on_undo_request();
-        if (description) {
-          opts.on_history_applied?.();
-          showStatus(`Undo: ${description}`);
-        } else {
-          showStatus('Nothing to undo!');
-        }
-        e.preventDefault();
-        return;
-      }
-      
-      // Redo - Ctrl+Y or Ctrl+Shift+Z
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
-        finalizePendingChanges();
-        const description = opts.on_redo_request();
-        if (description) {
-          opts.on_history_applied?.();
-          showStatus(`Redo: ${description}`);
-        } else {
-          showStatus('Nothing to redo!');
-        }
-        e.preventDefault();
-        return;
-      }
-
-      // Copy - Ctrl+C
-      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
-        painterCanvasDiag('copy shortcut detected', { has_selection: hasSelection(selection_bitmap) });
-        copyCurrentSelection();
-        e.preventDefault();
-        return;
-      }
 
       // Text mode handling
       if (text_mode_active) {
@@ -3862,34 +3954,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
         e.preventDefault();
         return;
       }
-
-      // Arrow keys update camera pan position
-      // Note: In grid coordinates, Y increases upward
-      // ArrowUp = show content below = increase pan_y
-      const pan_step = 1; // Move 1 grid cell per keypress
-      const pan = getCanvasPanAdapter();
-      switch (e.key) {
-        case 'ArrowUp':
-        case 'w':
-        case 'W':
-          pan.applyAxisDelta?.({ y: pan_step });
-          break;
-        case 'ArrowDown':
-        case 's':
-        case 'S':
-          pan.applyAxisDelta?.({ y: -pan_step });
-          break;
-        case 'ArrowLeft':
-        case 'a':
-        case 'A':
-          pan.applyAxisDelta?.({ x: -pan_step });
-          break;
-        case 'ArrowRight':
-        case 'd':
-        case 'D':
-          pan.applyAxisDelta?.({ x: pan_step });
-          break;
-      }
     },
 
     OnPointerLeave(): void {
@@ -3914,18 +3978,16 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): Module {
 
     OnBlur(): void {
       clearCanvasNavInteraction();
-      if (!text_mode_active) {
-        clearMovePreview();
+      if (!text_mode_active && isMovePreviewActive()) {
+        leaveMovePreview();
       }
       clearGroupLocationDrag();
+      if (!text_mode_active && hasPastePreview()) {
+        leavePastePreview();
+      }
       if (!text_mode_active) {
         clearPendingPreviewChanges();
       }
-      paste_preview_data = null;
-      paste_preview_pos = null;
-      paste_preview_world_data = null;
-      paste_preview_world_anchor = null;
-      paste_preview_rotation_view = null;
       is_drawing = false;
       is_erasing = false;
       active_draw_channels = { char: true, color: true, weight: true };
@@ -3971,4 +4033,3 @@ export { clearSelection, selectAll, invertSelection, hasSelection };
 export type { SelectionBitmap };
 
 // Export type for the painter canvas module (includes emitViewport)
-export type PainterCanvasModule = ReturnType<typeof make_painter_canvas_module>;

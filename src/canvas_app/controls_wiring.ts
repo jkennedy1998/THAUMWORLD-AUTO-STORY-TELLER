@@ -7,6 +7,7 @@ import { configure_input_bindings } from '../mono_ui/runtime/input_actions.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
 import type { ToolType } from '../ascii_painter/types.js';
 import type { ProfileScope } from '../user_profiles/profile_scope.js';
+import type { PainterToolSequenceBinding } from './painter_tool_shortcut_interpreter.js';
 
 export function create_game_controls_runtime(data_slot: number, opts?: { get_profile_scope?: () => ProfileScope | null }) {
   const runtime = create_controls_runtime({
@@ -66,6 +67,22 @@ const PAINTER_TOOL_ACTIONS: Record<ToolType, string> = {
   paste: 'painter.tool_assign.paste',
   move: 'painter.tool_assign.move',
 };
+
+export const PAINTER_TOOL_SEQUENCE_BINDINGS: PainterToolSequenceBinding[] = [
+  { sequence: '1', tool: 'pencil' },
+  { sequence: '2', tool: 'eraser' },
+  { sequence: '3', tool: 'bucket' },
+  { sequence: '4', tool: 'eyedropper' },
+  { sequence: '5', tool: 'line' },
+  { sequence: '6', tool: 'rect_stroke' },
+  { sequence: '7', tool: 'rect_fill' },
+  { sequence: '8', tool: 'text' },
+  { sequence: '9', tool: 'move' },
+  { sequence: '10', tool: 'selectangle' },
+  { sequence: '11', tool: 'lassoselect' },
+  { sequence: '12', tool: 'copy' },
+  { sequence: '13', tool: 'paste' },
+];
 
 export function create_painter_controls_runtime(data_slot: number, opts?: { get_profile_scope?: () => ProfileScope | null }) {
   const runtime = create_controls_runtime({

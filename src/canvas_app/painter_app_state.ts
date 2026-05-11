@@ -101,13 +101,13 @@ import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_co
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
 import { clone_projected_scene, commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection, type PainterProjectedScene } from '../ascii_painter/painter_view_projection_adapter.js';
 import { touch_world_layers_owner } from '../mono_ui/world_layers_owner.js';
-import { get_principal_view_plane_axis, get_transition_tilt_for_command, make_place_view_state, map_screen_direction_to_world_delta, step_place_view_action, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
+import { get_principal_view_plane_axis, get_transition_tilt_for_command, get_view_basis_for_state, make_place_view_state, map_screen_direction_to_world_delta, step_place_view_action, type PlaceViewState } from '../mono_ui/runtime/place_view_projection.js';
 import { start_roll_transition, start_swing_transition, type PlaceCameraTransition } from '../mono_ui/runtime/place_camera_pose.js';
 import { clamp_anchor_to_viewport_px, compute_anchor_relative_mouse_parallax } from '../mono_ui/runtime/camera_anchor_runtime.js';
 import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
 import { apply_world_selection_mode, clear_world_selection, create_world_selection, decode_world_copy_data, encode_world_copy_data, get_world_selection_bounds, has_world_selection, parse_world_cell_key, set_world_selected, type WorldCopyData, type WorldSelection } from '../ascii_painter/world_selection.js';
 import { project_world_point_with_roll, unproject_plane_point_with_roll } from '../mono_ui/runtime/place_view_projection.js';
-import { create_painter_controls_runtime } from './controls_wiring.js';
+import { create_painter_controls_runtime, PAINTER_TOOL_SEQUENCE_BINDINGS } from './controls_wiring.js';
 import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
 import {
   begin_plain_text_control_frame,
@@ -1623,9 +1623,21 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function nudgeActivePainterGroupLocation(direction: 'left' | 'right' | 'up' | 'down'): boolean {
     const group_id = resolve_current_runtime_group_id();
-    if (!group_id || current_tool !== 'move') return false;
+    if (!group_id) return false;
     const worldDelta = map_screen_direction_to_world_delta(getPainterViewState(), direction);
     return applyPainterGroupLocationDelta(group_id, worldDelta, 'nudge');
+  }
+
+  function nudgeActivePainterGroupDepth(direction: -1 | 1): boolean {
+    const group_id = resolve_current_runtime_group_id();
+    if (!group_id) return false;
+    const basis = get_view_basis_for_state(getPainterViewState());
+    const delta = {
+      x: basis.forward.x * direction,
+      y: basis.forward.y * direction,
+      z: basis.forward.z * direction,
+    };
+    return applyPainterGroupLocationDelta(group_id, delta, 'nudge');
   }
 
   function movePainterGroupPropertyBlock(group_id: string, property_id: string, block_id: string, target_breath: number): void {
@@ -3520,8 +3532,19 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let left_click_tool: ToolType = normalize_painter_tool(saved_tool_props.left_click_tool as ToolType || 'pencil');
   let right_click_tool: ToolType = normalize_painter_tool(saved_tool_props.right_click_tool as ToolType || 'eraser');
 
+  function maybeCommitPendingPainterPlacementModes(nextLeftTool: ToolType, nextRightTool: ToolType): void {
+    if (canvas_module?.hasMovePreview() && nextLeftTool !== 'move' && nextRightTool !== 'move') {
+      canvas_module.leaveMovePreview();
+    }
+    if (canvas_module?.hasPastePreview() && nextLeftTool !== 'paste' && nextRightTool !== 'paste') {
+      canvas_module.leavePastePreview();
+    }
+  }
+
   function select_current_tool(tool: ToolType): void {
-    current_tool = normalize_painter_tool(tool);
+    const normalized = normalize_painter_tool(tool);
+    maybeCommitPendingPainterPlacementModes(left_click_tool, right_click_tool);
+    current_tool = normalized;
     if (current_tool === 'text') {
       activatePainterTextCursorCameraPolicy();
       refreshPainterProjectionPreservingCameraFrame();
@@ -3533,6 +3556,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function assign_left_click_tool(tool: ToolType): void {
     tool = normalize_painter_tool(tool);
+    maybeCommitPendingPainterPlacementModes(tool, right_click_tool);
     left_click_tool = tool;
     active_property_side = 'left';
     saveToolProperties({ left_click_tool: tool, active_property_side: 'left' });
@@ -3547,6 +3571,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function assign_right_click_tool(tool: ToolType): void {
     tool = normalize_painter_tool(tool);
+    maybeCommitPendingPainterPlacementModes(left_click_tool, tool);
     right_click_tool = tool;
     active_property_side = 'right';
     saveToolProperties({ right_click_tool: tool, active_property_side: 'right' });
@@ -3556,9 +3581,136 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const painter_tool_shortcut_interpreter = create_painter_tool_shortcut_interpreter({
     on_assign_primary: assign_primary_tool,
     on_assign_secondary: assign_right_click_tool,
+    tool_sequences: PAINTER_TOOL_SEQUENCE_BINDINGS,
   });
   
   let active_property_side: 'left' | 'right' = saved_tool_props.active_property_side === 'right' ? 'right' : 'left';
+
+  function getDigitKeyFromToolShortcutEvent(e: KeyboardEvent): string | null {
+    if (e.ctrlKey || e.metaKey || e.altKey) return null;
+    const match = /^Digit([0-9])$/.exec(String(e.code ?? ''));
+    return match ? match[1]! : null;
+  }
+
+  function isModifierOnlyKeyEvent(e: KeyboardEvent): boolean {
+    return e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta';
+  }
+
+  function maybeHandlePainterToolShortcutKeydown(e: KeyboardEvent): boolean {
+    if (isPainterTextCaptureActive() || e.repeat) return false;
+    const digit = getDigitKeyFromToolShortcutEvent(e);
+    if (!digit) return false;
+    const result = painter_tool_shortcut_interpreter.trigger_digit(digit);
+    if (result === 'ignored') return false;
+    e.preventDefault();
+    return true;
+  }
+
+  function maybeEarlyCommitPendingToolShortcutForKeydown(e: KeyboardEvent): void {
+    if (!painter_tool_shortcut_interpreter.has_pending_input()) return;
+    if (isModifierOnlyKeyEvent(e)) return;
+    if (getDigitKeyFromToolShortcutEvent(e)) return;
+    painter_tool_shortcut_interpreter.flush_pending_primary();
+  }
+
+  function jumpCurrentPainterBreathToActiveGroupBoundary(edge: 'start' | 'end'): void {
+    const group_id = resolve_current_runtime_group_id();
+    if (!group_id) return;
+    const group = painter_document_runtime.document.groups[group_id];
+    if (!group) return;
+    const range = derive_group_breath_range(group);
+    setCurrentPainterBreath(edge === 'start' ? range.cropped_start : range.cropped_end);
+  }
+
+  function performPainterUndoShortcut(): boolean {
+    finalizePendingPainterCanvasChanges();
+    return Boolean(performPainterUndo());
+  }
+
+  function performPainterRedoShortcut(): boolean {
+    finalizePendingPainterCanvasChanges();
+    return Boolean(performPainterRedo());
+  }
+
+  function performPainterCopyShortcut(): boolean {
+    canvas_module?.copySelection();
+    return true;
+  }
+
+  function leavePendingPainterPlacement(): boolean {
+    if (canvas_module?.hasMovePreview()) return canvas_module.leaveMovePreview();
+    if (canvas_module?.hasPastePreview()) return canvas_module.leavePastePreview();
+    return false;
+  }
+
+  function routePainterPositionalAction(action: 'nudge_left' | 'nudge_right' | 'nudge_up' | 'nudge_down' | 'nudge_backward' | 'nudge_forward' | 'rotate_left' | 'rotate_right'): boolean {
+    const screenDirectionByAction: Partial<Record<typeof action, 'left' | 'right' | 'up' | 'down'>> = {
+      nudge_left: 'left',
+      nudge_right: 'right',
+      nudge_up: 'up',
+      nudge_down: 'down',
+    };
+    const screenDirection = screenDirectionByAction[action];
+    const basis = get_view_basis_for_state(getPainterViewState());
+    const worldDelta = screenDirection
+      ? map_screen_direction_to_world_delta(getPainterViewState(), screenDirection)
+      : action === 'nudge_backward'
+        ? { x: -basis.forward.x, y: -basis.forward.y, z: -basis.forward.z }
+        : action === 'nudge_forward'
+          ? { x: basis.forward.x, y: basis.forward.y, z: basis.forward.z }
+          : null;
+    const getToolForSide = (side: 'left' | 'right'): ToolType => side === 'right' ? right_click_tool : left_click_tool;
+    const orderedSides: Array<'left' | 'right'> = active_property_side === 'right' ? ['right', 'left'] : ['left', 'right'];
+    const hasSelection = has_world_selection(get_local_world_selection());
+
+    if (hasSelection) {
+      for (const side of orderedSides) {
+        const tool = getToolForSide(side);
+        if (tool === 'selectangle' || tool === 'lassoselect' || tool === 'copy') {
+          if (!canvas_module || !worldDelta) return false;
+          active_property_side = side;
+          return canvas_module.nudgeSelectionByWorldDelta(worldDelta);
+        }
+        if (tool === 'move') {
+          if (!canvas_module || !worldDelta) return false;
+          active_property_side = side;
+          return canvas_module.nudgeMovePreviewByWorldDelta(worldDelta);
+        }
+      }
+      if (screenDirection) return nudgeActivePainterGroupLocation(screenDirection);
+      if (action === 'nudge_backward') return nudgeActivePainterGroupDepth(-1);
+      if (action === 'nudge_forward') return nudgeActivePainterGroupDepth(1);
+      return false;
+    }
+
+    for (const side of orderedSides) {
+      const tool = getToolForSide(side);
+      if (tool === 'paste') {
+        if (!canvas_module) return false;
+        active_property_side = side;
+        if (worldDelta) return canvas_module.nudgePastePreviewByWorldDelta(worldDelta);
+        if (action === 'rotate_left') {
+          canvas_module.stepPasteViewAction('roll_left');
+          return true;
+        }
+        if (action === 'rotate_right') {
+          canvas_module.stepPasteViewAction('roll_right');
+          return true;
+        }
+        return false;
+      }
+      if (tool === 'text') {
+        if (!canvas_module || !worldDelta) return false;
+        active_property_side = side;
+        return canvas_module.nudgeTextCursorByWorldDelta(worldDelta);
+      }
+    }
+
+    if (screenDirection) return nudgeActivePainterGroupLocation(screenDirection);
+    if (action === 'nudge_backward') return nudgeActivePainterGroupDepth(-1);
+    if (action === 'nudge_forward') return nudgeActivePainterGroupDepth(1);
+    return false;
+  }
 
   const left_brush: Brush = {
     char: saved_tool_props.left_brush_char ?? '█',
@@ -5805,7 +5957,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       on_tool_select: select_current_tool,
       on_left_click_tool_change: assign_left_click_tool,
       on_right_click_tool_change: assign_right_click_tool,
-      matches_tool_shortcut: (tool, e) => painter_controls.matches_tool_shortcut(tool, e),
+      matches_tool_shortcut: () => false,
       on_tool_shortcut: (tool) => {
         if (isPainterTextCaptureActive()) return;
         painter_tool_shortcut_interpreter.trigger(tool);
@@ -7249,7 +7401,34 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
   });
 
+  window.addEventListener('pointerdown', () => {
+    if (isPainterTextCaptureActive()) return;
+    painter_tool_shortcut_interpreter.flush_pending_primary();
+  }, { capture: true });
+
   window.addEventListener('keydown', (e) => {
+    if (!isPainterTextCaptureActive() && (e.code === 'Enter' || e.code === 'Escape') && leavePendingPainterPlacement()) {
+      e.preventDefault();
+      return;
+    }
+    if (maybeHandlePainterToolShortcutKeydown(e)) return;
+    maybeEarlyCommitPendingToolShortcutForKeydown(e);
+    const editActionHandlers: Array<{ id: string; run: () => boolean }> = [
+      { id: 'painter.edit.undo', run: () => performPainterUndoShortcut() },
+      { id: 'painter.edit.redo', run: () => performPainterRedoShortcut() },
+      { id: 'painter.edit.copy', run: () => performPainterCopyShortcut() },
+    ];
+    for (const binding of editActionHandlers) {
+      if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+      e.preventDefault();
+      binding.run();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyZ') {
+      e.preventDefault();
+      performPainterRedoShortcut();
+      return;
+    }
     if (tool_target_invert_held && canRoutePasteTransformActions()) {
       const pasteActionByCode: Partial<Record<string, 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'>> = {
         Numpad4: 'swing_left',
@@ -7292,22 +7471,28 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         return;
       }
     }
-    const groupNudgeHandlers: Array<{ id: string; direction: 'left' | 'right' | 'up' | 'down' }> = [
-      { id: 'painter.group.nudge_left', direction: 'left' },
-      { id: 'painter.group.nudge_right', direction: 'right' },
-      { id: 'painter.group.nudge_up', direction: 'up' },
-      { id: 'painter.group.nudge_down', direction: 'down' },
+    const positionalActionHandlers: Array<{ id: string; action: 'nudge_left' | 'nudge_right' | 'nudge_up' | 'nudge_down' | 'nudge_backward' | 'nudge_forward' | 'rotate_left' | 'rotate_right' }> = [
+      { id: 'painter.position.nudge_left', action: 'nudge_left' },
+      { id: 'painter.position.nudge_right', action: 'nudge_right' },
+      { id: 'painter.position.nudge_up', action: 'nudge_up' },
+      { id: 'painter.position.nudge_down', action: 'nudge_down' },
+      { id: 'painter.position.nudge_backward', action: 'nudge_backward' },
+      { id: 'painter.position.nudge_forward', action: 'nudge_forward' },
+      { id: 'painter.position.rotate_left', action: 'rotate_left' },
+      { id: 'painter.position.rotate_right', action: 'rotate_right' },
     ];
-    for (const binding of groupNudgeHandlers) {
+    for (const binding of positionalActionHandlers) {
       if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
-      if (isPainterTextCaptureActive() || current_tool !== 'move') return;
+      if (isPainterTextCaptureActive()) return;
       e.preventDefault();
-      nudgeActivePainterGroupLocation(binding.direction);
+      routePainterPositionalAction(binding.action);
       return;
     }
     const timingActionHandlers: Array<{ id: string; run: () => void }> = [
       { id: 'painter.breath.step_back', run: () => stepCurrentPainterBreath(-1) },
       { id: 'painter.breath.step_forward', run: () => stepCurrentPainterBreath(1) },
+      { id: 'painter.breath.jump_active_group_start', run: () => jumpCurrentPainterBreathToActiveGroupBoundary('start') },
+      { id: 'painter.breath.jump_active_group_end', run: () => jumpCurrentPainterBreathToActiveGroupBoundary('end') },
       { id: 'painter.breath.play_pause', run: () => togglePainterPlayback() },
       { id: 'painter.breath.jump_start', run: () => setCurrentPainterBreath(getPainterDocumentBreathRange().start) },
       { id: 'painter.breath.jump_end', run: () => setCurrentPainterBreath(getPainterDocumentBreathRange().end) },

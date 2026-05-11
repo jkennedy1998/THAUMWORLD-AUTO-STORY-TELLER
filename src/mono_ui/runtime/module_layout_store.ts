@@ -46,6 +46,21 @@ const DEFAULT_LAYOUT_SLOT_ID = 'default';
 
 let current_module_layouts: ModuleLayoutFileV2 = { version: 2, apps: {} };
 
+function count_layout_entries(state: { positions: ModulePositions; visibility: ModuleVisibility }): { positions_count: number; visibility_count: number } {
+  return {
+    positions_count: Object.keys(state.positions).length,
+    visibility_count: Object.keys(state.visibility).length,
+  };
+}
+
+function log_module_layout_persist(event: string, payload: Record<string, unknown>): void {
+  try {
+    console.info('[MODULE_LAYOUT_PERSIST]', JSON.stringify({ event, ...payload }));
+  } catch {
+    // ignore instrumentation failures
+  }
+}
+
 function clone_rect_data(rect: ModulePositionData): ModulePositionData {
   return { x0: rect.x0, y0: rect.y0, x1: rect.x1, y1: rect.y1 };
 }
@@ -185,19 +200,99 @@ function require_profile_scope(profile_scope?: ProfileScope | null): ProfileScop
 
 async function read_module_layout_file(slot: number, profile_scope?: ProfileScope | null): Promise<ModuleLayoutFileV2> {
   const scoped = require_profile_scope(profile_scope);
+  log_module_layout_persist('load_started', {
+    app_id: scoped.app_id,
+    slot,
+    profile_id: scoped.profile_id,
+    scoped_path: scoped.files.module_layouts,
+    legacy_profile_path: scoped.legacy_profile_files.module_layouts,
+  });
   const response = await read_slot_json_file<ModuleLayoutFile>(slot, scoped.files.module_layouts);
-  if (response.data) return sanitize_module_layout_file(response.data);
+  log_module_layout_persist('scoped_read_result', {
+    app_id: scoped.app_id,
+    slot,
+    path: scoped.files.module_layouts,
+    found: Boolean(response.data),
+    version: response.data && typeof response.data === 'object' && 'version' in response.data ? (response.data as ModuleLayoutFile).version : null,
+    apps_present: response.data && typeof response.data === 'object' && 'apps' in response.data && response.data.apps && typeof response.data.apps === 'object'
+      ? Object.keys(response.data.apps)
+      : [],
+  });
+  if (response.data) {
+    const next = sanitize_module_layout_file(response.data);
+    const state = get_module_layout_state(scoped.app_id);
+    const counts = count_layout_entries(state);
+    log_module_layout_persist('load_source_selected', {
+      app_id: scoped.app_id,
+      slot,
+      profile_id: scoped.profile_id,
+      source: 'scoped',
+      active_slot_id: get_active_module_layout_slot_id(scoped.app_id),
+      ...counts,
+    });
+    return next;
+  }
   const legacy = await read_slot_json_file<ModuleLayoutFile>(slot, scoped.legacy_profile_files.module_layouts);
+  log_module_layout_persist('legacy_read_result', {
+    app_id: scoped.app_id,
+    slot,
+    path: scoped.legacy_profile_files.module_layouts,
+    found: Boolean(legacy.data),
+    version: legacy.data && typeof legacy.data === 'object' && 'version' in legacy.data ? (legacy.data as ModuleLayoutFile).version : null,
+  });
   const next: ModuleLayoutFileV2 = legacy.data ? sanitize_module_layout_file(legacy.data) : { version: 2, apps: {} };
   if (legacy.data) {
-    await write_slot_json_file(slot, scoped.files.module_layouts, next).catch(() => null);
+    log_module_layout_persist('migration_write_started', {
+      app_id: scoped.app_id,
+      slot,
+      profile_id: scoped.profile_id,
+      from_path: scoped.legacy_profile_files.module_layouts,
+      to_path: scoped.files.module_layouts,
+    });
+    try {
+      await write_slot_json_file(slot, scoped.files.module_layouts, next);
+      log_module_layout_persist('migration_write_succeeded', {
+        app_id: scoped.app_id,
+        slot,
+        profile_id: scoped.profile_id,
+        to_path: scoped.files.module_layouts,
+      });
+    } catch (error) {
+      log_module_layout_persist('migration_write_failed', {
+        app_id: scoped.app_id,
+        slot,
+        profile_id: scoped.profile_id,
+        to_path: scoped.files.module_layouts,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
+  current_module_layouts = next;
+  const state = get_module_layout_state(scoped.app_id);
+  const counts = count_layout_entries(state);
+  log_module_layout_persist('load_source_selected', {
+    app_id: scoped.app_id,
+    slot,
+    profile_id: scoped.profile_id,
+    source: legacy.data ? 'legacy_profile' : 'default_empty',
+    active_slot_id: get_active_module_layout_slot_id(scoped.app_id),
+    ...counts,
+  });
   return next;
 }
 
 export async function load_active_module_layout(slot: number, app_id: CameraSettingsAppId, profile_scope?: ProfileScope | null): Promise<{ positions: ModulePositions; visibility: ModuleVisibility }> {
   current_module_layouts = await read_module_layout_file(slot, profile_scope);
-  return get_module_layout_state(app_id);
+  const state = get_module_layout_state(app_id);
+  const counts = count_layout_entries(state);
+  log_module_layout_persist('load_completed', {
+    app_id,
+    slot,
+    profile_id: profile_scope?.profile_id ?? null,
+    active_slot_id: get_active_module_layout_slot_id(app_id),
+    ...counts,
+  });
+  return state;
 }
 
 export async function save_active_module_layout(slot: number, app_id: CameraSettingsAppId, next: { positions: ModulePositions; visibility: ModuleVisibility }, profile_scope?: ProfileScope | null): Promise<void> {
@@ -206,14 +301,68 @@ export async function save_active_module_layout(slot: number, app_id: CameraSett
   const slot_state = ensure_app_slot(app_id, active_slot_id);
   slot_state.positions = Object.fromEntries(Object.entries(next.positions).map(([key, rect]) => [key, clone_rect_data(rect)]));
   slot_state.visibility = { ...next.visibility };
-  await write_slot_json_file(slot, scoped.files.module_layouts, current_module_layouts);
+  const counts = count_layout_entries(next);
+  log_module_layout_persist('save_started', {
+    app_id,
+    slot,
+    profile_id: scoped.profile_id,
+    target_path: scoped.files.module_layouts,
+    active_slot_id,
+    ...counts,
+  });
+  try {
+    await write_slot_json_file(slot, scoped.files.module_layouts, current_module_layouts);
+    log_module_layout_persist('save_succeeded', {
+      app_id,
+      slot,
+      profile_id: scoped.profile_id,
+      target_path: scoped.files.module_layouts,
+      active_slot_id,
+    });
+  } catch (error) {
+    log_module_layout_persist('save_failed', {
+      app_id,
+      slot,
+      profile_id: scoped.profile_id,
+      target_path: scoped.files.module_layouts,
+      active_slot_id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 }
 
 export async function reset_active_module_layout(slot: number, app_id: CameraSettingsAppId, profile_scope?: ProfileScope | null): Promise<void> {
   const scoped = require_profile_scope(profile_scope);
   const active_slot_id = get_active_module_layout_slot_id(app_id);
   ensure_app_layout(app_id).slots[active_slot_id] = { positions: {}, visibility: {} };
-  await write_slot_json_file(slot, scoped.files.module_layouts, current_module_layouts);
+  log_module_layout_persist('reset_started', {
+    app_id,
+    slot,
+    profile_id: scoped.profile_id,
+    target_path: scoped.files.module_layouts,
+    active_slot_id,
+  });
+  try {
+    await write_slot_json_file(slot, scoped.files.module_layouts, current_module_layouts);
+    log_module_layout_persist('reset_succeeded', {
+      app_id,
+      slot,
+      profile_id: scoped.profile_id,
+      target_path: scoped.files.module_layouts,
+      active_slot_id,
+    });
+  } catch (error) {
+    log_module_layout_persist('reset_failed', {
+      app_id,
+      slot,
+      profile_id: scoped.profile_id,
+      target_path: scoped.files.module_layouts,
+      active_slot_id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
 }
 
 export async function set_active_module_layout_slot_id(slot: number, app_id: CameraSettingsAppId, layout_slot_id: LayoutSlotId, profile_scope?: ProfileScope | null): Promise<void> {

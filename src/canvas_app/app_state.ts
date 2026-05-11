@@ -279,9 +279,37 @@ function has_tag(tags: any[] | undefined | null, want: string): boolean {
 }
 
 export function create_app_state(): AppState {
+    function log_world_module_layout(event: string, payload: Record<string, unknown>): void {
+        try {
+            console.info('[WORLD_MODULE_LAYOUT]', JSON.stringify({ event, ...payload }));
+        } catch {
+            // ignore instrumentation failures
+        }
+    }
+
+    function log_world_profile_scope(event: string, payload: Record<string, unknown>): void {
+        try {
+            console.info('[WORLD_PROFILE_SCOPE]', JSON.stringify({ event, ...payload }));
+        } catch {
+            // ignore instrumentation failures
+        }
+    }
+
     let active_profile_scope: ProfileScope = create_profile_scope(APP_CONFIG.selected_data_slot, 'thaum_world');
+    log_world_profile_scope('initial_scope_created', {
+        slot: APP_CONFIG.selected_data_slot,
+        app_id: active_profile_scope.app_id,
+        profile_id: active_profile_scope.profile_id,
+        module_layout_path: active_profile_scope.files.module_layouts,
+    });
     const profile_scope_ready = resolve_profile_scope(APP_CONFIG.selected_data_slot, 'thaum_world').then((scope) => {
         active_profile_scope = scope;
+        log_world_profile_scope('resolved', {
+            slot: APP_CONFIG.selected_data_slot,
+            app_id: scope.app_id,
+            profile_id: scope.profile_id,
+            module_layout_path: scope.files.module_layouts,
+        });
         return scope;
     }).catch(() => active_profile_scope);
     const game_controls = create_game_controls_runtime(APP_CONFIG.selected_data_slot, {
@@ -4046,29 +4074,42 @@ export function create_app_state(): AppState {
             Number.isFinite(v.x0) && Number.isFinite(v.y0) && Number.isFinite(v.x1) && Number.isFinite(v.y1);
     }
 
-    function apply_module_layout_state(next: { positions: Record<string, Rect>; visibility: Record<string, boolean> }, opts?: { replace?: boolean; sync_runtime?: boolean }): void {
+    function apply_module_layout_state(next: { positions: Record<string, Rect>; visibility: Record<string, boolean> }, opts?: { replace?: boolean; sync_runtime?: boolean }): { applied_positions_count: number; applied_visibility_count: number; skipped_unknown_modules_count: number } {
         if (opts?.replace) {
             ui_state.modules.positions.clear();
             ui_state.modules.visibility.clear();
         }
+        let applied_positions_count = 0;
+        let applied_visibility_count = 0;
+        let skipped_unknown_modules_count = 0;
+        const registry = ui_state.modules.registry;
+        const seen_runtime_ids = new Set<string>();
         for (const [id, rect] of Object.entries(next.positions)) {
             if (typeof id !== 'string' || id.length < 1 || !is_rect(rect)) continue;
             ui_state.modules.positions.set(id, rect);
+            applied_positions_count += 1;
+            if (opts?.sync_runtime && registry) {
+                const module = registry.get(id);
+                if (module) {
+                    module.rect = rect;
+                    seen_runtime_ids.add(id);
+                } else {
+                    skipped_unknown_modules_count += 1;
+                }
+            }
         }
         for (const [id, visible] of Object.entries(next.visibility)) {
             if (typeof id !== 'string' || id.length < 1) continue;
             ui_state.modules.visibility.set(id, Boolean(visible));
-        }
-        if (opts?.sync_runtime) {
-            const registry = ui_state.modules.registry;
-            if (registry) {
-                for (const [id, rect] of ui_state.modules.positions.entries()) {
-                    const module = registry.get(id);
-                    if (module) module.rect = rect;
-                }
-                apply_runtime_module_visibility();
+            applied_visibility_count += 1;
+            if (opts?.sync_runtime && registry && !seen_runtime_ids.has(id) && !registry.get(id)) {
+                skipped_unknown_modules_count += 1;
             }
         }
+        if (opts?.sync_runtime && registry) {
+            apply_runtime_module_visibility();
+        }
+        return { applied_positions_count, applied_visibility_count, skipped_unknown_modules_count };
     }
 
     function serialize_module_layout_state(): { positions: Record<string, Rect>; visibility: Record<string, boolean> } {
@@ -4096,16 +4137,65 @@ export function create_app_state(): AppState {
 
     function sync_module_layout_from_shared_store(): void {
         clear_legacy_module_layout_cache();
+        log_world_module_layout('sync_from_store_started', {
+            slot: APP_CONFIG.selected_data_slot,
+            profile_id: active_profile_scope.profile_id,
+            module_count_registered: ui_state.modules.registry?.get_all().length ?? 0,
+        });
         void profile_scope_ready.then((profile_scope) => load_active_module_layout(APP_CONFIG.selected_data_slot, 'thaum_world', profile_scope)).then((state) => {
-            const has_shared_state = Object.keys(state.positions).length > 0 || Object.keys(state.visibility).length > 0;
+            const positions_count = Object.keys(state.positions).length;
+            const visibility_count = Object.keys(state.visibility).length;
+            const has_shared_state = positions_count > 0 || visibility_count > 0;
+            log_world_module_layout('sync_from_store_completed', {
+                slot: APP_CONFIG.selected_data_slot,
+                profile_id: active_profile_scope.profile_id,
+                positions_count,
+                visibility_count,
+                had_any_persisted_state: has_shared_state,
+            });
             if (has_shared_state) {
-                apply_module_layout_state(state as { positions: Record<string, Rect>; visibility: Record<string, boolean> }, { replace: true, sync_runtime: true });
+                log_world_module_layout('runtime_apply_started', {
+                    slot: APP_CONFIG.selected_data_slot,
+                    profile_id: active_profile_scope.profile_id,
+                    positions_count,
+                    visibility_count,
+                    registered_modules_count: ui_state.modules.registry?.get_all().length ?? 0,
+                });
+                const applied = apply_module_layout_state(state as { positions: Record<string, Rect>; visibility: Record<string, boolean> }, { replace: true, sync_runtime: true });
+                log_world_module_layout('runtime_apply_completed', {
+                    slot: APP_CONFIG.selected_data_slot,
+                    profile_id: active_profile_scope.profile_id,
+                    ...applied,
+                });
                 return;
             }
             const current = serialize_module_layout_state();
             if (Object.keys(current.positions).length < 1 && Object.keys(current.visibility).length < 1) return;
-            void save_active_module_layout(APP_CONFIG.selected_data_slot, 'thaum_world', current, active_profile_scope).catch(() => null);
-        }).catch(() => null);
+            log_world_module_layout('save_seed_from_runtime_started', {
+                slot: APP_CONFIG.selected_data_slot,
+                profile_id: active_profile_scope.profile_id,
+                positions_count: Object.keys(current.positions).length,
+                visibility_count: Object.keys(current.visibility).length,
+            });
+            void save_active_module_layout(APP_CONFIG.selected_data_slot, 'thaum_world', current, active_profile_scope).then(() => {
+                log_world_module_layout('save_seed_from_runtime_succeeded', {
+                    slot: APP_CONFIG.selected_data_slot,
+                    profile_id: active_profile_scope.profile_id,
+                });
+            }).catch((error) => {
+                log_world_module_layout('save_seed_from_runtime_failed', {
+                    slot: APP_CONFIG.selected_data_slot,
+                    profile_id: active_profile_scope.profile_id,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            });
+        }).catch((error) => {
+            log_world_module_layout('sync_from_store_failed', {
+                slot: APP_CONFIG.selected_data_slot,
+                profile_id: active_profile_scope.profile_id,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        });
     }
 
     function load_place_focus_z(): void {
@@ -4442,11 +4532,38 @@ export function create_app_state(): AppState {
 
     let persist_timer: number | null = null;
     function persist_module_layout_debounced(): void {
+        const scheduled = serialize_module_layout_state();
+        log_world_module_layout('save_debounced_scheduled', {
+            slot: APP_CONFIG.selected_data_slot,
+            profile_id: active_profile_scope.profile_id,
+            pending_layout_save: persist_timer !== null,
+            positions_count: Object.keys(scheduled.positions).length,
+            visibility_count: Object.keys(scheduled.visibility).length,
+        });
         if (persist_timer) clearTimeout(persist_timer);
         persist_timer = window.setTimeout(() => {
             persist_timer = null;
             const next = serialize_module_layout_state();
-            void save_active_module_layout(APP_CONFIG.selected_data_slot, 'thaum_world', next, active_profile_scope).catch(() => null);
+            log_world_module_layout('save_debounced_executing', {
+                slot: APP_CONFIG.selected_data_slot,
+                profile_id: active_profile_scope.profile_id,
+                positions_count: Object.keys(next.positions).length,
+                visibility_count: Object.keys(next.visibility).length,
+            });
+            void save_active_module_layout(APP_CONFIG.selected_data_slot, 'thaum_world', next, active_profile_scope).then(() => {
+                log_world_module_layout('save_debounced_finished', {
+                    slot: APP_CONFIG.selected_data_slot,
+                    profile_id: active_profile_scope.profile_id,
+                    success: true,
+                });
+            }).catch((error) => {
+                log_world_module_layout('save_debounced_finished', {
+                    slot: APP_CONFIG.selected_data_slot,
+                    profile_id: active_profile_scope.profile_id,
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            });
         }, 200);
     }
 
@@ -13374,6 +13491,14 @@ export function create_app_state(): AppState {
     (window as any).test_dynamic_modules = test_dynamic_modules;
 
     window.addEventListener('beforeunload', () => {
+        const pending = serialize_module_layout_state();
+        log_world_module_layout('beforeunload', {
+            slot: APP_CONFIG.selected_data_slot,
+            profile_id: active_profile_scope.profile_id,
+            pending_layout_save: persist_timer !== null,
+            positions_count: Object.keys(pending.positions).length,
+            visibility_count: Object.keys(pending.visibility).length,
+        });
         void tool_assisted_inputs_runtime.stop();
         release_actor_claim_on_exit();
     });
