@@ -1,6 +1,6 @@
 import type { ToolType } from '../ascii_painter/types.js';
 
-const TOOL_SHORTCUT_DBLTAP_MS = 300;
+export const TOOL_SHORTCUT_DBLTAP_MS = 300;
 
 export type PainterToolSequenceBinding = {
   sequence: string;

@@ -213,29 +213,46 @@ export function step_painter_breath_playback(args: {
   current_breath: number;
   frame_carry: number;
   elapsed_frames: number;
+  direction?: -1 | 1;
 }): PainterBreathPlaybackStepResult {
   const playback = get_painter_document_playback(args.document);
   const range = get_painter_document_breath_range(args.document);
   const startingBreath = clamp_breath_to_painter_document_range(args.document, args.current_breath);
   const framesPerBreath = Math.max(1, playback.frames_per_breath);
+  const direction = args.direction === -1 ? -1 : 1;
   let carry = Math.max(0, clamp_int(args.frame_carry, 0)) + Math.max(0, clamp_int(args.elapsed_frames, 0));
   let nextBreath = startingBreath;
   let didLoop = false;
   let isFinished = false;
   while (carry >= framesPerBreath) {
     carry -= framesPerBreath;
-    if (nextBreath >= range.end) {
+    if (direction > 0) {
+      if (nextBreath >= range.end) {
+        if (!playback.loop_enabled) {
+          nextBreath = range.end;
+          carry = 0;
+          isFinished = true;
+          break;
+        }
+        nextBreath = range.start;
+        didLoop = true;
+        continue;
+      }
+      nextBreath += 1;
+      continue;
+    }
+    if (nextBreath <= range.start) {
       if (!playback.loop_enabled) {
-        nextBreath = range.end;
+        nextBreath = range.start;
         carry = 0;
         isFinished = true;
         break;
       }
-      nextBreath = range.start;
+      nextBreath = range.end;
       didLoop = true;
       continue;
     }
-    nextBreath += 1;
+    nextBreath -= 1;
   }
   return {
     next_breath: nextBreath,

@@ -23,6 +23,7 @@ export type CameraLimitProfile = {
   char_spacing_y: CameraSliderLimit;
   pan_x: CameraSliderLimit;
   pan_y: CameraSliderLimit;
+  onion_skin_distance: CameraSliderLimit;
 };
 
 export const CAMERA_LIMIT_PROFILES: Record<CameraSettingsAppId, CameraLimitProfile> = {
@@ -40,6 +41,7 @@ export const CAMERA_LIMIT_PROFILES: Record<CameraSettingsAppId, CameraLimitProfi
     char_spacing_y: { min: 0.5, max: 2.0, step: 0.01, digits: 2 },
     pan_x: { min: -100, max: 100, step: 1, digits: 0 },
     pan_y: { min: -100, max: 100, step: 1, digits: 0 },
+    onion_skin_distance: { min: 1, max: 3, step: 1, digits: 0 },
   },
   thaum_world: {
     movement_per_layer: { min: -500, max: 500, step: 1, digits: 0 },
@@ -55,6 +57,7 @@ export const CAMERA_LIMIT_PROFILES: Record<CameraSettingsAppId, CameraLimitProfi
     char_spacing_y: { min: 0.5, max: 2.0, step: 0.01, digits: 2 },
     pan_x: { min: -100, max: 100, step: 1, digits: 0 },
     pan_y: { min: -100, max: 100, step: 1, digits: 0 },
+    onion_skin_distance: { min: 1, max: 3, step: 1, digits: 0 },
   },
 };
 
@@ -81,6 +84,11 @@ export function sanitize_camera_config_for_app(app_id: CameraSettingsAppId, conf
   if (typeof next.char_spacing_y === 'number') next.char_spacing_y = clamp(next.char_spacing_y, limits.char_spacing_y);
   if (typeof next.pan_x === 'number') next.pan_x = Math.round(clamp(next.pan_x, limits.pan_x));
   if (typeof next.pan_y === 'number') next.pan_y = Math.round(clamp(next.pan_y, limits.pan_y));
+  if (typeof next.onion_skin_distance === 'number') next.onion_skin_distance = Math.round(clamp(next.onion_skin_distance, limits.onion_skin_distance));
+  if (typeof next.onion_skin_step_mode === 'string') next.onion_skin_step_mode = next.onion_skin_step_mode === 'frames' ? 'frames' : 'raster_bars';
+  if (typeof next.onion_skin_full_file === 'boolean') next.onion_skin_full_file = next.onion_skin_full_file;
+  if (typeof next.onion_skin_use_opacity === 'boolean') next.onion_skin_use_opacity = next.onion_skin_use_opacity;
+  if (typeof next.onion_skin_use_weight === 'boolean') next.onion_skin_use_weight = next.onion_skin_use_weight;
   if (next.calibration) {
     next.calibration = {
       x: Math.round(clamp(next.calibration.x ?? 0, limits.calibration_x)),

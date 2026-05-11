@@ -254,6 +254,155 @@ We should not overbuild a giant editor before we know which families actually fe
 
 ---
 
+## Brush concepts we likely need to track
+
+These are planning concepts only.
+
+They should help us think about the eventual brush pipeline, but they do not lock implementation.
+
+### 1. Directionality
+
+Likely useful for:
+
+- hatching
+- linework / border behavior
+- tapering
+- directional buildup
+- future texture-following logic
+
+This may include:
+
+- current stroke direction
+- previous direction
+- cardinalized direction when needed
+- possibly local turn / curve behavior later
+
+### 2. Subcell position
+
+This is likely one of the most important future brush inputs.
+
+Current likely planning direction:
+
+- support at least a small normalized subcell coordinate inside the cell
+- probably think in terms of a reusable fine grid rather than only a hardcoded quadrant model
+
+Possible planning resolutions:
+
+- **2x2 behavior** for simple quadrant work
+- **3x3-style logic** for left / center / right and top / middle / bottom decisions
+- **4x4 planning resolution** as a good shared first abstraction
+- possibly even **per-render-pixel cell position** later based on current cell size
+
+Given current cell sizing, it may later make sense to think in terms of something like the full visual cell pixel area as a higher-resolution input surface. Right now that suggests a future path like roughly `12x16`-aware sampling, though this is absolutely not something to implement yet.
+
+Planning point:
+
+- we should probably avoid locking ourselves into only 2x2 if we already suspect we will want richer subcell logic later
+
+### 3. Pressure / flow
+
+We should likely distinguish between:
+
+- **flow** as the simulated amount of brush effect applied over time / samples
+- **pressure** as an input signal that may later influence flow
+
+Short-term planning direction:
+
+- do **not** depend on stylus pressure yet
+- allow for simulated pressure/flow style brush behavior later
+- think in a Photoshop-like sense where repeated motion can build effect gradually
+
+Long-term planning direction:
+
+- stylus pressure can later feed into this same system
+- pressure should probably be an optional modifier, not the only way the brush becomes expressive
+
+### 4. Hit count / accumulation
+
+We will likely need a notion of how many times a cell has been affected within a stroke.
+
+Useful for:
+
+- buildup
+- hardness stepping
+- repeated ramp advancement
+- repeated hatch filling
+- erase inversion
+
+### 5. Stroke order / distance along stroke
+
+Likely useful for:
+
+- tapering
+- beginning/end behavior
+- spacing-based effects
+- directional textures
+- future brush patterns
+
+This may include:
+
+- sample index in stroke
+- normalized distance along stroke
+- distance from stroke start / end
+
+### 6. Stroke speed
+
+Likely useful later for expressive brushes.
+
+Possible uses:
+
+- softer or lighter effect when moving quickly
+- denser or stronger effect when moving slowly
+- flow modulation without actual stylus pressure
+
+This is not required for first implementation, but it is worth preserving room for.
+
+### 7. Neighbor context
+
+Likely useful for:
+
+- border / box-drawing behavior
+- connectivity-aware chars
+- local smoothing
+- context-aware erasing
+
+This means some brush logic may need awareness not only of the current cell, but nearby cells too.
+
+### 8. Existing cell state
+
+This seems obvious, but it is central.
+
+The brush may need to inspect:
+
+- current character / graphic
+- current color/material state
+- current weight
+- current family membership if we introduce families later
+
+### 9. Input modality context
+
+We should think about brush UX from multiple input perspectives, not only mouse + keyboard.
+
+Important planning perspectives:
+
+- mouse + keyboard
+- stylus + keyboard
+- dual-controller VR
+
+Planning note:
+
+- the same deep brush system should ideally be usable from all of these inputs
+- not every modality will expose the same signals immediately
+- the brush model should allow optional richer inputs without making them mandatory
+
+Examples:
+
+- mouse may provide direction, speed, timing, buttons, wheel, modifiers
+- stylus may later add pressure, tilt, angle, and eraser-end semantics
+- VR controllers may later add handedness, orientation, distance, trigger pressure, or motion-based flow
+
+This should be considered from the user perspective early so we do not accidentally hardcode a mouse-only mental model.
+
 ## Important unresolved design questions
 
 These are open and should remain open for now.
@@ -261,10 +410,12 @@ These are open and should remain open for now.
 - Is gradiator just one source of ordered density ramps, or the main brush-family editor?
 - Should character aliasing operate directly on chars, or through internal family-state models?
 - How much pointer detail do we need for subcell modes?
+- Should we standardize on a normalized subcell space, a fixed grid like 4x4, or a cell-pixel-aware coordinate model?
+- How should flow, buildup, hardness, and future pressure relate to each other?
 - Should hatch and border logic be part of one family registry or separate special systems?
-- Should hardness and buildup be the same concept or two separate ones?
 - How much per-hand customization should these settings support at first?
 - Which settings are shared by positive and negative acts, and which differ?
+- What brush concepts are core enough to always track even before a mode uses them?
 
 ---
 

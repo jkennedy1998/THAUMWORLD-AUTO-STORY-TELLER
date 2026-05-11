@@ -63,7 +63,7 @@ import {
   type ToolProperties,
 } from '../ascii_painter/save_system.js';
 // 3D VoxelSpace imports
-import type { VoxelSpace, VoxelLayer, CameraConfig, CameraMode } from '../ascii_painter/voxel_space.js';
+import type { VoxelSpace, VoxelLayer, CameraConfig, CameraMode, OnionSkinStepMode } from '../ascii_painter/voxel_space.js';
 import { 
   createVoxelSpace, 
   getLayer, 
@@ -83,7 +83,7 @@ import { makeGroupsModule, resolve_groups_timeline_visible_span, type GroupListI
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
 import { clone_painter_voxel_record, create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, type PainterDocument, type PainterVoxelRecord } from '../ascii_painter/painter_document.js';
 import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_raster_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_move_block, resolve_nearest_painter_group_raster_state, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
-import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_authored_breath_bounds, derive_painter_document_suggested_breath_range, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback } from '../ascii_painter/painter_breath.js';
+import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_authored_breath_bounds, derive_painter_document_suggested_breath_range, get_group_raster_segment_at_breath, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback, wrap_breath_in_painter_document_range } from '../ascii_painter/painter_breath.js';
 import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
 import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session_types.js';
 import { resolve_edit_channels_with_modifiers, type EditChannels } from '../ascii_painter/edit_mask.js';
@@ -121,7 +121,7 @@ import {
 } from '../mono_ui/ux/plain_text_controls.js';
 import { create_profile_scope, type ProfileScope } from '../user_profiles/profile_scope.js';
 import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
-import { create_painter_tool_shortcut_interpreter } from './painter_tool_shortcut_interpreter.js';
+import { create_painter_tool_shortcut_interpreter, TOOL_SHORTCUT_DBLTAP_MS } from './painter_tool_shortcut_interpreter.js';
 import { create_painter_sync_client } from './painter_sync_client.js';
 import { PAINTER_APP_CONFIG, apply_painter_multiplayer_transport_config } from './painter_runtime_config.js';
 import { create_module_3d_camera } from '../engine/camera/camera_core.js';
@@ -358,11 +358,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const initial_painter_document = create_painter_document(CANVAS_WIDTH, CANVAS_HEIGHT, { min_z: 0, max_z: 0, default_group_name: 'Group 1' });
   let painter_document_runtime: PainterDocumentRuntime = normalize_painter_document_runtime(initial_painter_document);
   const painter_session_core = create_painter_session_core(export_painter_document(painter_document_runtime));
+  type PainterPlaybackState = 'paused' | 'playing_forward' | 'playing_backward';
+  type PainterTransportTapAction = 'step_back' | 'step_forward' | 'jump_active_group_start' | 'jump_active_group_end';
+
   let painter_current_breath = Math.max(0, Math.floor(painter_document_runtime.active_breath));
   let painter_timeline_view_start_breath = 0;
   let painter_timeline_view_span_breaths = 24;
-  let painter_playback_running = false;
+  let painter_playback_state: PainterPlaybackState = 'paused';
+  let painter_last_transport_direction: -1 | 1 = 1;
   let painter_playback_frame_carry = 0;
+  let pending_painter_transport_tap: PainterTransportTapAction | null = null;
+  let pending_painter_transport_tap_timer: number | null = null;
   let last_projection_runtime_log_signature = '';
   const DEFAULT_USER_SELECTION_COLOR_RGB: Rgb = { ...get_color_by_name('pumpkin').rgb };
   const saved_tool_props = loadToolProperties();
@@ -568,8 +574,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return Math.max(0, Math.floor(Number.isFinite(breath) ? breath : painter_current_breath));
   }
 
+  function isPainterPlaybackActive(): boolean {
+    return painter_playback_state !== 'paused';
+  }
+
+  function clearPendingPainterTransportTap(): void {
+    pending_painter_transport_tap = null;
+    if (pending_painter_transport_tap_timer !== null) {
+      window.clearTimeout(pending_painter_transport_tap_timer);
+      pending_painter_transport_tap_timer = null;
+    }
+  }
+
   function stopPainterPlayback(): void {
-    painter_playback_running = false;
+    painter_playback_state = 'paused';
     painter_playback_frame_carry = 0;
   }
 
@@ -1468,23 +1486,111 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
   }
 
-  function togglePainterPlayback(): void {
-    if (painter_playback_running) {
-      stopPainterPlayback();
-      return;
-    }
-    painter_playback_running = true;
+  function pausePainterPlayback(): boolean {
+    if (!isPainterPlaybackActive()) return false;
+    stopPainterPlayback();
+    return true;
+  }
+
+  function startPainterPlayback(direction: -1 | 1): void {
+    painter_last_transport_direction = direction;
+    painter_playback_state = direction > 0 ? 'playing_forward' : 'playing_backward';
     painter_playback_frame_carry = 0;
     setCurrentPainterBreath(painter_current_breath);
   }
 
+  function togglePainterPlaybackDirection(direction: -1 | 1): void {
+    painter_last_transport_direction = direction;
+    const targetState: PainterPlaybackState = direction > 0 ? 'playing_forward' : 'playing_backward';
+    if (painter_playback_state === targetState) {
+      stopPainterPlayback();
+      return;
+    }
+    startPainterPlayback(direction);
+  }
+
+  function togglePainterPlayback(): void {
+    togglePainterPlaybackDirection(painter_last_transport_direction);
+  }
+
+  function runPainterTransportSingleTap(action: PainterTransportTapAction): void {
+    if (action === 'step_back') {
+      pausePainterPlayback();
+      painter_last_transport_direction = -1;
+      stepCurrentPainterBreath(-1);
+      return;
+    }
+    if (action === 'step_forward') {
+      pausePainterPlayback();
+      painter_last_transport_direction = 1;
+      stepCurrentPainterBreath(1);
+      return;
+    }
+    if (action === 'jump_active_group_start') {
+      jumpCurrentPainterBreathToActiveGroupBoundary('start');
+      return;
+    }
+    if (action === 'jump_active_group_end') {
+      jumpCurrentPainterBreathToActiveGroupBoundary('end');
+    }
+  }
+
+  function runPainterTransportDoubleTap(action: PainterTransportTapAction): void {
+    if (action === 'step_back') {
+      togglePainterPlaybackDirection(-1);
+      return;
+    }
+    if (action === 'step_forward') {
+      togglePainterPlaybackDirection(1);
+      return;
+    }
+    if (action === 'jump_active_group_start') {
+      const nextEnabled = !(painter_camera_state.onion_skin_enabled ?? false);
+      painter_camera_state.onion_skin_enabled = nextEnabled;
+      syncVoxelSpaceCameraFromPainterCamera();
+      syncPainterDocumentCameraFromPainterCamera();
+      refreshPainterProjectionPreservingCameraFrame();
+      if (isAppInitialized) persistPainterCameraConfig({ onion_skin_enabled: nextEnabled });
+      return;
+    }
+  }
+
+  function flushPendingPainterTransportTap(): boolean {
+    if (!pending_painter_transport_tap) return false;
+    const action = pending_painter_transport_tap;
+    clearPendingPainterTransportTap();
+    runPainterTransportSingleTap(action);
+    return true;
+  }
+
+  function handlePainterTransportTap(action: PainterTransportTapAction, repeated: boolean): boolean {
+    if (repeated) {
+      clearPendingPainterTransportTap();
+      runPainterTransportSingleTap(action);
+      return true;
+    }
+    if (pending_painter_transport_tap === action) {
+      clearPendingPainterTransportTap();
+      runPainterTransportDoubleTap(action);
+      return true;
+    }
+    if (pending_painter_transport_tap) flushPendingPainterTransportTap();
+    pending_painter_transport_tap = action;
+    pending_painter_transport_tap_timer = window.setTimeout(() => {
+      if (pending_painter_transport_tap !== action) return;
+      flushPendingPainterTransportTap();
+    }, TOOL_SHORTCUT_DBLTAP_MS);
+    return true;
+  }
+
   window.setInterval(() => {
-    if (!painter_playback_running) return;
+    if (!isPainterPlaybackActive()) return;
     const step = step_painter_breath_playback({
       document: painter_document_runtime.document,
       current_breath: painter_current_breath,
       frame_carry: painter_playback_frame_carry,
       elapsed_frames: 1,
+      direction: painter_playback_state === 'playing_backward' ? -1 : 1,
     });
     painter_playback_frame_carry = step.frame_carry;
     if (step.next_breath !== painter_current_breath) {
@@ -3613,6 +3719,28 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     painter_tool_shortcut_interpreter.flush_pending_primary();
   }
 
+  function getPainterTransportTapActionForEvent(e: KeyboardEvent): PainterTransportTapAction | null {
+    if (e.ctrlKey || e.metaKey || e.altKey) return null;
+    const tapBindings: Array<{ id: string; action: PainterTransportTapAction }> = [
+      { id: 'painter.breath.step_back', action: 'step_back' },
+      { id: 'painter.breath.step_forward', action: 'step_forward' },
+      { id: 'painter.breath.jump_active_group_start', action: 'jump_active_group_start' },
+      { id: 'painter.breath.jump_active_group_end', action: 'jump_active_group_end' },
+    ];
+    for (const binding of tapBindings) {
+      if (control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) return binding.action;
+    }
+    return null;
+  }
+
+  function maybeEarlyCommitPendingPainterTransportTapForKeydown(e: KeyboardEvent): void {
+    if (!pending_painter_transport_tap) return;
+    if (isModifierOnlyKeyEvent(e)) return;
+    const incomingAction = getPainterTransportTapActionForEvent(e);
+    if (incomingAction === pending_painter_transport_tap) return;
+    flushPendingPainterTransportTap();
+  }
+
   function jumpCurrentPainterBreathToActiveGroupBoundary(edge: 'start' | 'end'): void {
     const group_id = resolve_current_runtime_group_id();
     if (!group_id) return;
@@ -4385,6 +4513,195 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return make_history_cell_from_runtime_record(winner.cell);
   }
 
+  function isProjectedCellVisibleContent(cell: GridCell | null | undefined): boolean {
+    return Boolean(cell && (((typeof cell.char === 'string') && cell.char !== ' ') || cell.graphic));
+  }
+
+  function scaleOnionRgb(rgb: Rgb, factor: number): Rgb {
+    return {
+      r: Math.max(0, Math.min(255, Math.round(rgb.r * factor))),
+      g: Math.max(0, Math.min(255, Math.round(rgb.g * factor))),
+      b: Math.max(0, Math.min(255, Math.round(rgb.b * factor))),
+    };
+  }
+
+  function cloneCellForOnion(cell: GridCell, distanceOffset: number): GridCell {
+    const useOpacityFade = painter_camera_state.onion_skin_use_opacity ?? true;
+    const useWeightFade = painter_camera_state.onion_skin_use_weight ?? true;
+    const opacityFactor = useOpacityFade
+      ? Math.max(0.18, 1 - Math.max(1, distanceOffset) * 0.28)
+      : 1;
+    const baseWeight = Math.max(0, Math.min(3, Math.floor(cell.weight_index ?? 0)));
+    const nextWeight = useWeightFade
+      ? Math.max(0, baseWeight - Math.max(1, distanceOffset))
+      : baseWeight;
+    const graphicWeight = cell.graphic?.weight_index;
+    const nextGraphicWeight = typeof graphicWeight === 'number'
+      ? (useWeightFade ? Math.max(0, Math.min(3, Math.floor(graphicWeight) - Math.max(1, distanceOffset))) : Math.max(0, Math.min(3, Math.floor(graphicWeight))))
+      : undefined;
+    return {
+      ...cell,
+      graphic: cell.graphic ? { ...cell.graphic, ...(typeof nextGraphicWeight === 'number' ? { weight_index: nextGraphicWeight as 0 | 1 | 2 | 3 } : {}) } : undefined,
+      appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+      materials: cell.materials ? { ...cell.materials } : undefined,
+      rgb: scaleOnionRgb(cell.rgb, opacityFactor),
+      weight_index: nextWeight as 0 | 1 | 2 | 3,
+    };
+  }
+
+  function getPainterOnionStepMode(): OnionSkinStepMode {
+    return painter_camera_state.onion_skin_step_mode === 'frames' ? 'frames' : 'raster_bars';
+  }
+
+  function serializeResolvedVisibleRuntime(runtime: PainterDocumentRuntime): string {
+    const entries = Array.from(runtime.resolved_visible_index.values())
+      .map((resolved) => `${resolved.x},${resolved.y},${resolved.z}:${resolved.cell.char}:${resolved.cell.rgb.r},${resolved.cell.rgb.g},${resolved.cell.rgb.b}:${resolved.cell.weight_index}:${resolved.cell.graphic?.graphic_id ?? ''}:${resolved.cell.graphic?.frame ?? ''}`)
+      .sort();
+    return entries.join('|');
+  }
+
+  function isPainterFullFileOnionSkinEnabled(): boolean {
+    return painter_camera_state.onion_skin_full_file === true;
+  }
+
+  type PainterOnionBreath = {
+    breath: number;
+    offset: number;
+    direction: -1 | 1;
+  };
+
+  function stepPainterOnionBreathWithinRange(startBreath: number, direction: -1 | 1, stepCount: number): number | null {
+    const range = getPainterDocumentBreathRange();
+    const playback = get_painter_document_playback(painter_document_runtime.document);
+    let breath = startBreath;
+    for (let index = 0; index < stepCount; index += 1) {
+      const nextBreath = breath + direction;
+      if (nextBreath < range.start || nextBreath > range.end) {
+        if (!playback.loop_enabled) return null;
+        breath = wrap_breath_in_painter_document_range(painter_document_runtime.document, nextBreath);
+        continue;
+      }
+      breath = nextBreath;
+    }
+    return breath;
+  }
+
+  function buildPainterOnionFrameBreaths(distance: number): PainterOnionBreath[] {
+    const layers: PainterOnionBreath[] = [];
+    for (let offset = distance; offset >= 1; offset -= 1) {
+      const backwardBreath = stepPainterOnionBreathWithinRange(painter_current_breath, -1, offset);
+      if (backwardBreath !== null && backwardBreath !== painter_current_breath) {
+        layers.push({ breath: backwardBreath, offset, direction: -1 });
+      }
+      const forwardBreath = stepPainterOnionBreathWithinRange(painter_current_breath, 1, offset);
+      if (forwardBreath !== null && forwardBreath !== painter_current_breath) {
+        layers.push({ breath: forwardBreath, offset, direction: 1 });
+      }
+    }
+    return layers;
+  }
+
+  function getPainterCurrentOnionSignature(fullFile: boolean): string | null {
+    if (fullFile) {
+      const runtime = normalize_painter_document_runtime(painter_document_runtime.document, { active_breath: painter_current_breath });
+      return serializeResolvedVisibleRuntime(runtime);
+    }
+    const activeGroupId = resolve_current_runtime_group_id();
+    if (!activeGroupId) return null;
+    const group = painter_document_runtime.document.groups[activeGroupId];
+    if (!group) return null;
+    return get_group_raster_segment_at_breath(group, painter_current_breath)?.segment_id ?? null;
+  }
+
+  function getPainterOnionRasterSignatureAtBreath(breath: number, fullFile: boolean): string | null {
+    if (fullFile) {
+      const runtime = normalize_painter_document_runtime(painter_document_runtime.document, { active_breath: breath });
+      return serializeResolvedVisibleRuntime(runtime);
+    }
+    const activeGroupId = resolve_current_runtime_group_id();
+    if (!activeGroupId) return null;
+    const group = painter_document_runtime.document.groups[activeGroupId];
+    if (!group) return null;
+    return get_group_raster_segment_at_breath(group, breath)?.segment_id ?? null;
+  }
+
+  function buildPainterOnionRasterBreaths(distance: number, fullFile: boolean): PainterOnionBreath[] {
+    const layers: PainterOnionBreath[] = [];
+    const currentSignature = getPainterCurrentOnionSignature(fullFile);
+    for (const direction of [-1, 1] as const) {
+      let lastSignature = currentSignature;
+      let stepsMoved = 0;
+      let distinctCount = 0;
+      const rangeWidth = Math.max(1, getPainterDocumentBreathRange().end - getPainterDocumentBreathRange().start + 1);
+      while (stepsMoved < rangeWidth && distinctCount < distance) {
+        stepsMoved += 1;
+        const breath = stepPainterOnionBreathWithinRange(painter_current_breath, direction, stepsMoved);
+        if (breath === null || breath === painter_current_breath) break;
+        const signature = getPainterOnionRasterSignatureAtBreath(breath, fullFile);
+        if (signature === lastSignature) continue;
+        distinctCount += 1;
+        layers.push({ breath, offset: distinctCount, direction });
+        lastSignature = signature;
+      }
+    }
+    return layers.sort((a, b) => b.offset - a.offset || a.direction - b.direction);
+  }
+
+  function derivePainterOnionBreaths(): PainterOnionBreath[] {
+    if (!(painter_camera_state.onion_skin_enabled ?? false)) return [];
+    const distance = Math.max(1, Math.min(3, Math.floor(painter_camera_state.onion_skin_distance ?? 1)));
+    return getPainterOnionStepMode() === 'frames'
+      ? buildPainterOnionFrameBreaths(distance)
+      : buildPainterOnionRasterBreaths(distance, isPainterFullFileOnionSkinEnabled());
+  }
+
+  function applyOnionSkinToProjectedScene(scene: PainterProjectedScene): void {
+    if (!painter_display_projection) return;
+    const onionBreaths = derivePainterOnionBreaths();
+    if (onionBreaths.length < 1) return;
+    const fullFile = isPainterFullFileOnionSkinEnabled();
+    const activeGroupPlane = get_legacy_z_for_group_id(resolve_current_runtime_group_id());
+    const activeSlotIndex = typeof activeGroupPlane === 'number'
+      ? painter_display_projection.plane_to_slot.get(activeGroupPlane)
+      : undefined;
+    const appliedBreaths = new Set<string>();
+    for (const onionLayer of onionBreaths) {
+      const breathKey = `${onionLayer.direction}:${onionLayer.offset}:${onionLayer.breath}`;
+      if (appliedBreaths.has(breathKey)) continue;
+      appliedBreaths.add(breathKey);
+      const onionProjection = project_painter_runtime_display_space({
+        runtime: normalize_painter_document_runtime(painter_document_runtime.document, { active_breath: onionLayer.breath }),
+        view_state: painter_display_projection.view_state,
+        focus_slot: painter_display_projection.focus_slot,
+        target_world: painter_display_projection.target_world,
+        projection_anchor_world: painter_display_projection.projection_anchor_world,
+        viewport_width: painter_display_projection.projected_bounds.width,
+        viewport_height: painter_display_projection.projected_bounds.height,
+        render_distance_planes: getEffectivePainterCameraForProjection().render_distance_planes,
+        center_target_in_view: painter_display_projection.scene.camera.center_target_in_view,
+      });
+      const slotIndexes = fullFile
+        ? Array.from(onionProjection.scene.slots.keys())
+        : [activeSlotIndex ?? painter_display_projection.focus_slot];
+      for (const slotIndex of slotIndexes) {
+        const onionSlot = onionProjection.scene.slots.get(slotIndex);
+        const targetSlot = scene.slots.get(slotIndex);
+        if (!onionSlot || !targetSlot) continue;
+        for (let y = 0; y < onionSlot.cells.length; y += 1) {
+          const onionRow = onionSlot.cells[y];
+          const targetRow = targetSlot.cells[y];
+          if (!onionRow || !targetRow) continue;
+          for (let x = 0; x < onionRow.length; x += 1) {
+            const onionCell = onionRow[x];
+            const targetCell = targetRow[x];
+            if (!isProjectedCellVisibleContent(onionCell) || isProjectedCellVisibleContent(targetCell)) continue;
+            targetRow[x] = cloneCellForOnion(onionCell!, onionLayer.offset);
+          }
+        }
+      }
+    }
+  }
+
   function getPainterRenderScene(): PainterProjectedScene {
     if (!painter_display_projection) {
       return {
@@ -4395,10 +4712,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
     const needsLivePreview = live_stroke_preview_changes.length > 0;
     const needsSelectionPreview = hasAnyVisibleSelectionChannels();
-    if (!needsLivePreview && !needsSelectionPreview) {
+    const needsOnionSkin = (painter_camera_state.onion_skin_enabled ?? false) && (painter_camera_state.onion_skin_distance ?? 0) > 0;
+    if (!needsLivePreview && !needsSelectionPreview && !needsOnionSkin) {
       return painter_display_projection.scene;
     }
     const previewScene = clone_projected_scene(painter_display_projection.scene);
+    if (needsOnionSkin) applyOnionSkinToProjectedScene(previewScene);
     const active_group_id = resolve_current_runtime_group_id();
     if (needsLivePreview && active_group_id) applyLivePreviewToProjectedScene(previewScene, current_tool === 'paste');
     if (needsSelectionPreview) applySelectionPreviewToProjectedScene(previewScene);
@@ -5081,7 +5400,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     // against a different angle than the one on screen during startup or view
     // transitions.
     get_view_state: () => getPainterDisplayViewState(),
-    get_is_playing: () => painter_playback_running,
+    get_is_playing: () => isPainterPlaybackActive(),
     on_step_view_action: (action) => {
       stepPainterViewAction(action);
     },
@@ -7198,6 +7517,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         calibration_x: { ...PAINTER_CAMERA_LIMITS.calibration_x },
         calibration_y: { ...PAINTER_CAMERA_LIMITS.calibration_y },
         render_distance_planes: { ...PAINTER_CAMERA_LIMITS.render_distance_planes, step: 1, digits: 0 },
+        onion_skin_distance: { ...PAINTER_CAMERA_LIMITS.onion_skin_distance, step: 1, digits: 0 },
       },
       onParallaxMoveToggle: (enabled) => {
         painter_camera_state.parallax_move_enabled = enabled;
@@ -7320,6 +7640,62 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           persistPainterCameraConfig({ render_distance_planes: nextValue });
         }
       },
+      onOnionSkinToggle: (enabled) => {
+        painter_camera_state.onion_skin_enabled = enabled;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
+        refreshPainterProjectionPreservingCameraFrame();
+        if (isAppInitialized) {
+          persistPainterCameraConfig({ onion_skin_enabled: enabled });
+        }
+      },
+      onOnionSkinDistanceChange: (value) => {
+        const nextValue = sanitizePainterCameraConfig({ onion_skin_distance: value }).onion_skin_distance ?? 1;
+        painter_camera_state.onion_skin_distance = nextValue;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
+        refreshPainterProjectionPreservingCameraFrame();
+        if (isAppInitialized) {
+          persistPainterCameraConfig({ onion_skin_distance: nextValue });
+        }
+      },
+      onOnionSkinStepModeChange: (mode: OnionSkinStepMode) => {
+        const nextValue = sanitizePainterCameraConfig({ onion_skin_step_mode: mode }).onion_skin_step_mode ?? 'raster_bars';
+        painter_camera_state.onion_skin_step_mode = nextValue;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
+        refreshPainterProjectionPreservingCameraFrame();
+        if (isAppInitialized) {
+          persistPainterCameraConfig({ onion_skin_step_mode: nextValue });
+        }
+      },
+      onOnionSkinFullFileToggle: (enabled) => {
+        painter_camera_state.onion_skin_full_file = enabled;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
+        refreshPainterProjectionPreservingCameraFrame();
+        if (isAppInitialized) {
+          persistPainterCameraConfig({ onion_skin_full_file: enabled });
+        }
+      },
+      onOnionSkinOpacityToggle: (enabled) => {
+        painter_camera_state.onion_skin_use_opacity = enabled;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
+        refreshPainterProjectionPreservingCameraFrame();
+        if (isAppInitialized) {
+          persistPainterCameraConfig({ onion_skin_use_opacity: enabled });
+        }
+      },
+      onOnionSkinWeightToggle: (enabled) => {
+        painter_camera_state.onion_skin_use_weight = enabled;
+        syncVoxelSpaceCameraFromPainterCamera();
+        syncPainterDocumentCameraFromPainterCamera();
+        refreshPainterProjectionPreservingCameraFrame();
+        if (isAppInitialized) {
+          persistPainterCameraConfig({ onion_skin_use_weight: enabled });
+        }
+      },
       onMove: (new_rect) => {
         if (camera_control_module) {
           camera_control_module.rect = new_rect;
@@ -7403,6 +7779,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   window.addEventListener('pointerdown', () => {
     if (isPainterTextCaptureActive()) return;
+    flushPendingPainterTransportTap();
     painter_tool_shortcut_interpreter.flush_pending_primary();
   }, { capture: true });
 
@@ -7411,6 +7788,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       e.preventDefault();
       return;
     }
+    const transportTapAction = getPainterTransportTapActionForEvent(e);
+    if (transportTapAction && !isPainterTextCaptureActive()) {
+      e.preventDefault();
+      handlePainterTransportTap(transportTapAction, e.repeat);
+      return;
+    }
+    maybeEarlyCommitPendingPainterTransportTapForKeydown(e);
     if (maybeHandlePainterToolShortcutKeydown(e)) return;
     maybeEarlyCommitPendingToolShortcutForKeydown(e);
     const editActionHandlers: Array<{ id: string; run: () => boolean }> = [
@@ -7489,10 +7873,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       return;
     }
     const timingActionHandlers: Array<{ id: string; run: () => void }> = [
-      { id: 'painter.breath.step_back', run: () => stepCurrentPainterBreath(-1) },
-      { id: 'painter.breath.step_forward', run: () => stepCurrentPainterBreath(1) },
-      { id: 'painter.breath.jump_active_group_start', run: () => jumpCurrentPainterBreathToActiveGroupBoundary('start') },
-      { id: 'painter.breath.jump_active_group_end', run: () => jumpCurrentPainterBreathToActiveGroupBoundary('end') },
       { id: 'painter.breath.play_pause', run: () => togglePainterPlayback() },
       { id: 'painter.breath.jump_start', run: () => setCurrentPainterBreath(getPainterDocumentBreathRange().start) },
       { id: 'painter.breath.jump_end', run: () => setCurrentPainterBreath(getPainterDocumentBreathRange().end) },

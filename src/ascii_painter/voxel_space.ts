@@ -119,6 +119,8 @@ export interface EditPlaneState {
 /**
  * Camera configuration
  */
+export type OnionSkinStepMode = 'raster_bars' | 'frames';
+
 export interface CameraConfig {
   mode: CameraMode;
   orientation: CameraOrientation;
@@ -156,6 +158,14 @@ export interface CameraConfig {
   // Virtual camera pan position - moves the view across the voxel space
   pan_x: number;                      // Horizontal pan offset in grid cells (default 0)
   pan_y: number;                      // Vertical pan offset in grid cells (default 0)
+
+  // Painter-only view aids
+  onion_skin_enabled: boolean;
+  onion_skin_distance: number;
+  onion_skin_step_mode: OnionSkinStepMode;
+  onion_skin_full_file: boolean;
+  onion_skin_use_opacity: boolean;
+  onion_skin_use_weight: boolean;
 }
 
 /**
@@ -189,6 +199,12 @@ export const DEFAULT_CAMERA_VALUES = {
   char_spacing_y: 1.0,
   pan_x: 0,
   pan_y: 0,
+  onion_skin_enabled: false,
+  onion_skin_distance: 1,
+  onion_skin_step_mode: 'raster_bars' as const,
+  onion_skin_full_file: false,
+  onion_skin_use_opacity: true,
+  onion_skin_use_weight: true,
 };
 
 /**

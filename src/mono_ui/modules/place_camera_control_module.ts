@@ -12,7 +12,7 @@ import {
   update_plain_text_hover,
 } from '../ux/plain_text_controls.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
-import type { CameraConfig } from '../../ascii_painter/voxel_space.js';
+import type { CameraConfig, OnionSkinStepMode } from '../../ascii_painter/voxel_space.js';
 
 export type PlaceCameraControlOptions = {
   id: string;
@@ -35,7 +35,13 @@ export type PlaceCameraControlOptions = {
   onMouseAnglePitchDegChange?: (value: number) => void;
   onMouseAngleSpringChange?: (value: number) => void;
   onRenderDistancePlanesChange?: (value: number) => void;
-  slider_specs?: Partial<Record<'scale_per_layer' | 'movement_per_layer' | 'mouse_angle_yaw_deg' | 'mouse_angle_pitch_deg' | 'mouse_angle_spring' | 'calibration_x' | 'calibration_y' | 'render_distance_planes', {
+  onOnionSkinToggle?: (enabled: boolean) => void;
+  onOnionSkinDistanceChange?: (value: number) => void;
+  onOnionSkinStepModeChange?: (mode: OnionSkinStepMode) => void;
+  onOnionSkinFullFileToggle?: (enabled: boolean) => void;
+  onOnionSkinOpacityToggle?: (enabled: boolean) => void;
+  onOnionSkinWeightToggle?: (enabled: boolean) => void;
+  slider_specs?: Partial<Record<'scale_per_layer' | 'movement_per_layer' | 'mouse_angle_yaw_deg' | 'mouse_angle_pitch_deg' | 'mouse_angle_spring' | 'calibration_x' | 'calibration_y' | 'render_distance_planes' | 'onion_skin_distance', {
     min: number;
     max: number;
     step: number;
@@ -93,12 +99,21 @@ const ROW_SEPARATOR_8 = 38;
 const ROW_RENDER_DISTANCE_LABEL = 39;
 const ROW_RENDER_DISTANCE = 40;
 const ROW_RENDER_DISTANCE_SLIDER = 41;
+const ROW_SEPARATOR_9 = 42;
+const ROW_ONION_TOGGLE = 43;
+const ROW_ONION_MODE = 44;
+const ROW_ONION_DISTANCE_LABEL = 45;
+const ROW_ONION_DISTANCE = 46;
+const ROW_ONION_DISTANCE_SLIDER = 47;
+const ROW_ONION_FULL_FILE = 48;
+const ROW_ONION_OPACITY = 49;
+const ROW_ONION_WEIGHT = 50;
 
-const CONTENT_HEIGHT = 42;
+const CONTENT_HEIGHT = 51;
 const COL_TOGGLE = 2;
 const COL_LABEL = 4;
 
-type SliderKind = 'movement_per_layer' | 'scale_per_layer' | 'mouse_angle_yaw_deg' | 'mouse_angle_pitch_deg' | 'mouse_angle_spring' | 'calibration_x' | 'calibration_y' | 'render_distance_planes';
+type SliderKind = 'movement_per_layer' | 'scale_per_layer' | 'mouse_angle_yaw_deg' | 'mouse_angle_pitch_deg' | 'mouse_angle_spring' | 'calibration_x' | 'calibration_y' | 'render_distance_planes' | 'onion_skin_distance';
 
 const DEFAULT_SLIDER_SPECS: Record<SliderKind, { min: number; max: number; step: number; digits?: number }> = {
   mouse_angle_yaw_deg: { min: -45, max: 45, step: 0.5, digits: 1 },
@@ -109,6 +124,7 @@ const DEFAULT_SLIDER_SPECS: Record<SliderKind, { min: number; max: number; step:
   calibration_x: { min: -500, max: 500, step: 1, digits: 0 },
   calibration_y: { min: -500, max: 500, step: 1, digits: 0 },
   render_distance_planes: { min: 0, max: 8, step: 1, digits: 0 },
+  onion_skin_distance: { min: 1, max: 3, step: 1, digits: 0 },
 };
 
 export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): Module {
@@ -301,6 +317,7 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
     else if (kind === 'calibration_x') opts.onCalibrationChange?.(quantizeSliderValue(kind, (cam.calibration?.x ?? 0) + dir * spec.step), Math.round(cam.calibration?.y ?? 0));
     else if (kind === 'calibration_y') opts.onCalibrationChange?.(Math.round(cam.calibration?.x ?? 0), quantizeSliderValue(kind, (cam.calibration?.y ?? 0) + dir * spec.step));
     else if (kind === 'render_distance_planes') opts.onRenderDistancePlanesChange?.(quantizeSliderValue(kind, ((cam.render_distance_planes ?? 2)) + dir * spec.step));
+    else if (kind === 'onion_skin_distance') opts.onOnionSkinDistanceChange?.(quantizeSliderValue(kind, ((cam.onion_skin_distance ?? 1)) + dir * spec.step));
   }
 
   function camera() {
@@ -376,6 +393,20 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
         drawValue(c, ROW_RENDER_DISTANCE, formatSliderValue('render_distance_planes', cam.render_distance_planes ?? 2));
         drawSlider(c, ROW_RENDER_DISTANCE_SLIDER, cam.render_distance_planes ?? 2, getSliderSpec('render_distance_planes').min, getSliderSpec('render_distance_planes').max);
       }
+      if (opts.onOnionSkinToggle || opts.onOnionSkinDistanceChange || opts.onOnionSkinStepModeChange || opts.onOnionSkinFullFileToggle || opts.onOnionSkinOpacityToggle || opts.onOnionSkinWeightToggle) {
+        drawSeparator(c, ROW_SEPARATOR_9);
+        drawToggle(c, ROW_ONION_TOGGLE, cam.onion_skin_enabled ?? false, 'Onion Skin');
+        drawActionRow(c, ROW_ONION_MODE, [
+          { id: 'onion_mode_raster_bars', label: (cam.onion_skin_step_mode ?? 'raster_bars') === 'raster_bars' ? 'Raster*' : 'Raster' },
+          { id: 'onion_mode_frames', label: (cam.onion_skin_step_mode ?? 'raster_bars') === 'frames' ? 'Frames*' : 'Frames' },
+        ]);
+        drawLabel(c, ROW_ONION_DISTANCE_LABEL, 'Onion Distance');
+        drawValue(c, ROW_ONION_DISTANCE, formatSliderValue('onion_skin_distance', cam.onion_skin_distance ?? 1));
+        drawSlider(c, ROW_ONION_DISTANCE_SLIDER, cam.onion_skin_distance ?? 1, getSliderSpec('onion_skin_distance').min, getSliderSpec('onion_skin_distance').max);
+        drawToggle(c, ROW_ONION_FULL_FILE, cam.onion_skin_full_file ?? false, 'Full File Onion Skin');
+        drawToggle(c, ROW_ONION_OPACITY, cam.onion_skin_use_opacity ?? true, 'Onion Opacity Fade');
+        drawToggle(c, ROW_ONION_WEIGHT, cam.onion_skin_use_weight ?? true, 'Onion Weight Fade');
+      }
     },
     on_pointer_down_content(e: PointerEvent): void {
       if (is_dragging_slider !== null) is_dragging_slider = null;
@@ -393,6 +424,7 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       if (is_on_slider(e.x, e.y, ROW_CALIBRATION_X_SLIDER)) return updateSlider('calibration_x', (v) => opts.onCalibrationChange?.(v, Math.round(cam.calibration?.y ?? 0)));
       if (is_on_slider(e.x, e.y, ROW_CALIBRATION_Y_SLIDER)) return updateSlider('calibration_y', (v) => opts.onCalibrationChange?.(Math.round(cam.calibration?.x ?? 0), v));
       if (opts.onRenderDistancePlanesChange && is_on_slider(e.x, e.y, ROW_RENDER_DISTANCE_SLIDER)) return updateSlider('render_distance_planes', (v) => opts.onRenderDistancePlanesChange?.(v));
+      if (opts.onOnionSkinDistanceChange && is_on_slider(e.x, e.y, ROW_ONION_DISTANCE_SLIDER)) return updateSlider('onion_skin_distance', (v) => opts.onOnionSkinDistanceChange?.(v));
 
       if (is_on_minus(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) return void nudgeSlider('mouse_angle_yaw_deg', -1);
       if (is_on_plus(e.x, e.y, ROW_MOUSE_YAW_SLIDER)) return void nudgeSlider('mouse_angle_yaw_deg', 1);
@@ -410,6 +442,8 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       if (is_on_plus(e.x, e.y, ROW_CALIBRATION_Y_SLIDER)) return void nudgeSlider('calibration_y', 1);
       if (opts.onRenderDistancePlanesChange && is_on_minus(e.x, e.y, ROW_RENDER_DISTANCE_SLIDER)) return void nudgeSlider('render_distance_planes', -1);
       if (opts.onRenderDistancePlanesChange && is_on_plus(e.x, e.y, ROW_RENDER_DISTANCE_SLIDER)) return void nudgeSlider('render_distance_planes', 1);
+      if (opts.onOnionSkinDistanceChange && is_on_minus(e.x, e.y, ROW_ONION_DISTANCE_SLIDER)) return void nudgeSlider('onion_skin_distance', -1);
+      if (opts.onOnionSkinDistanceChange && is_on_plus(e.x, e.y, ROW_ONION_DISTANCE_SLIDER)) return void nudgeSlider('onion_skin_distance', 1);
 
       press_plain_text_control(text_controls, e.x, e.y);
     },
@@ -428,6 +462,7 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       else if (is_dragging_slider === 'calibration_x') opts.onCalibrationChange?.(nextValue, Math.round(camera().calibration?.y ?? 0));
       else if (is_dragging_slider === 'calibration_y') opts.onCalibrationChange?.(Math.round(camera().calibration?.x ?? 0), nextValue);
       else if (is_dragging_slider === 'render_distance_planes') opts.onRenderDistancePlanesChange?.(nextValue);
+      else if (is_dragging_slider === 'onion_skin_distance') opts.onOnionSkinDistanceChange?.(nextValue);
     },
     on_pointer_up_content(): void {
       if (is_dragging_slider) {
@@ -437,7 +472,16 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       const hit_id = release_hovered_plain_text_control(text_controls);
       if (!hit_id) return;
       if (hit_id.startsWith('action:')) {
-        opts.onAction?.(hit_id.slice('action:'.length));
+        const actionId = hit_id.slice('action:'.length);
+        if (actionId === 'onion_mode_raster_bars') {
+          opts.onOnionSkinStepModeChange?.('raster_bars');
+          return;
+        }
+        if (actionId === 'onion_mode_frames') {
+          opts.onOnionSkinStepModeChange?.('frames');
+          return;
+        }
+        opts.onAction?.(actionId);
         return;
       }
       if (hit_id === `toggle:${ROW_PARALLAX_MOVE}`) return void opts.onParallaxMoveToggle?.(!(camera().parallax_move_enabled ?? false));
@@ -447,6 +491,10 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
         return void opts.onOcclusionToggle?.(!enabled);
       }
       if (hit_id === `toggle:${ROW_CENTER_TARGET}`) return void opts.onCenterTargetToggle?.(!(camera().center_target_in_view ?? false));
+      if (hit_id === `toggle:${ROW_ONION_TOGGLE}`) return void opts.onOnionSkinToggle?.(!(camera().onion_skin_enabled ?? false));
+      if (hit_id === `toggle:${ROW_ONION_FULL_FILE}`) return void opts.onOnionSkinFullFileToggle?.(!(camera().onion_skin_full_file ?? false));
+      if (hit_id === `toggle:${ROW_ONION_OPACITY}`) return void opts.onOnionSkinOpacityToggle?.(!(camera().onion_skin_use_opacity ?? true));
+      if (hit_id === `toggle:${ROW_ONION_WEIGHT}`) return void opts.onOnionSkinWeightToggle?.(!(camera().onion_skin_use_weight ?? true));
       if (hit_id === 'reset_calibration') opts.onCalibrationReset?.();
     },
     on_pointer_leave_content(): void {
