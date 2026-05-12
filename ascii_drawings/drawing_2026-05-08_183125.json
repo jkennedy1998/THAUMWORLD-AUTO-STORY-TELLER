@@ -10,10 +10,10 @@
     "maxZ": 12
   },
   "occupied_bounds": {
-    "minX": -18,
+    "minX": -15,
     "minY": -41,
     "minZ": -1,
-    "maxX": 21,
+    "maxX": 20,
     "maxY": 41,
     "maxZ": 12
   },
@@ -63948,7 +63948,7 @@
     "orientation": "xy",
     "principal_view": "bottom",
     "roll_quarter_turn": 3,
-    "focus_plane": 0,
+    "focus_plane": 2,
     "parallax_intensity": 0.7,
     "show_all_layers": false,
     "use_focus_layer_opacity": false,
@@ -63993,6 +63993,6 @@
   },
   "metadata": {
     "created_at": "2026-05-08T23:31:25.687Z",
-    "modified_at": "2026-05-12T15:54:51.103Z"
+    "modified_at": "2026-05-12T20:07:33.213Z"
   }
 }

@@ -230,6 +230,7 @@ export type PainterAppState = {
   on_pointer_down_global?: (x: number, y: number, e: any) => void;
   on_pointer_up_global?: (x: number, y: number, e: any) => void;
   resolve_pan_wheel_delta?: (module: Module | null, e: WheelEvent) => Partial<{ x: number; y: number; z: number }> | null;
+  handle_global_wheel_action?: (module: Module | null, e: WheelEvent) => boolean;
 
   // Import/export surface kept for existing UI wiring; uses PainterDocument.
   export_grid: () => string;
@@ -5639,7 +5640,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       runPainterTransportSingleTap(dir < 0 ? 'step_back' : 'step_forward');
     },
     resolve_wheel_action: (e) => resolvePainterWheelAction(e),
-    get_scroll_primary_mode: () => getPainterScrollPrimaryMode(),
     handle_text_mode_reserved_shortcut: (e) => {
       const cameraActionBindings: Array<{ id: string; action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right' }> = [
         { id: 'painter.view.swing_left', action: 'swing_left' },
@@ -5920,16 +5920,6 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return binding?.kind === 'keyboard' ? binding.code === e.code : false;
   }
 
-  function getPainterScrollPrimaryMode(): 'depth' | 'breaths' {
-    return painter_controls.runtime.get_preference<'depth' | 'breaths'>('painter.scroll.primary_mode', 'depth') === 'breaths'
-      ? 'breaths'
-      : 'depth';
-  }
-
-  function togglePainterScrollPrimaryMode(): void {
-    painter_controls.runtime.set_preference('painter.scroll.primary_mode', getPainterScrollPrimaryMode() === 'depth' ? 'breaths' : 'depth');
-  }
-
   function resolvePainterWheelAction(e: WheelEvent): string | null {
     return resolve_wheel_binding_action([
       'painter.scroll.pan_horizontal_prev',
@@ -5960,6 +5950,22 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         return { x: 2 };
       default:
         return null;
+    }
+  }
+
+  function handlePainterGlobalWheelAction(_module: Module | null, e: WheelEvent): boolean {
+    switch (resolve_wheel_binding_action([
+      'painter.scroll.secondary_prev',
+      'painter.scroll.secondary_next',
+    ], (action_id) => painter_controls.runtime.get_binding(action_id), e)) {
+      case 'painter.scroll.secondary_prev':
+        stepCurrentPainterBreath(-1);
+        return true;
+      case 'painter.scroll.secondary_next':
+        stepCurrentPainterBreath(1);
+        return true;
+      default:
+        return false;
     }
   }
   const painter_tai = create_painter_tool_assisted_inputs_wiring({
@@ -6024,7 +6030,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         if (key === 'camera_scale_per_layer') return String(voxelSpace.camera.scale_per_layer ?? 0);
         if (key === 'camera_pan_x') return String(voxelSpace.camera.pan_x ?? 0);
         if (key === 'camera_pan_y') return String(voxelSpace.camera.pan_y ?? 0);
-        if (key === 'scroll_primary_mode') return getPainterScrollPrimaryMode();
+        if (key === 'scroll_primary_mode') return 'depth';
         if (key === 'group_count') return String(Object.keys(painter_document_runtime.document.groups).length);
         if (key === 'group_order') return painter_document_runtime.document.group_order.join(',');
         if (key === 'contributor_coords') return String(painter_document_runtime.coordinate_group_index.size);
@@ -6189,10 +6195,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         return clear_current_anchor_cell();
       }
       if (helper === 'set_painter_scroll_primary_mode') {
-        const mode = String((payload as any)?.mode ?? '').trim().toLowerCase();
-        if (mode !== 'depth' && mode !== 'breaths') return false;
-        painter_controls.runtime.set_preference('painter.scroll.primary_mode', mode);
-        return true;
+        return String((payload as any)?.mode ?? '').trim().toLowerCase() === 'depth';
       }
       if (helper === 'clear_selection') {
         clear_all_selection_channels();
@@ -7313,13 +7316,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       get_binding_label: (action_id) => painter_controls.runtime.get_binding_label(action_id),
       get_conflicts: (action_id) => painter_controls.runtime.get_conflicts(action_id),
       set_binding: (action_id, binding) => painter_controls.runtime.set_binding(action_id, binding),
-      get_extra_rows: () => [{
-        category: 'Scroll',
-        id: 'painter.scroll.primary_mode',
-        label: 'Scroll Wheel Primary',
-        value: getPainterScrollPrimaryMode() === 'depth' ? 'Depth' : 'Breaths',
-        on_activate: () => togglePainterScrollPrimaryMode(),
-      }],
+      get_extra_rows: () => [],
       on_close: () => setModuleOpen('controls_panel', false, (v) => { controls_open = v; }),
       on_move: (new_rect) => {
         if (controls_module) controls_module.rect = new_rect;
@@ -8388,6 +8385,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
        painter_interaction_session_state = up_resolution.session;
      },
      resolve_pan_wheel_delta: (module: Module | null, e: WheelEvent) => resolvePainterPanWheelDelta(module, e),
+     handle_global_wheel_action: (module: Module | null, e: WheelEvent) => handlePainterGlobalWheelAction(module, e),
     
     export_grid: () => exportPainterDocumentToJSON(exportCurrentPainterDocument()),
     

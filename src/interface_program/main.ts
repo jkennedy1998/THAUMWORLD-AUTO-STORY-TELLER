@@ -9738,10 +9738,10 @@ import type { InlineItem } from "../types/inline_item.js";
 import { extract_feature_keywords_for_inspection, extract_body_slot_for_inspection } from "../inspection/text_parser.js";
 import { 
   setActorTarget, 
-  clearActorTarget, 
   getActorTarget,
   hasValidTarget 
 } from "./target_state.js";
+import { handleTargetRoute } from "./target/route.js";
 import { 
   setVolume, 
   getVolume, 
@@ -11689,23 +11689,7 @@ function start_http_server(log_path: string): void {
                         }
                     }
                 }
-                
-                    // Devlog test: 3dification wall-top item exists in tavern.
-                    try {
-                        if (place_id === 'eden_crossroads_tavern') {
-                            const base_z = Math.floor(Number((place as any)?.coordinates?.elevation ?? 0)) || 0;
-                            const want_z = base_z + 1;
-                            const any_wall_top = (place.contents.items_on_ground ?? []).some((it: any) => Math.floor(Number(it?.elevation)) === want_z);
-                            if (any_wall_top) {
-                                debug_log('3DIFICATION_TEST', `PASS wall-top ground item present (place=${place_id} z=${want_z})`);
-                            } else {
-                                debug_warn('3DIFICATION_TEST', `FAIL no wall-top ground item present (place=${place_id} z=${want_z})`);
-                            }
-                        }
-                    } catch {
-                        // ignore
-                    }
-                
+
                 if (synced_count > 0) {
                     debug_log("API", `/api/place: Synced ${synced_count} ground items from inline ground storage`, {
                         place_id,
@@ -15821,52 +15805,13 @@ function start_http_server(log_path: string): void {
             return;
         }
 
-        // POST /api/target - Set communication target for actor
-        if (url.pathname === "/api/target") {
-            if (req.method !== "POST") {
-                res.writeHead(405, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
-                return;
-            }
-
-            let body = "";
-            req.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-            req.on("end", () => {
-                try {
-                    const data = JSON.parse(body);
-                    const client_session_id = require_request_client_session_id(data_slot_number, { session_token: data?.session_token });
-                    const actor_ref = require_authorized_actor_ref(data_slot_number, client_session_id, data?.actor_ref);
-                    const target_ref = data.target_ref;
-                    const target_type = data.target_type || "npc";
-                    const target_name = data.target_name;
-
-                    if (!target_ref) {
-                        // Clear target
-                        clearActorTarget(actor_ref);
-                        res.writeHead(200, { "Content-Type": "application/json" });
-                        res.end(JSON.stringify({ ok: true, action: "cleared" }));
-                        return;
-                    }
-
-                    // Set target
-                    setActorTarget(actor_ref, target_ref, target_type, target_name);
-                    debug_log("[API]", `Target set for ${actor_ref}: ${target_ref} (${target_type})`);
-
-                    res.writeHead(200, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ 
-                        ok: true, 
-                        action: "set",
-                        actor_ref,
-                        target_ref,
-                        target_type 
-                    }));
-                } catch (err: any) {
-                    const error = err?.message ?? "invalid_request";
-                    const status = error === "actor_ref_not_authorized" ? 403 : error === "invalid_session_token" || error === "controlled_actor_binding_required" ? 401 : 500;
-                    res.writeHead(status, { "Content-Type": "application/json" });
-                    res.end(JSON.stringify({ ok: false, error }));
-                }
-            });
+        if (handleTargetRoute({
+            req,
+            res,
+            data_slot_number,
+            require_request_client_session_id,
+            require_authorized_actor_ref,
+        })) {
             return;
         }
 
@@ -21705,22 +21650,6 @@ function start_http_server(log_path: string): void {
                          })
                      }));
 
-                 // Devlog test: ensure elevated ground item can be surfaced by the items endpoint.
-                 try {
-                     if (place_id === 'eden_crossroads_tavern') {
-                         const base_z = Math.floor(Number((place_any as any)?.coordinates?.elevation ?? 0)) || 0;
-                         const want_z = base_z + 1;
-                         const any_wall_top = items.some(({ item }: any) => Math.floor(Number((item as any)?.elevation ?? base_z)) === want_z);
-                         if (any_wall_top) {
-                             debug_log('3DIFICATION_TEST', `PASS /api/place/items includes elevated ground item (place=${place_id} z=${want_z})`);
-                         } else {
-                             debug_warn('3DIFICATION_TEST', `FAIL /api/place/items missing elevated ground item (place=${place_id} z=${want_z})`);
-                         }
-
-                       }
-                   } catch {
-                       // ignore
-                  }
             } catch (err) {
                 debug_error("API", "/api/place/items error", err);
                 res.writeHead(500, { "Content-Type": "application/json" });

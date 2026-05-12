@@ -6535,6 +6535,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           config.on_step_depth?.(1);
           return;
       }
+      if (e.alt || e.shift || e.ctrl || e.meta) return;
       if (!config.set_focus_z) return;
       const cur = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);

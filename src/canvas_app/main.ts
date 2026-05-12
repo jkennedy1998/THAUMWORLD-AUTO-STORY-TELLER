@@ -42,6 +42,7 @@ let on_pointer_move_global: ((x: number, y: number, e: any) => void) | undefined
 let on_pointer_down_global: ((x: number, y: number, e: any) => void) | undefined;
 let on_pointer_up_global: ((x: number, y: number, e: any) => void) | undefined;
 let resolve_pan_wheel_delta: ((module: Module | null, e: any) => Partial<{ x: number; y: number; z: number }> | null) | undefined;
+let handle_global_wheel_action: ((module: Module | null, e: any) => boolean) | undefined;
 let on_after_compose: ((canvas: any) => void) | undefined;
 let launch_controller: ReturnType<typeof create_launch_controller<PainterLaunchIntent>> | null = null;
 let painter_join_controller: ReturnType<typeof create_join_controller> | null = null;
@@ -94,6 +95,7 @@ if (IS_PAINTER_MODE) {
         on_pointer_down_global = painter_state.on_pointer_down_global;
         on_pointer_up_global = painter_state.on_pointer_up_global;
         resolve_pan_wheel_delta = painter_state.resolve_pan_wheel_delta;
+        handle_global_wheel_action = painter_state.handle_global_wheel_action;
         on_after_compose = undefined;
         runtime.set_modules(get_visible_modules());
         if (module_registry?.subscribe) {
@@ -259,6 +261,7 @@ if (IS_PAINTER_MODE) {
     on_pointer_down_global = undefined;
     on_pointer_up_global = undefined;
     resolve_pan_wheel_delta = undefined;
+    handle_global_wheel_action = undefined;
     on_after_compose = undefined;
 } else {
     // GAME MODE
@@ -271,6 +274,7 @@ if (IS_PAINTER_MODE) {
     on_pointer_down_global = game_state.on_pointer_down_global;
     on_pointer_up_global = game_state.on_pointer_up_global;
     resolve_pan_wheel_delta = game_state.resolve_pan_wheel_delta;
+    handle_global_wheel_action = game_state.handle_global_wheel_action;
     on_after_compose = game_state.on_after_compose;
 }
 
@@ -315,6 +319,7 @@ runtime = new CanvasRuntime({
     on_pointer_down_global: (x, y, e) => on_pointer_down_global?.(x, y, e),
     on_pointer_up_global: (x, y, e) => on_pointer_up_global?.(x, y, e),
     resolve_pan_wheel_delta: (module, e) => resolve_pan_wheel_delta?.(module, e) ?? null,
+    handle_global_wheel_action: (module, e) => handle_global_wheel_action?.(module, e) ?? false,
     on_module_pointer_down: (module) => {
         try {
             module_registry?.bring_to_front?.(module.id);

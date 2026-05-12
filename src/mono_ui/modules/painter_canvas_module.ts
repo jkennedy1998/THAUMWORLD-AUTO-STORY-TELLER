@@ -146,7 +146,6 @@ export type PainterCanvasOptions = {
   on_step_depth?: (dir: -1 | 1) => void;
   on_step_breath?: (dir: -1 | 1) => void;
   resolve_wheel_action?: (e: WheelEvent) => string | null;
-  get_scroll_primary_mode?: () => 'depth' | 'breaths';
   handle_text_mode_reserved_shortcut?: (e: KeyboardEvent) => boolean;
   get_camera_frame_anchor_world?: () => { x: number; y: number; z: number };
   set_camera_frame_anchor_world?: (anchor: { x: number; y: number; z: number }, context: { source: 'screen_drag' | 'axis_step'; detach_follow: boolean }) => void;
@@ -703,11 +702,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
     if (dir !== -1 && dir !== 1) return false;
     opts.on_step_breath?.(dir);
     return !!opts.on_step_breath;
-  }
-
-  function runPrimaryScrollMode(dir: -1 | 1, modeOverride?: 'depth' | 'breaths'): boolean {
-    const mode = modeOverride ?? opts.get_scroll_primary_mode?.() ?? 'depth';
-    return mode === 'breaths' ? runWheelBreath(dir) : runWheelDepth(dir);
   }
 
   function getSemanticVerticalWheelDir(e: WheelEvent): -1 | 1 | 0 {
@@ -3989,16 +3983,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       // App-default semantic wheel meanings should resolve before any canvas-local override logic.
       switch (opts.resolve_wheel_action?.(e) ?? null) {
         case 'painter.scroll.primary_prev':
-          runPrimaryScrollMode(-1);
+          runWheelDepth(-1);
           return;
         case 'painter.scroll.primary_next':
-          runPrimaryScrollMode(1);
-          return;
-        case 'painter.scroll.secondary_prev':
-          runPrimaryScrollMode(-1, (opts.get_scroll_primary_mode?.() ?? 'depth') === 'depth' ? 'breaths' : 'depth');
-          return;
-        case 'painter.scroll.secondary_next':
-          runPrimaryScrollMode(1, (opts.get_scroll_primary_mode?.() ?? 'depth') === 'depth' ? 'breaths' : 'depth');
+          runWheelDepth(1);
           return;
       }
 

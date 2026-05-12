@@ -240,6 +240,7 @@ export type AppState = {
     on_pointer_down_global: (x: number, y: number, e: any) => void;
     on_pointer_up_global: (x: number, y: number, e: any) => void;
     resolve_pan_wheel_delta?: (module: Module | null, e: WheelEvent) => Partial<{ x: number; y: number; z: number }> | null;
+    handle_global_wheel_action?: (module: Module | null, e: WheelEvent) => boolean;
     on_after_compose: (canvas: any) => void;
     get_interaction_adapters: () => {
         painter: InteractionConsumerAdapters | null;
@@ -8290,23 +8291,6 @@ export function create_app_state(): AppState {
             ui_state.place.ground_item_caches_by_place.set(place_id, cache);
             if (ui_state.place.current_place_id === place_id) sync_current_place_ground_item_cache_aliases();
 
-            try {
-                const next_place = get_scene_place(place_id) ?? (ui_state.place.current_place_id === place_id ? ui_state.place.current_place : null);
-                if (next_place?.id === 'eden_crossroads_tavern') {
-                    const base_z = Math.floor(Number((next_place as any)?.coordinates?.elevation ?? 0)) || 0;
-                    const want_z = base_z + 1;
-                    const elevated = Array.from(cache.by_id.values()).filter((r: any) => Math.floor(Number(r?.elevation ?? base_z)) === want_z);
-                    if (elevated.length > 0) {
-                        debug_log('3DIFICATION_TEST', `PASS ground item cache includes elevated item(s) (place=${next_place.id} z=${want_z} count=${elevated.length})`);
-                    } else {
-                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing elevated items (place=${next_place.id} z=${want_z})`);
-                    }
-
-                }
-            } catch {
-                // ignore
-            }
-
             const open = Array.from(ui_state.container.open_containers);
             for (const cid of open) {
                 if (cid.startsWith('place.pile.')) {
@@ -8997,22 +8981,6 @@ export function create_app_state(): AppState {
                                 }
                             }
 
-                            // Devlog test: elevated ground items are present in cache for tavern.
-                            try {
-                                if (next_place.id === 'eden_crossroads_tavern') {
-                                    const base_z = Math.floor(Number((next_place as any)?.coordinates?.elevation ?? 0)) || 0;
-                                    const want_z = base_z + 1;
-                                    const elevated = Array.from(ui_state.place.ground_items_by_id.values()).filter((r: any) => Math.floor(Number(r?.elevation ?? base_z)) === want_z);
-                                    if (elevated.length > 0) {
-                                        debug_log('3DIFICATION_TEST', `PASS ground item cache includes elevated item(s) (place=${next_place.id} z=${want_z} count=${elevated.length})`);
-                                    } else {
-                                        debug_warn('3DIFICATION_TEST', `FAIL ground item cache missing elevated items (place=${next_place.id} z=${want_z})`);
-                                    }
-
-                                }
-                            } catch {
-                                // ignore
-                            }
 
                             // Auto-close pile UIs that no longer exist (or revert to single-item state)
                             const open = Array.from(ui_state.container.open_containers);
@@ -13581,6 +13549,7 @@ export function create_app_state(): AppState {
             current_interaction_session_state = up_resolution.session;
         },
         resolve_pan_wheel_delta: undefined,
+        handle_global_wheel_action: undefined,
         set_current_place_pause_source,
         create_current_place_pause_controller,
         get_current_place_pause_state: () => ({

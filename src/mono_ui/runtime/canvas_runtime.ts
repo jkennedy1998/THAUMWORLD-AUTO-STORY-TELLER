@@ -56,6 +56,10 @@ export type CanvasRuntimeOptions = {
     // module pan target -> viewport fallback before module-local OnWheel.
     resolve_pan_wheel_delta?: (module: Module | null, e: WheelEvent) => Partial<{ x: number; y: number; z: number }> | null;
 
+    // Optional app-default semantic wheel owner.
+    // Runs after runtime pan chords but before module-local OnWheel.
+    handle_global_wheel_action?: (module: Module | null, e: WheelEvent) => boolean;
+
     // Called after modules compose each frame (for overlays)
     on_after_compose?: (canvas: Canvas) => void;
 };
@@ -144,6 +148,7 @@ export class CanvasRuntime {
     private on_pointer_up_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
     private on_module_pointer_down: ((module: Module) => void) | null = null;
     private resolve_pan_wheel_delta: ((module: Module | null, e: WheelEvent) => Partial<{ x: number; y: number; z: number }> | null) | null = null;
+    private handle_global_wheel_action: ((module: Module | null, e: WheelEvent) => boolean) | null = null;
     private on_after_compose: ((canvas: Canvas) => void) | null = null;
     private window_layout_refresh_handler: (() => void) | null = null;
     private window_focus_refresh_handler: (() => void) | null = null;
@@ -310,6 +315,7 @@ export class CanvasRuntime {
         this.on_pointer_up_global = opts.on_pointer_up_global ?? null;
         this.on_module_pointer_down = opts.on_module_pointer_down ?? null;
         this.resolve_pan_wheel_delta = opts.resolve_pan_wheel_delta ?? null;
+        this.handle_global_wheel_action = opts.handle_global_wheel_action ?? null;
         this.on_after_compose = opts.on_after_compose ?? null;
 
         this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
@@ -2410,9 +2416,9 @@ export class CanvasRuntime {
                 ...mods,
             };
             const top = this.route_to_top_module(x, y) ?? null;
+            const typing = this.focused_owner_wants_text_capture();
             const pan_delta = this.resolve_pan_wheel_delta?.(top, wheelEvent) ?? null;
             if (pan_delta) {
-                const typing = this.focused_owner_wants_text_capture();
                 const pan_target = typing ? null : this.resolve_explicit_pan_target(top);
                 const step_x = Math.trunc(Number(pan_delta.x ?? 0));
                 const step_y = Math.trunc(Number(pan_delta.y ?? 0));
@@ -2422,6 +2428,8 @@ export class CanvasRuntime {
                 } else {
                     top?.OnWheel?.(wheelEvent);
                 }
+            } else if (!typing && this.handle_global_wheel_action?.(top, wheelEvent)) {
+                // App-default semantic wheel action consumed before module-local fallback.
             } else {
                 top?.OnWheel?.(wheelEvent);
             }

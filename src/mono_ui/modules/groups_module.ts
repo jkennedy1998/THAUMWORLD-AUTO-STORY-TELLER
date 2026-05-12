@@ -2541,14 +2541,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
     wants_text_capture: () => renameState.isRenaming,
     on_wheel_content(e: WheelEvent): void {
       if (timelinePanDrag.active) return;
-      const lastMouseLocalX = lastPointerLocalPos?.x ?? -1;
-      const lastMouseLocalY = lastPointerLocalPos?.y ?? -1;
-      const wheelOnTimelineHeader = isPointerInTimelineHeader(rect, lastMouseLocalX, lastMouseLocalY);
       const semanticWheelDir = getSemanticVerticalWheelDir(e);
-      if (wheelOnTimelineHeader && semanticWheelDir !== 0) {
-        stepCurrentBreathWithinLoop(semanticWheelDir > 0 ? 1 : -1);
-        return;
-      }
       const groups = getGroups();
       const max = getMaxScrollSectionOffset(rect, groups);
       if (semanticWheelDir > 0) scrollOffset = Math.min(scrollOffset + 2, max);
