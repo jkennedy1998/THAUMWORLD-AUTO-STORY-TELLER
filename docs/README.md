@@ -10,11 +10,10 @@ If you're an AI agent working on this system, start here:
 
 1. **Read [INDEX.md](./INDEX.md)** - Master documentation index and navigation
 2. **Read [design/ARCHITECTURE.md](./design/ARCHITECTURE.md)** - System overview with diagrams
-3. **Read [design/SERVICES.md](./design/SERVICES.md)** - Service contracts (interpreter_ai is archived in this build)
+3. **Read [design/SERVICES.md](./design/SERVICES.md)** - Service contracts
 4. **Read [design/STAGES.md](./design/STAGES.md)** - Message flow and contracts
 5. **Read [guides/PROJECT_SETUP_AND_LLM_CONTEXT.md](./guides/PROJECT_SETUP_AND_LLM_CONTEXT.md)** - Minimal setup + how to feed context to LLMs
-6. **See [CHANGELOG.md](./CHANGELOG.md)** - Historical changes (may be stale)
-7. **See [examples/](./examples/)** - Working code samples
+6. **See [examples/](./examples/)** - Working code samples
 
 ## Documentation Structure
 
@@ -23,7 +22,6 @@ docs/
 ├── INDEX.md                 # Master documentation index
 ├── README.md                # This file
 ├── ROADMAP.md               # Current priorities
-├── CHANGELOG.md             # Historical changes (may be stale)
 ├── design/                  # Architecture, services, stages
 ├── guides/                  # Developer + AI guides
 ├── specs/                   # Technical specifications
@@ -49,9 +47,7 @@ docs/
 
 ### Architecture Pattern
 ```
-File-based message pipeline with service workers.
-
-Current build note (2026-02-13): `interpreter_ai` is archived. The `interface_program` creates action intents directly (COMMUNICATE, MOVE, etc.) and runs the ActionPipeline for action validation + perception.
+Hybrid action + message system.
 
 High-level flow:
 
@@ -70,7 +66,6 @@ Player Input/UI → interface_program (ActionPipeline) → npc_ai / renderer_ai 
 ### Services
 Independent processes that communicate via file-based messages:
 - **interface_program**: HTTP/CLI bridge
-- **interpreter_ai (archived)**: Legacy Natural language → Machine commands
 - **data_broker**: Reference resolution
 - **rules_lawyer**: THAUMWORLD RPG rule application
 - **state_applier**: Game state modification
@@ -136,7 +131,7 @@ npm run dev
 
 # Individual service
 npm run npc_ai_dev
-npm run interpreter_dev  # prints archived note
+npm run interface_dev
 # etc.
 ```
 
@@ -234,7 +229,7 @@ grep "pending_state_apply" local_data/data_slot_1/outbox.jsonc
 ## Support
 
 **For AI Agents:**
-- Read [AI_AGENT_GUIDE.md](./AI_AGENT_GUIDE.md) (TODO)
+- Read [guides/AI_AGENT_GUIDE.md](./guides/AI_AGENT_GUIDE.md)
 - Check [examples/](./examples/) for patterns
 - Use DEBUG_LEVEL=4 to see full message flow
 

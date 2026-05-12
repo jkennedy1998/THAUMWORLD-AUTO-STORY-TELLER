@@ -24,5 +24,23 @@
     "status": "canonical",
     "purpose": "join_session_baseline",
     "notes": "Primary THAUMWORLD multiplayer baseline for probe/connect/ws/session readiness without actor-claim coupling."
+  },
+  "14": {
+    "path": "tai14_painter_wheel_depth_zoom_pan_smoke/script.json",
+    "lane": "painter_direct",
+    "status": "secondary",
+    "purpose": "painter_wheel_depth_zoom_pan"
+  },
+  "15": {
+    "path": "tai15_painter_wheel_primary_mode_breaths_smoke/script.json",
+    "lane": "painter_direct",
+    "status": "secondary",
+    "purpose": "painter_wheel_primary_mode_breaths"
+  },
+  "16": {
+    "path": "tai16_painter_numeric_tool_sequences_smoke/script.json",
+    "lane": "painter_direct",
+    "status": "secondary",
+    "purpose": "painter_numeric_tool_sequences"
   }
 }

@@ -86,6 +86,7 @@ export type WheelEvent = {
     ctrl: boolean;
     alt: boolean;
     meta: boolean;
+    held_keys?: string[];
 };
 
 export type PointerKind = 'enter' | 'leave' | 'move' | 'down' | 'up' | 'click';

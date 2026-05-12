@@ -27,7 +27,7 @@ import { makeGroupsModule } from '../mono_ui/modules/groups_module.js';
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { createVoxelSpace, type VoxelSpace } from '../ascii_painter/voxel_space.js';
 import type { SlotType } from '../equipment/body_slot_resolver.js';
-import type { Canvas, Module, PointerEvent, Rgb, Rect } from '../mono_ui/types.js';
+import type { Canvas, Module, PointerEvent, Rgb, Rect, WheelEvent } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import { handleEntityClick, set_api_base_url, set_current_actor_ref, set_session_token } from '../interface_program/frontend_api.js';
 import type { Place, TilePosition } from '../types/place.js';
@@ -114,7 +114,7 @@ import type { Module3DCameraView, WorldPoint3 } from '../engine/camera/camera_ty
 import { create_thaumworld_place_camera_resolver, type ThaumworldPlaceCameraSubject } from '../thaumworld/camera/place_camera_resolver.js';
 import { get_thaumworld_place_camera_turn_start_policy, get_thaumworld_place_camera_world_sim_policy } from '../thaumworld/camera/place_camera_policy.js';
 import { get_thaumworld_place_painter_boot_policy, get_thaumworld_place_painter_detached_policy } from '../thaumworld/camera/place_painter_camera_policy.js';
-import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
+import { control_binding_matches_keyboard_event, resolve_wheel_binding_action } from '../mono_ui/runtime/controls_binding_matcher.js';
 import { create_profile_scope, type ProfileScope } from '../user_profiles/profile_scope.js';
 import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
 import { DEFAULT_LOCAL_MULTIPLAYER_TRANSPORT, build_api_url, type MultiplayerTransportConfig } from '../shared/multiplayer_transport.js';
@@ -239,6 +239,7 @@ export type AppState = {
     on_pointer_move_global: (x: number, y: number, e: any) => void;
     on_pointer_down_global: (x: number, y: number, e: any) => void;
     on_pointer_up_global: (x: number, y: number, e: any) => void;
+    resolve_pan_wheel_delta?: (module: Module | null, e: WheelEvent) => Partial<{ x: number; y: number; z: number }> | null;
     on_after_compose: (canvas: any) => void;
     get_interaction_adapters: () => {
         painter: InteractionConsumerAdapters | null;
@@ -10351,6 +10352,10 @@ export function create_app_state(): AppState {
             get_use_focus_layer_opacity: () => ui_state.place.use_focus_layer_opacity,
             on_step_view_action: (action) => step_place_camera_view_action(action),
             on_step_depth: (dir) => step_place_focus_depth(dir),
+            resolve_wheel_action: (e) => resolve_wheel_binding_action([
+                'game.scroll.depth_prev',
+                'game.scroll.depth_next',
+            ], (action_id) => game_controls.runtime.get_binding(action_id), e),
             get_world_z_center: () => ui_state.place.world_z_center,
             get_mouse_parallax: () => ui_state.place.mouse_parallax,
             get_move_mode: () => ui_state.controls.move_mode,
@@ -13575,6 +13580,7 @@ export function create_app_state(): AppState {
             const up_resolution = interaction_registry.process_pointer_up(pointer_state);
             current_interaction_session_state = up_resolution.session;
         },
+        resolve_pan_wheel_delta: undefined,
         set_current_place_pause_source,
         create_current_place_pause_controller,
         get_current_place_pause_state: () => ({

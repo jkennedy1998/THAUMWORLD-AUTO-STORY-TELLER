@@ -1,4 +1,4 @@
-import type { Module, Canvas, Rect, PointerEvent, DragEvent } from '../types.js';
+import type { Module, Canvas, Rect, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import { MODULE_CHROME_RENDER_INDEX, PANEL_BORDER_PRESETS, draw_panel_horizontal_divider } from '../module_borders.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
@@ -601,6 +601,24 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
 
   function setCurrentBreath(breath: number): void {
     opts.on_set_current_breath?.(Math.floor(breath));
+  }
+
+  function stepCurrentBreathWithinLoop(delta: number): void {
+    const step = Math.trunc(delta);
+    if (step === 0) return;
+    const loopRange = getLoopBreathRange();
+    const width = Math.max(1, loopRange.end - loopRange.start + 1);
+    const normalizedCurrent = Math.max(loopRange.start, Math.min(loopRange.end, getCurrentBreath()));
+    const next = normalizedCurrent + step;
+    const wrapped = loopRange.start + ((((next - loopRange.start) % width) + width) % width);
+    setCurrentBreath(wrapped);
+  }
+
+  function getSemanticVerticalWheelDir(e: WheelEvent): -1 | 1 | 0 {
+    if (Math.abs(e.delta_y) >= Math.abs(e.delta_x)) {
+      return e.delta_y < 0 ? -1 : (e.delta_y > 0 ? 1 : 0);
+    }
+    return e.delta_x < 0 ? -1 : (e.delta_x > 0 ? 1 : 0);
   }
 
   function getFileBreathRange(): { start: number; end: number } {
@@ -2521,23 +2539,20 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
       renameState.cursorPosition += text.length;
     },
     wants_text_capture: () => renameState.isRenaming,
-    on_wheel_content(e: { delta_x: number; delta_y: number; delta_mode: number }): void {
+    on_wheel_content(e: WheelEvent): void {
       if (timelinePanDrag.active) return;
       const lastMouseLocalX = lastPointerLocalPos?.x ?? -1;
       const lastMouseLocalY = lastPointerLocalPos?.y ?? -1;
       const wheelOnTimelineHeader = isPointerInTimelineHeader(rect, lastMouseLocalX, lastMouseLocalY);
-      if (wheelOnTimelineHeader && Math.abs(e.delta_x) > 0) {
-        setTimelineViewStart(getTimelineViewStart() + Math.round(e.delta_x / 3));
-        return;
-      }
-      if (wheelOnTimelineHeader && Math.abs(e.delta_y) > 0) {
-        setTimelineViewStart(getTimelineViewStart() + Math.round(e.delta_y / 3));
+      const semanticWheelDir = getSemanticVerticalWheelDir(e);
+      if (wheelOnTimelineHeader && semanticWheelDir !== 0) {
+        stepCurrentBreathWithinLoop(semanticWheelDir > 0 ? 1 : -1);
         return;
       }
       const groups = getGroups();
       const max = getMaxScrollSectionOffset(rect, groups);
-      if (e.delta_y > 0) scrollOffset = Math.min(scrollOffset + 2, max);
-      else scrollOffset = Math.max(scrollOffset - 2, 0);
+      if (semanticWheelDir > 0) scrollOffset = Math.min(scrollOffset + 2, max);
+      else if (semanticWheelDir < 0) scrollOffset = Math.max(scrollOffset - 2, 0);
     },
     on_pointer_move_content(e: PointerEvent): void {
       lastPointerLocalPos = { x: e.x - rect.x0, y: e.y - rect.y0 };

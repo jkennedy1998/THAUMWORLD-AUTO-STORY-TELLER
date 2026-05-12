@@ -144,7 +144,6 @@ Make sure you have the required runtime. The executable includes Node.js but sti
 # Run individual services
 npm run npc_ai_dev
 npm run interface_dev
-npm run interpreter_dev
 # ... etc
 
 # Format code

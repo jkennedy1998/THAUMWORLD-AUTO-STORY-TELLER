@@ -14,4 +14,6 @@ export const GAME_CONTROLS_PROFILE: ControlActionDefinition[] = [
   { id: 'game.view.roll_right', label: 'Roll View Right', category: 'Camera', system: 'game', default_binding: { kind: 'keyboard', code: 'Numpad9' } },
   { id: 'game.view.depth_prev', label: 'Focus Depth Previous', category: 'Camera', system: 'game', default_binding: { kind: 'keyboard', code: 'Numpad1' } },
   { id: 'game.view.depth_next', label: 'Focus Depth Next', category: 'Camera', system: 'game', default_binding: { kind: 'keyboard', code: 'Numpad3' } },
+  { id: 'game.scroll.depth_prev', label: 'Scroll Depth Previous', category: 'Scroll', system: 'game', default_binding: { kind: 'wheel', direction: 'up' } },
+  { id: 'game.scroll.depth_next', label: 'Scroll Depth Next', category: 'Scroll', system: 'game', default_binding: { kind: 'wheel', direction: 'down' } },
 ];

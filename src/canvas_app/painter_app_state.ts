@@ -5,7 +5,7 @@
  * Uses the mono_ui module system with panning, zooming, and drawing tools.
  */
 
-import type { Canvas, Module, PointerEvent, Rect, Rgb } from '../mono_ui/types.js';
+import type { Canvas, Module, PointerEvent, Rect, Rgb, WheelEvent } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import type { AppearanceSlotTargetMask, AppearanceSlotValue, Grid, Brush, ToolEditTarget, ToolType, GridCell } from '../ascii_painter/types.js';
 import { clone_appearance_slot_assignments, createGrid, exportGrid, get_enabled_appearance_slots, importGrid } from '../ascii_painter/types.js';
@@ -108,7 +108,7 @@ import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_vi
 import { apply_world_selection_mode, clear_world_selection, create_world_selection, decode_world_copy_data, encode_world_copy_data, get_world_selection_bounds, has_world_selection, parse_world_cell_key, set_world_selected, type WorldCopyData, type WorldSelection } from '../ascii_painter/world_selection.js';
 import { project_world_point_with_roll, unproject_plane_point_with_roll } from '../mono_ui/runtime/place_view_projection.js';
 import { create_painter_controls_runtime, PAINTER_TOOL_SEQUENCE_BINDINGS } from './controls_wiring.js';
-import { control_binding_matches_keyboard_event } from '../mono_ui/runtime/controls_binding_matcher.js';
+import { control_binding_matches_keyboard_event, resolve_wheel_binding_action } from '../mono_ui/runtime/controls_binding_matcher.js';
 import {
   begin_plain_text_control_frame,
   clear_plain_text_control_interaction,
@@ -229,6 +229,7 @@ export type PainterAppState = {
   on_pointer_move_global?: (x: number, y: number, e: any) => void;
   on_pointer_down_global?: (x: number, y: number, e: any) => void;
   on_pointer_up_global?: (x: number, y: number, e: any) => void;
+  resolve_pan_wheel_delta?: (module: Module | null, e: WheelEvent) => Partial<{ x: number; y: number; z: number }> | null;
 
   // Import/export surface kept for existing UI wiring; uses PainterDocument.
   export_grid: () => string;
@@ -360,6 +361,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   const painter_session_core = create_painter_session_core(export_painter_document(painter_document_runtime));
   type PainterPlaybackState = 'paused' | 'playing_forward' | 'playing_backward';
   type PainterTransportTapAction = 'step_back' | 'step_forward' | 'jump_active_group_start' | 'jump_active_group_end';
+  type PainterBufferedPositionalAction = 'nudge_left' | 'nudge_right' | 'nudge_up' | 'nudge_down';
+  type PainterPositionalSwingAction = 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down';
 
   let painter_current_breath = Math.max(0, Math.floor(painter_document_runtime.active_breath));
   let painter_timeline_view_start_breath = 0;
@@ -369,6 +372,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let painter_playback_frame_carry = 0;
   let pending_painter_transport_tap: PainterTransportTapAction | null = null;
   let pending_painter_transport_tap_timer: number | null = null;
+  let pending_painter_positional_tap: PainterBufferedPositionalAction | null = null;
+  let pending_painter_positional_tap_timer: number | null = null;
   let last_projection_runtime_log_signature = '';
   const DEFAULT_USER_SELECTION_COLOR_RGB: Rgb = { ...get_color_by_name('pumpkin').rgb };
   const saved_tool_props = loadToolProperties();
@@ -583,6 +588,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (pending_painter_transport_tap_timer !== null) {
       window.clearTimeout(pending_painter_transport_tap_timer);
       pending_painter_transport_tap_timer = null;
+    }
+  }
+
+  function clearPendingPainterPositionalTap(): void {
+    pending_painter_positional_tap = null;
+    if (pending_painter_positional_tap_timer !== null) {
+      window.clearTimeout(pending_painter_positional_tap_timer);
+      pending_painter_positional_tap_timer = null;
     }
   }
 
@@ -1413,7 +1426,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function stepCurrentPainterBreath(delta: number): void {
     if (!Number.isFinite(delta) || delta === 0) return;
-    setCurrentPainterBreath(painter_current_breath + Math.trunc(delta));
+    const step = Math.trunc(delta);
+    if (step === 0) return;
+    const playback = get_painter_document_playback(painter_document_runtime.document);
+    const loopRange = getPainterDocumentBreathRange();
+    const current = playback.loop_enabled
+      ? wrap_breath_in_painter_document_range(painter_document_runtime.document, painter_current_breath)
+      : Math.max(loopRange.start, Math.min(loopRange.end, painter_current_breath));
+    const next = current + step;
+    setCurrentPainterBreath(playback.loop_enabled
+      ? wrap_breath_in_painter_document_range(painter_document_runtime.document, next)
+      : Math.max(loopRange.start, Math.min(loopRange.end, next)));
   }
 
   function setPainterTimelineViewStart(nextStart: number): void {
@@ -1579,6 +1602,48 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     pending_painter_transport_tap_timer = window.setTimeout(() => {
       if (pending_painter_transport_tap !== action) return;
       flushPendingPainterTransportTap();
+    }, TOOL_SHORTCUT_DBLTAP_MS);
+    return true;
+  }
+
+  function runPainterPositionalSingleTap(action: PainterBufferedPositionalAction): void {
+    routePainterPositionalAction(action);
+  }
+
+  function runPainterPositionalDoubleTap(action: PainterBufferedPositionalAction): void {
+    const swingAction: Record<PainterBufferedPositionalAction, PainterPositionalSwingAction> = {
+      nudge_left: 'swing_left',
+      nudge_right: 'swing_right',
+      nudge_up: 'swing_up',
+      nudge_down: 'swing_down',
+    };
+    routePainterPositionalSwingAction(swingAction[action]);
+  }
+
+  function flushPendingPainterPositionalTap(): boolean {
+    if (!pending_painter_positional_tap) return false;
+    const action = pending_painter_positional_tap;
+    clearPendingPainterPositionalTap();
+    runPainterPositionalSingleTap(action);
+    return true;
+  }
+
+  function handlePainterPositionalTap(action: PainterBufferedPositionalAction, repeated: boolean): boolean {
+    if (repeated) {
+      clearPendingPainterPositionalTap();
+      runPainterPositionalSingleTap(action);
+      return true;
+    }
+    if (pending_painter_positional_tap === action) {
+      clearPendingPainterPositionalTap();
+      runPainterPositionalDoubleTap(action);
+      return true;
+    }
+    if (pending_painter_positional_tap) flushPendingPainterPositionalTap();
+    pending_painter_positional_tap = action;
+    pending_painter_positional_tap_timer = window.setTimeout(() => {
+      if (pending_painter_positional_tap !== action) return;
+      flushPendingPainterPositionalTap();
     }, TOOL_SHORTCUT_DBLTAP_MS);
     return true;
   }
@@ -3436,12 +3501,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function getCanvasPasteTransformApi(): (ReturnType<typeof make_painter_canvas_module> & {
     hasWorldPastePreview?: () => boolean;
     stepPasteViewAction?: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => void;
+    stepMovePreviewTransformAction?: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => boolean;
+    stepSelectionRasterTransformAction?: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => boolean;
     setPasteAngleMode?: () => void;
   }) | null {
     if (!canvas_module) return null;
     return canvas_module as ReturnType<typeof make_painter_canvas_module> & {
       hasWorldPastePreview?: () => boolean;
       stepPasteViewAction?: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => void;
+      stepMovePreviewTransformAction?: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => boolean;
+      stepSelectionRasterTransformAction?: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => boolean;
       setPasteAngleMode?: () => void;
     };
   }
@@ -3741,6 +3810,28 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     flushPendingPainterTransportTap();
   }
 
+  function getPainterBufferedPositionalActionForEvent(e: KeyboardEvent): PainterBufferedPositionalAction | null {
+    if (e.ctrlKey || e.metaKey || e.altKey) return null;
+    const tapBindings: Array<{ id: string; action: PainterBufferedPositionalAction }> = [
+      { id: 'painter.position.nudge_left', action: 'nudge_left' },
+      { id: 'painter.position.nudge_right', action: 'nudge_right' },
+      { id: 'painter.position.nudge_up', action: 'nudge_up' },
+      { id: 'painter.position.nudge_down', action: 'nudge_down' },
+    ];
+    for (const binding of tapBindings) {
+      if (control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) return binding.action;
+    }
+    return null;
+  }
+
+  function maybeEarlyCommitPendingPainterPositionalTapForKeydown(e: KeyboardEvent): void {
+    if (!pending_painter_positional_tap) return;
+    if (isModifierOnlyKeyEvent(e)) return;
+    const incomingAction = getPainterBufferedPositionalActionForEvent(e);
+    if (incomingAction === pending_painter_positional_tap) return;
+    flushPendingPainterPositionalTap();
+  }
+
   function jumpCurrentPainterBreathToActiveGroupBoundary(edge: 'start' | 'end'): void {
     const group_id = resolve_current_runtime_group_id();
     if (!group_id) return;
@@ -3771,6 +3862,24 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return false;
   }
 
+  function showPainterPositionalStubStatus(message: string, payload?: Record<string, unknown>): boolean {
+    canvas_module?.showTransientStatus(message);
+    painterImportant('painter positional shortcut stub', {
+      message,
+      reason: 'requires_real_authored_transform_support',
+      ...payload,
+    });
+    return true;
+  }
+
+  function stepPainterRasterTransformAction(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): boolean {
+    return !!getCanvasPasteTransformApi()?.stepSelectionRasterTransformAction?.(action);
+  }
+
+  function stepPainterMovePreviewTransformAction(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): boolean {
+    return !!getCanvasPasteTransformApi()?.stepMovePreviewTransformAction?.(action);
+  }
+
   function routePainterPositionalAction(action: 'nudge_left' | 'nudge_right' | 'nudge_up' | 'nudge_down' | 'nudge_backward' | 'nudge_forward' | 'rotate_left' | 'rotate_right'): boolean {
     const screenDirectionByAction: Partial<Record<typeof action, 'left' | 'right' | 'up' | 'down'>> = {
       nudge_left: 'left',
@@ -3795,19 +3904,37 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       for (const side of orderedSides) {
         const tool = getToolForSide(side);
         if (tool === 'selectangle' || tool === 'lassoselect' || tool === 'copy') {
-          if (!canvas_module || !worldDelta) return false;
           active_property_side = side;
-          return canvas_module.nudgeSelectionByWorldDelta(worldDelta);
+          if (worldDelta) {
+            if (!canvas_module) return false;
+            return canvas_module.nudgeSelectionByWorldDelta(worldDelta);
+          }
+          if (action === 'rotate_left') return stepPainterRasterTransformAction('roll_left');
+          if (action === 'rotate_right') return stepPainterRasterTransformAction('roll_right');
+          return false;
         }
         if (tool === 'move') {
-          if (!canvas_module || !worldDelta) return false;
           active_property_side = side;
-          return canvas_module.nudgeMovePreviewByWorldDelta(worldDelta);
+          if (worldDelta) {
+            if (!canvas_module) return false;
+            return canvas_module.nudgeMovePreviewByWorldDelta(worldDelta);
+          }
+          if (action === 'rotate_left') return stepPainterMovePreviewTransformAction('roll_left');
+          if (action === 'rotate_right') return stepPainterMovePreviewTransformAction('roll_right');
+          return false;
         }
       }
       if (screenDirection) return nudgeActivePainterGroupLocation(screenDirection);
       if (action === 'nudge_backward') return nudgeActivePainterGroupDepth(-1);
       if (action === 'nudge_forward') return nudgeActivePainterGroupDepth(1);
+      if (action === 'rotate_left') return showPainterPositionalStubStatus('Group roll stub: requires authored keyframed transform support; shortcut transform is intentionally not implemented', {
+        rotate_action: action,
+        stub_kind: 'group_transform_requires_keyframes',
+      });
+      if (action === 'rotate_right') return showPainterPositionalStubStatus('Group roll stub: requires authored keyframed transform support; shortcut transform is intentionally not implemented', {
+        rotate_action: action,
+        stub_kind: 'group_transform_requires_keyframes',
+      });
       return false;
     }
 
@@ -3818,26 +3945,127 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         active_property_side = side;
         if (worldDelta) return canvas_module.nudgePastePreviewByWorldDelta(worldDelta);
         if (action === 'rotate_left') {
-          canvas_module.stepPasteViewAction('roll_left');
-          return true;
+          if (canvas_module.hasWorldPastePreview()) {
+            canvas_module.stepPasteViewAction('roll_left');
+            return true;
+          }
+          return showPainterPositionalStubStatus('Paste roll stub: this paste target has no world-raster transform payload yet', {
+            tool,
+            side,
+            rotate_action: action,
+            stub_kind: 'paste_non_world_payload',
+          });
         }
         if (action === 'rotate_right') {
-          canvas_module.stepPasteViewAction('roll_right');
-          return true;
+          if (canvas_module.hasWorldPastePreview()) {
+            canvas_module.stepPasteViewAction('roll_right');
+            return true;
+          }
+          return showPainterPositionalStubStatus('Paste roll stub: this paste target has no world-raster transform payload yet', {
+            tool,
+            side,
+            rotate_action: action,
+            stub_kind: 'paste_non_world_payload',
+          });
         }
         return false;
       }
       if (tool === 'text') {
-        if (!canvas_module || !worldDelta) return false;
         active_property_side = side;
-        return canvas_module.nudgeTextCursorByWorldDelta(worldDelta);
+        if (worldDelta) {
+          if (!canvas_module) return false;
+          return canvas_module.nudgeTextCursorByWorldDelta(worldDelta);
+        }
+        if (action === 'rotate_left' || action === 'rotate_right') {
+          return showPainterPositionalStubStatus('Text roll stub: painter has no authored text rotation edit support yet', {
+            tool,
+            side,
+            rotate_action: action,
+            stub_kind: 'text_transform_missing',
+          });
+        }
       }
     }
 
     if (screenDirection) return nudgeActivePainterGroupLocation(screenDirection);
     if (action === 'nudge_backward') return nudgeActivePainterGroupDepth(-1);
     if (action === 'nudge_forward') return nudgeActivePainterGroupDepth(1);
+    if (action === 'rotate_left' || action === 'rotate_right') {
+      return showPainterPositionalStubStatus('Group roll stub: requires authored keyframed transform support; shortcut transform is intentionally not implemented', {
+        rotate_action: action,
+        stub_kind: 'group_transform_requires_keyframes',
+      });
+    }
     return false;
+  }
+
+  function routePainterPositionalSwingAction(action: PainterPositionalSwingAction): boolean {
+    const pasteActionBySwing: Record<PainterPositionalSwingAction, 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down'> = {
+      swing_left: 'swing_left',
+      swing_right: 'swing_right',
+      swing_up: 'swing_up',
+      swing_down: 'swing_down',
+    };
+    const getToolForSide = (side: 'left' | 'right'): ToolType => side === 'right' ? right_click_tool : left_click_tool;
+    const orderedSides: Array<'left' | 'right'> = active_property_side === 'right' ? ['right', 'left'] : ['left', 'right'];
+    const hasSelection = has_world_selection(get_local_world_selection());
+
+    if (hasSelection) {
+      for (const side of orderedSides) {
+        const tool = getToolForSide(side);
+        if (tool === 'selectangle' || tool === 'lassoselect' || tool === 'copy') {
+          active_property_side = side;
+          if (stepPainterRasterTransformAction(pasteActionBySwing[action])) return true;
+          return showPainterPositionalStubStatus('Selection mask swing stub: this target is a mask only; raster-content transform requires raster payload preview support', {
+            tool,
+            side,
+            swing_action: action,
+            stub_kind: 'selection_mask_only',
+          });
+        }
+        if (tool === 'move') {
+          active_property_side = side;
+          if (stepPainterMovePreviewTransformAction(pasteActionBySwing[action])) return true;
+          return showPainterPositionalStubStatus('Move swing stub: this selection has no raster payload available for transform preview', {
+            tool,
+            side,
+            swing_action: action,
+            stub_kind: 'move_preview_no_raster_payload',
+          });
+        }
+      }
+    }
+
+    for (const side of orderedSides) {
+      const tool = getToolForSide(side);
+      if (tool === 'paste') {
+        active_property_side = side;
+        if (canvas_module?.hasWorldPastePreview()) {
+          canvas_module.stepPasteViewAction(pasteActionBySwing[action]);
+          return true;
+        }
+        return showPainterPositionalStubStatus('Paste swing stub: this paste target has no world-raster transform payload yet', {
+          tool,
+          side,
+          swing_action: action,
+          stub_kind: 'paste_non_world_payload',
+        });
+      }
+      if (tool === 'text') {
+        active_property_side = side;
+        return showPainterPositionalStubStatus('Text swing stub: painter has no authored text swing/rotation edit support yet', {
+          tool,
+          side,
+          swing_action: action,
+          stub_kind: 'text_transform_missing',
+        });
+      }
+    }
+
+    return showPainterPositionalStubStatus('Group swing stub: requires authored keyframed transform support; shortcut transform is intentionally not implemented', {
+      swing_action: action,
+      stub_kind: 'group_transform_requires_keyframes',
+    });
   }
 
   const left_brush: Brush = {
@@ -5407,6 +5635,11 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     on_step_depth: (dir) => {
       stepPainterDepth(dir);
     },
+    on_step_breath: (dir) => {
+      runPainterTransportSingleTap(dir < 0 ? 'step_back' : 'step_forward');
+    },
+    resolve_wheel_action: (e) => resolvePainterWheelAction(e),
+    get_scroll_primary_mode: () => getPainterScrollPrimaryMode(),
     handle_text_mode_reserved_shortcut: (e) => {
       const cameraActionBindings: Array<{ id: string; action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right' }> = [
         { id: 'painter.view.swing_left', action: 'swing_left' },
@@ -5686,6 +5919,49 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const binding = painter_controls.runtime.get_binding('painter.tool_target_invert');
     return binding?.kind === 'keyboard' ? binding.code === e.code : false;
   }
+
+  function getPainterScrollPrimaryMode(): 'depth' | 'breaths' {
+    return painter_controls.runtime.get_preference<'depth' | 'breaths'>('painter.scroll.primary_mode', 'depth') === 'breaths'
+      ? 'breaths'
+      : 'depth';
+  }
+
+  function togglePainterScrollPrimaryMode(): void {
+    painter_controls.runtime.set_preference('painter.scroll.primary_mode', getPainterScrollPrimaryMode() === 'depth' ? 'breaths' : 'depth');
+  }
+
+  function resolvePainterWheelAction(e: WheelEvent): string | null {
+    return resolve_wheel_binding_action([
+      'painter.scroll.pan_horizontal_prev',
+      'painter.scroll.pan_horizontal_next',
+      'painter.scroll.pan_vertical_prev',
+      'painter.scroll.pan_vertical_next',
+      'painter.scroll.secondary_prev',
+      'painter.scroll.secondary_next',
+      'painter.scroll.primary_prev',
+      'painter.scroll.primary_next',
+    ], (action_id) => painter_controls.runtime.get_binding(action_id), e);
+  }
+
+  function resolvePainterPanWheelDelta(_module: Module | null, e: WheelEvent): Partial<{ x: number; y: number; z: number }> | null {
+    switch (resolve_wheel_binding_action([
+      'painter.scroll.pan_horizontal_prev',
+      'painter.scroll.pan_horizontal_next',
+      'painter.scroll.pan_vertical_prev',
+      'painter.scroll.pan_vertical_next',
+    ], (action_id) => painter_controls.runtime.get_binding(action_id), e)) {
+      case 'painter.scroll.pan_vertical_prev':
+        return { y: 2 };
+      case 'painter.scroll.pan_vertical_next':
+        return { y: -2 };
+      case 'painter.scroll.pan_horizontal_prev':
+        return { x: -2 };
+      case 'painter.scroll.pan_horizontal_next':
+        return { x: 2 };
+      default:
+        return null;
+    }
+  }
   const painter_tai = create_painter_tool_assisted_inputs_wiring({
     data_slot: PAINTER_APP_CONFIG.selected_data_slot,
     get_tool_state: () => ({ current_tool, left_click_tool, right_click_tool }),
@@ -5742,8 +6018,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         if (key === 'active_group_id') return legacy_group_compat.active_group_id ?? '';
         if (key === 'active_group_palette_z') return String(get_palette_z_for_group_id(legacy_group_compat.active_group_id) ?? -1);
         if (key === 'focus_plane') return String(getPainterFocusWorldPlane());
+        if (key === 'current_breath') return String(painter_current_breath);
         if (key === 'camera_target_plane') return String(getPainterFocusWorldPlane());
         if (key === 'display_focus_plane') return String(painter_display_projection?.focus_world_plane ?? getPainterFocusWorldPlane());
+        if (key === 'camera_scale_per_layer') return String(voxelSpace.camera.scale_per_layer ?? 0);
+        if (key === 'camera_pan_x') return String(voxelSpace.camera.pan_x ?? 0);
+        if (key === 'camera_pan_y') return String(voxelSpace.camera.pan_y ?? 0);
+        if (key === 'scroll_primary_mode') return getPainterScrollPrimaryMode();
         if (key === 'group_count') return String(Object.keys(painter_document_runtime.document.groups).length);
         if (key === 'group_order') return painter_document_runtime.document.group_order.join(',');
         if (key === 'contributor_coords') return String(painter_document_runtime.coordinate_group_index.size);
@@ -5906,6 +6187,12 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       }
       if (helper === 'clear_anchor_cell') {
         return clear_current_anchor_cell();
+      }
+      if (helper === 'set_painter_scroll_primary_mode') {
+        const mode = String((payload as any)?.mode ?? '').trim().toLowerCase();
+        if (mode !== 'depth' && mode !== 'breaths') return false;
+        painter_controls.runtime.set_preference('painter.scroll.primary_mode', mode);
+        return true;
       }
       if (helper === 'clear_selection') {
         clear_all_selection_channels();
@@ -7026,6 +7313,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       get_binding_label: (action_id) => painter_controls.runtime.get_binding_label(action_id),
       get_conflicts: (action_id) => painter_controls.runtime.get_conflicts(action_id),
       set_binding: (action_id, binding) => painter_controls.runtime.set_binding(action_id, binding),
+      get_extra_rows: () => [{
+        category: 'Scroll',
+        id: 'painter.scroll.primary_mode',
+        label: 'Scroll Wheel Primary',
+        value: getPainterScrollPrimaryMode() === 'depth' ? 'Depth' : 'Breaths',
+        on_activate: () => togglePainterScrollPrimaryMode(),
+      }],
       on_close: () => setModuleOpen('controls_panel', false, (v) => { controls_open = v; }),
       on_move: (new_rect) => {
         if (controls_module) controls_module.rect = new_rect;
@@ -7780,38 +8074,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   window.addEventListener('pointerdown', () => {
     if (isPainterTextCaptureActive()) return;
     flushPendingPainterTransportTap();
+    flushPendingPainterPositionalTap();
     painter_tool_shortcut_interpreter.flush_pending_primary();
   }, { capture: true });
 
-  window.addEventListener('keydown', (e) => {
+  function tryHandlePainterOverrideKeydown(e: KeyboardEvent): boolean {
     if (!isPainterTextCaptureActive() && (e.code === 'Enter' || e.code === 'Escape') && leavePendingPainterPlacement()) {
       e.preventDefault();
-      return;
-    }
-    const transportTapAction = getPainterTransportTapActionForEvent(e);
-    if (transportTapAction && !isPainterTextCaptureActive()) {
-      e.preventDefault();
-      handlePainterTransportTap(transportTapAction, e.repeat);
-      return;
-    }
-    maybeEarlyCommitPendingPainterTransportTapForKeydown(e);
-    if (maybeHandlePainterToolShortcutKeydown(e)) return;
-    maybeEarlyCommitPendingToolShortcutForKeydown(e);
-    const editActionHandlers: Array<{ id: string; run: () => boolean }> = [
-      { id: 'painter.edit.undo', run: () => performPainterUndoShortcut() },
-      { id: 'painter.edit.redo', run: () => performPainterRedoShortcut() },
-      { id: 'painter.edit.copy', run: () => performPainterCopyShortcut() },
-    ];
-    for (const binding of editActionHandlers) {
-      if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
-      e.preventDefault();
-      binding.run();
-      return;
-    }
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyZ') {
-      e.preventDefault();
-      performPainterRedoShortcut();
-      return;
+      return true;
     }
     if (tool_target_invert_held && canRoutePasteTransformActions()) {
       const pasteActionByCode: Partial<Record<string, 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'>> = {
@@ -7826,8 +8096,44 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       if (pasteAction) {
         e.preventDefault();
         stepPasteTransformAction(pasteAction);
-        return;
+        return true;
       }
+    }
+    return false;
+  }
+
+  function tryHandlePainterDefaultKeydown(e: KeyboardEvent): boolean {
+    maybeEarlyCommitPendingPainterPositionalTapForKeydown(e);
+    const transportTapAction = getPainterTransportTapActionForEvent(e);
+    if (transportTapAction && !isPainterTextCaptureActive()) {
+      e.preventDefault();
+      handlePainterTransportTap(transportTapAction, e.repeat);
+      return true;
+    }
+    maybeEarlyCommitPendingPainterTransportTapForKeydown(e);
+    if (maybeHandlePainterToolShortcutKeydown(e)) return true;
+    maybeEarlyCommitPendingToolShortcutForKeydown(e);
+    const bufferedPositionalAction = getPainterBufferedPositionalActionForEvent(e);
+    if (bufferedPositionalAction && !isPainterTextCaptureActive()) {
+      e.preventDefault();
+      handlePainterPositionalTap(bufferedPositionalAction, e.repeat);
+      return true;
+    }
+    const editActionHandlers: Array<{ id: string; run: () => boolean }> = [
+      { id: 'painter.edit.undo', run: () => performPainterUndoShortcut() },
+      { id: 'painter.edit.redo', run: () => performPainterRedoShortcut() },
+      { id: 'painter.edit.copy', run: () => performPainterCopyShortcut() },
+    ];
+    for (const binding of editActionHandlers) {
+      if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+      e.preventDefault();
+      binding.run();
+      return true;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyZ') {
+      e.preventDefault();
+      performPainterRedoShortcut();
+      return true;
     }
     if (!isPainterCanvasTextCaptureActive()) {
       const cameraActionBindings: Array<{ id: string; action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right' }> = [
@@ -7842,7 +8148,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
         e.preventDefault();
         stepPainterViewAction(binding.action);
-        return;
+        return true;
       }
       const depthActionBindings: Array<{ id: string; dir: -1 | 1 }> = [
         { id: 'painter.view.depth_prev', dir: -1 },
@@ -7852,7 +8158,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
         e.preventDefault();
         stepPainterDepth(binding.dir);
-        return;
+        return true;
       }
     }
     const positionalActionHandlers: Array<{ id: string; action: 'nudge_left' | 'nudge_right' | 'nudge_up' | 'nudge_down' | 'nudge_backward' | 'nudge_forward' | 'rotate_left' | 'rotate_right' }> = [
@@ -7867,10 +8173,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     ];
     for (const binding of positionalActionHandlers) {
       if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
-      if (isPainterTextCaptureActive()) return;
+      if (isPainterTextCaptureActive()) return true;
       e.preventDefault();
       routePainterPositionalAction(binding.action);
-      return;
+      return true;
     }
     const timingActionHandlers: Array<{ id: string; run: () => void }> = [
       { id: 'painter.breath.play_pause', run: () => togglePainterPlayback() },
@@ -7879,14 +8185,24 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     ];
     for (const binding of timingActionHandlers) {
       if (!control_binding_matches_keyboard_event(painter_controls.runtime.get_binding(binding.id), e)) continue;
+      if (binding.id === 'painter.breath.play_pause' && e.code === 'Space' && !isPainterTextCaptureActive()) {
+        break;
+      }
       e.preventDefault();
       binding.run();
-      return;
+      return true;
     }
     if (control_binding_matches_keyboard_event(painter_controls.runtime.get_binding('global.open_controls'), e)) {
       e.preventDefault();
       toggleModule(controls_open, (v) => { controls_open = v; }, 'controls_panel', create_controls_panel_module);
+      return true;
     }
+    return false;
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (tryHandlePainterOverrideKeydown(e)) return;
+    tryHandlePainterDefaultKeydown(e);
   });
 
   (window as any).CONTROLS = {
@@ -8071,6 +8387,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
        const up_resolution = painter_interaction_registry.process_pointer_up(pointer_state);
        painter_interaction_session_state = up_resolution.session;
      },
+     resolve_pan_wheel_delta: (module: Module | null, e: WheelEvent) => resolvePainterPanWheelDelta(module, e),
     
     export_grid: () => exportPainterDocumentToJSON(exportCurrentPainterDocument()),
     

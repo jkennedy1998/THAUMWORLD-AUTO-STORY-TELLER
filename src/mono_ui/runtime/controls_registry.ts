@@ -2,7 +2,7 @@ export type ControlBinding =
   | { kind: 'keyboard'; code: string; ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean }
   | { kind: 'pointer_button'; button: 'primary' | 'secondary' | 'auxiliary' }
   | { kind: 'pointer_gesture'; gesture: 'drag_primary' | 'drag_secondary' | 'hover' }
-  | { kind: 'wheel'; direction: 'up' | 'down' | 'left' | 'right'; ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean };
+  | { kind: 'wheel'; direction: 'up' | 'down' | 'left' | 'right'; ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean; held_keys?: string[] };
 
 export type ControlActionDefinition = {
   id: string;
@@ -17,6 +17,7 @@ export type ControlActionDefinition = {
 export type ControlsProfile = {
   version: 1;
   bindings: Record<string, ControlBinding | null>;
+  preferences?: Record<string, unknown>;
 };
 
 export function merge_control_definitions(...groups: ControlActionDefinition[][]): ControlActionDefinition[] {

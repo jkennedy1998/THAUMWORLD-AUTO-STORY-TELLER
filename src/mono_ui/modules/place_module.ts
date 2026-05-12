@@ -426,6 +426,7 @@ export type PlaceModuleConfig = {
   get_use_focus_layer_opacity?: () => boolean;
   on_step_view_action?: (action: CanvasNavViewAction) => void;
   on_step_depth?: (dir: -1 | 1) => void;
+  resolve_wheel_action?: (e: WheelEvent) => string | null;
 
   // Mouse parallax normalized (-1..+1), centered on place viewport.
   get_mouse_parallax?: () => { x: number; y: number };
@@ -6526,8 +6527,14 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     },
 
     OnWheel(e: WheelEvent): void {
-      // Mouse wheel is reserved for world layer selection (focus_z).
-      // No wrap/cycle: clamp to visible layer count.
+      switch (config.resolve_wheel_action?.(e) ?? null) {
+        case 'game.scroll.depth_prev':
+          config.on_step_depth?.(-1);
+          return;
+        case 'game.scroll.depth_next':
+          config.on_step_depth?.(1);
+          return;
+      }
       if (!config.set_focus_z) return;
       const cur = config.get_focus_z ? config.get_focus_z() : DEFAULT_FOCUS_Z;
       const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);

@@ -4,8 +4,6 @@
 
 This system implements the THAUMWORLD tabletop RPG rules as an automated story teller. The current build is hybrid: core player/NPC actions run in-process via the ActionPipeline (in `interface_program`), and cross-process coordination uses a file-backed message bus (inbox/outbox JSONC).
 
-Current build note (2026-02-13): `interpreter_ai` is archived. The `interface_program` creates action intents directly (COMMUNICATE/MOVE/USE/INSPECT) and runs the ActionPipeline for validation + perception + witness reactions.
-
 **Reference:** [THAUMWORLD Rules Index](https://www.thaumworld.xyz/rules-index/)
 
 ## Core Philosophy
@@ -51,7 +49,7 @@ Player input (UI)
                                         (movement hearing -> witness)
 ```
 
-Legacy note: `interpreter_ai` (Natural -> Machine text) is archived in this build. The older stage pipeline diagrams are historical.
+Older interpreter-driven stage pipeline diagrams are historical.
 
 ## Data Storage Architecture
 

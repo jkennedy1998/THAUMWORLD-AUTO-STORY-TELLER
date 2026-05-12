@@ -358,8 +358,6 @@ function build_npc_prompt(npc: any, player_text: string, can_perceive: boolean, 
 
 ### Interpreter AI Prompt
 
-Note: `interpreter_ai` is archived in this build.
-
 Current build: there is no Interpreter-LLM prompt to modify. Player/NPC actions are created and executed via the ActionPipeline in `src/interface_program/`.
 
 Practical edit points:

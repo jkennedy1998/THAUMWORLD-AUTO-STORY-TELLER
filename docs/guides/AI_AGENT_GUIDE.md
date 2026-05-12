@@ -32,7 +32,6 @@ npc_ai / renderer / renderer_ai consume as needed
 UI renders + (optionally) renderer_ai narrates
 ```
 
-Note: `interpreter_ai` is archived in this build; do not route work there.
 
 ### 3. Key File Locations
 ```

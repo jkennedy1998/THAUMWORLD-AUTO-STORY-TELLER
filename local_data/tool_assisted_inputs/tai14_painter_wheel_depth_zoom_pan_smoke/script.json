@@ -1,0 +1,30 @@
+{
+  "id": "painter_wheel_depth_zoom_pan_smoke",
+  "test_name": "paint_test_wheel_depth_zoom_pan_smoke",
+  "clock_mode": "realtime_ms",
+  "open_ms": 14000,
+  "description": "Verify painter wheel routing for plain depth scroll, ctrl zoom, space pan, and alt+space horizontal pan.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 100, "type": "invoke_helper", "helper": "reset_painter_module_layout" },
+    { "at_ms": 200, "type": "invoke_helper", "helper": "set_painter_scroll_primary_mode", "payload": { "mode": "depth" } },
+    { "at_ms": 300, "type": "assert_text_value_literal", "source": "runtime_value", "field": "scroll_primary_mode", "value": "depth" },
+    { "at_ms": 500, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 700, "type": "capture_text_value", "slot": "focus_before_plain", "source": "runtime_value", "field": "focus_plane" },
+    { "at_ms": 900, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": -120 },
+    { "at_ms": 1300, "type": "assert_text_value_changed", "slot": "focus_before_plain", "source": "runtime_value", "field": "focus_plane" },
+    { "at_ms": 1500, "type": "capture_text_value", "slot": "scale_before_zoom", "source": "runtime_value", "field": "camera_scale_per_layer" },
+    { "at_ms": 1700, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": -120, "ctrl": true },
+    { "at_ms": 2100, "type": "assert_text_value_changed", "slot": "scale_before_zoom", "source": "runtime_value", "field": "camera_scale_per_layer" },
+    { "at_ms": 2300, "type": "capture_text_value", "slot": "pan_y_before", "source": "runtime_value", "field": "camera_pan_y" },
+    { "at_ms": 2400, "type": "key_down", "code": "Space", "key": " " },
+    { "at_ms": 2600, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": -120 },
+    { "at_ms": 3000, "type": "assert_text_value_changed", "slot": "pan_y_before", "source": "runtime_value", "field": "camera_pan_y" },
+    { "at_ms": 3200, "type": "capture_text_value", "slot": "pan_x_before", "source": "runtime_value", "field": "camera_pan_x" },
+    { "at_ms": 3400, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": -120, "alt": true },
+    { "at_ms": 3800, "type": "assert_text_value_changed", "slot": "pan_x_before", "source": "runtime_value", "field": "camera_pan_x" },
+    { "at_ms": 4000, "type": "key_up", "code": "Space", "key": " " }
+  ]
+}

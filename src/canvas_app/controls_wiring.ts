@@ -89,6 +89,9 @@ export function create_painter_controls_runtime(data_slot: number, opts?: { get_
     data_slot,
     definitions: merge_control_definitions(GLOBAL_CONTROLS_PROFILE, PAINTER_CONTROLS_PROFILE),
     get_profile_scope: opts?.get_profile_scope,
+    default_preferences: {
+      'painter.scroll.primary_mode': 'depth',
+    },
   });
 
   return {

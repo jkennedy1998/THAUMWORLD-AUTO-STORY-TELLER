@@ -22,6 +22,14 @@ export function create_flat_module_pan_adapter(args: {
       const next = args.clamp ? args.clamp(next_raw_x, next_raw_y) : { x: next_raw_x, y: next_raw_y };
       args.set_offset(next.x, next.y);
     },
+    applyAxisDelta(delta) {
+      const current = args.get_offset();
+      const next_raw_x = current.x + (delta.x ?? 0);
+      const next_raw_y = current.y + (delta.y ?? 0);
+      const next = args.clamp ? args.clamp(next_raw_x, next_raw_y) : { x: next_raw_x, y: next_raw_y };
+      args.set_offset(next.x, next.y);
+      args.persist?.();
+    },
     endGesture() {
       args.persist?.();
     },

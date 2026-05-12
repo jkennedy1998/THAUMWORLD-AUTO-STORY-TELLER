@@ -14,6 +14,7 @@ type ControlsModuleConfig = {
   get_binding_label: (action_id: string) => string;
   get_conflicts: (action_id: string) => string[];
   set_binding: (action_id: string, binding: ControlBinding | null) => void;
+  get_extra_rows?: () => Array<{ category: string; id: string; label: string; value: string; on_activate: () => void }>;
   on_close: () => void;
   on_move?: (rect: Rect) => void;
 };
@@ -24,7 +25,11 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
   let waiting_action_id: string | null = null;
 
   function get_rows() {
-    const rows: Array<{ type: 'category'; label: string } | { type: 'action'; id: string; label: string; binding: string; conflicts: string[] }> = [];
+    const rows: Array<
+      { type: 'category'; label: string }
+      | { type: 'action'; id: string; label: string; binding: string; conflicts: string[] }
+      | { type: 'toggle'; id: string; label: string; value: string; on_activate: () => void }
+    > = [];
     let last_category = '';
     for (const definition of opts.get_definitions()) {
       if (definition.category !== last_category) {
@@ -39,6 +44,13 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
         conflicts: opts.get_conflicts(definition.id),
       });
     }
+    for (const extra of opts.get_extra_rows?.() ?? []) {
+      if (extra.category !== last_category) {
+        last_category = extra.category;
+        rows.push({ type: 'category', label: extra.category });
+      }
+      rows.push({ type: 'toggle', id: extra.id, label: extra.label, value: extra.value, on_activate: extra.on_activate });
+    }
     return rows;
   }
 
@@ -47,9 +59,9 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
     cursor = Math.max(0, Math.min(rows.length - 1, cursor));
   }
 
-  function current_action_row() {
+  function current_interactive_row() {
     const row = get_rows()[cursor];
-    return row?.type === 'action' ? row : null;
+    return row?.type === 'action' || row?.type === 'toggle' ? row : null;
   }
 
   function arm_rebind(action_id: string): void {
@@ -101,10 +113,14 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
           continue;
         }
         const is_cursor = visible_start + row_index === cursor;
-        const waiting = waiting_action_id === row.id;
+        const waiting = row.type === 'action' && waiting_action_id === row.id;
         const left = `${is_cursor ? '>' : ' '} ${row.label}`.slice(0, Math.max(0, inner_width - 18));
-        const right = waiting ? 'PRESS INPUT...' : row.binding;
-        const color = waiting ? vivid : row.conflicts.length > 0 ? get_color_by_name('vivid_red').rgb : is_cursor ? bright : medium;
+        const right = waiting ? 'PRESS INPUT...' : row.type === 'action' ? row.binding : row.value;
+        const color = waiting
+          ? vivid
+          : row.type === 'action' && row.conflicts.length > 0
+            ? get_color_by_name('vivid_red').rgb
+            : is_cursor ? bright : medium;
         for (let i = 0; i < left.length && rect.x0 + 1 + i < rect.x1; i += 1) {
           c.set(rect.x0 + 1 + i, y, { char: left[i]!, rgb: color, weight_index: is_cursor ? 3 : 2, style: 'regular' });
         }
@@ -123,8 +139,12 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
       const row = rect.y1 - 2 - e.y;
       if (row < 0 || row >= list_height) return;
       const target = get_rows()[visible_start + row];
-      if (!target || target.type !== 'action') return;
+      if (!target || target.type === 'category') return;
       cursor = visible_start + row;
+      if (target.type === 'toggle') {
+        target.on_activate();
+        return;
+      }
       arm_rebind(target.id);
     },
     on_global_pointer_down_content(e: PointerEvent): void {
@@ -136,9 +156,9 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
     on_wheel_content(e: WheelEvent): void {
       if (waiting_action_id) {
         if (Math.abs(e.delta_y) >= Math.abs(e.delta_x)) {
-          apply_binding(make_wheel_binding(e.delta_y < 0 ? 'up' : 'down', { ctrl: e.ctrl, shift: e.shift, alt: e.alt, meta: e.meta }));
+          apply_binding(make_wheel_binding(e.delta_y < 0 ? 'up' : 'down', { ctrl: e.ctrl, shift: e.shift, alt: e.alt, meta: e.meta, held_keys: e.held_keys }));
         } else {
-          apply_binding(make_wheel_binding(e.delta_x < 0 ? 'left' : 'right', { ctrl: e.ctrl, shift: e.shift, alt: e.alt, meta: e.meta }));
+          apply_binding(make_wheel_binding(e.delta_x < 0 ? 'left' : 'right', { ctrl: e.ctrl, shift: e.shift, alt: e.alt, meta: e.meta, held_keys: e.held_keys }));
         }
         return;
       }
@@ -179,8 +199,13 @@ export function make_controls_module(opts: ControlsModuleConfig): Module {
         return;
       }
       if (e.key === 'Enter') {
-        const row = current_action_row();
-        if (row) arm_rebind(row.id);
+        const row = current_interactive_row();
+        if (!row) return;
+        if (row.type === 'toggle') {
+          row.on_activate();
+          return;
+        }
+        arm_rebind(row.id);
       }
     },
     wants_text_capture: () => waiting_action_id !== null,

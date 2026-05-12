@@ -144,6 +144,9 @@ export type PainterCanvasOptions = {
   get_selection_status?: () => string | null;
   on_step_view_action?: (action: PainterViewAction) => void;
   on_step_depth?: (dir: -1 | 1) => void;
+  on_step_breath?: (dir: -1 | 1) => void;
+  resolve_wheel_action?: (e: WheelEvent) => string | null;
+  get_scroll_primary_mode?: () => 'depth' | 'breaths';
   handle_text_mode_reserved_shortcut?: (e: KeyboardEvent) => boolean;
   get_camera_frame_anchor_world?: () => { x: number; y: number; z: number };
   set_camera_frame_anchor_world?: (anchor: { x: number; y: number; z: number }, context: { source: 'screen_drag' | 'axis_step'; detach_follow: boolean }) => void;
@@ -186,6 +189,7 @@ export type PainterCanvasModule = Module & {
   resolveInteractionTargets: (x: number, y: number) => OrderedResolvedTargets;
   finalizePendingChanges: () => void;
   copySelection: () => void;
+  showTransientStatus: (message: string) => void;
   nudgeSelectionByWorldDelta: (delta: { x: number; y: number; z: number }) => boolean;
   nudgeTextCursorByWorldDelta: (delta: { x: number; y: number; z: number }) => boolean;
   nudgePastePreviewByWorldDelta: (delta: { x: number; y: number; z: number }) => boolean;
@@ -197,6 +201,8 @@ export type PainterCanvasModule = Module & {
   nudgeMovePreviewByWorldDelta: (delta: { x: number; y: number; z: number }) => boolean;
   commitMovePreview: () => boolean;
   leaveMovePreview: () => boolean;
+  stepMovePreviewTransformAction: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => boolean;
+  stepSelectionRasterTransformAction: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => boolean;
   handleDepthStepDuringActiveStroke: (nextPlane: number) => void;
   hasWorldPastePreview: () => boolean;
   stepPasteViewAction: (action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right') => void;
@@ -258,6 +264,36 @@ export function build_raster_move_change_descriptors(
     });
   }
   return changes;
+}
+
+function isRasterTransformCellContent(cell: GridCell | null | undefined): cell is GridCell {
+  return !!cell && (cell.char !== ' ' || !!cell.graphic);
+}
+
+function build_world_copy_data_from_voxels(
+  voxels: Array<{ x: number; y: number; z: number; cell: GridCell }>,
+  source_view: PlaceViewState,
+): WorldCopyData | null {
+  if (voxels.length < 1) return null;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  for (const voxel of voxels) {
+    minX = Math.min(minX, voxel.x);
+    minY = Math.min(minY, voxel.y);
+    minZ = Math.min(minZ, voxel.z);
+  }
+  const anchor = { x: minX, y: minY, z: minZ };
+  return {
+    anchor,
+    source_view,
+    cells: voxels.map((voxel) => ({
+      dx: voxel.x - anchor.x,
+      dy: voxel.y - anchor.y,
+      dz: voxel.z - anchor.z,
+      cell: cloneRasterMoveCell(voxel.cell),
+    })),
+  };
 }
 
 export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterCanvasModule {
@@ -379,9 +415,69 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
     )));
   }
 
+  function getBaseMovePreviewTargetView(worldData: WorldCopyData): PlaceViewState {
+    return make_place_view_state(worldData.source_view?.principal_view ?? 'top', worldData.source_view?.roll_quarter_turn ?? 0);
+  }
+
+  function getEffectiveMovePreviewTargetView(worldData: WorldCopyData): PlaceViewState {
+    return move_preview_rotation_view ?? getBaseMovePreviewTargetView(worldData);
+  }
+
+  function buildWorldRasterTransformChanges(
+    worldData: WorldCopyData,
+    anchor: { x: number; y: number; z: number },
+    getCellAt: (world: { x: number; y: number; z: number }) => GridCell,
+    targetView?: PlaceViewState,
+  ): { changes: CellChange[]; transformedCells: Array<{ x: number; y: number; z: number }> } {
+    const resolvedTargetView = targetView ?? getBaseMovePreviewTargetView(worldData);
+    const sourceView = make_place_view_state(worldData.source_view?.principal_view ?? 'top', worldData.source_view?.roll_quarter_turn ?? 0);
+    const destinationByKey = new Map<string, { world: { x: number; y: number; z: number }; cell: GridCell }>();
+    const sourceKeys = new Set<string>();
+    const transformedCells: Array<{ x: number; y: number; z: number }> = [];
+
+    for (const entry of worldData.cells) {
+      if (!isRasterTransformCellContent(entry.cell)) continue;
+      sourceKeys.add(`${worldData.anchor.x + entry.dx},${worldData.anchor.y + entry.dy},${worldData.anchor.z + entry.dz}`);
+      const remapped = remap_world_offset_between_views({ x: entry.dx, y: entry.dy, z: entry.dz }, sourceView, resolvedTargetView);
+      const world = {
+        x: anchor.x + remapped.x,
+        y: anchor.y + remapped.y,
+        z: anchor.z + remapped.z,
+      };
+      destinationByKey.set(worldKey(world), {
+        world,
+        cell: cloneGridCell(entry.cell),
+      });
+      transformedCells.push(world);
+    }
+
+    const changes: CellChange[] = [];
+    for (const key of sourceKeys) {
+      if (destinationByKey.has(key)) continue;
+      const [x, y, z] = key.split(',').map((value) => Number.parseInt(value, 10));
+      const world = { x: x || 0, y: y || 0, z: z || 0 };
+      changes.push(buildChange(world, cloneGridCell(getCellAt(world)), makeEmptyCell(), opts.get_grid_point_for_world?.(world) ?? null));
+    }
+    for (const destination of destinationByKey.values()) {
+      changes.push(buildChange(
+        destination.world,
+        cloneGridCell(getCellAt(destination.world)),
+        cloneGridCell(destination.cell),
+        opts.get_grid_point_for_world?.(destination.world) ?? null,
+      ));
+    }
+
+    return {
+      changes: normalizeCommittedChanges(changes),
+      transformedCells,
+    };
+  }
+
   function clearMovePreview(): void {
     move_preview_mode = null;
     move_preview_anchor_world = null;
+    move_preview_world_data = null;
+    move_preview_rotation_view = null;
     move_preview_plane = null;
     move_preview_depth_offset = 0;
     move_preview_delta = { x: 0, y: 0, z: 0 };
@@ -418,7 +514,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       y: Math.floor(delta.y),
       z: Math.floor(delta.z),
     };
-    const deltaKey = `${normalized.x},${normalized.y},${normalized.z}`;
+    const rotationKey = move_preview_rotation_view
+      ? `${move_preview_rotation_view.principal_view}:${move_preview_rotation_view.roll_quarter_turn}`
+      : 'base';
+    const deltaKey = `${normalized.x},${normalized.y},${normalized.z}:${rotationKey}`;
     if (!options?.force && deltaKey === last_move_preview_delta_key) return;
     if (!options?.force && move_preview_mode !== 'selection_mask') {
       const now = Date.now();
@@ -431,6 +530,22 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
     last_move_preview_delta_key = deltaKey;
     if (move_preview_mode === 'selection_mask') {
       opts.on_move_preview_selection_change?.(translateWorldCells(move_preview_source_selection, normalized));
+      return;
+    }
+    if (move_preview_world_data) {
+      const targetAnchor = {
+        x: move_preview_anchor_world.x + normalized.x,
+        y: move_preview_anchor_world.y + normalized.y,
+        z: move_preview_anchor_world.z + normalized.z,
+      };
+      const preview = buildWorldRasterTransformChanges(
+        move_preview_world_data,
+        targetAnchor,
+        (world) => cloneGridCell(move_preview_group_snapshot.get(worldKey(world)) ?? makeEmptyCell()),
+        getEffectiveMovePreviewTargetView(move_preview_world_data),
+      );
+      opts.on_move_preview_selection_change?.(preview.transformedCells);
+      replacePendingPreviewChanges(preview.changes, targetAnchor, targetAnchor.z);
       return;
     }
     const previewChanges = buildMoveContentCommitChanges(move_preview_source_voxels, normalized);
@@ -470,6 +585,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       z: entry.z,
       cell: cloneGridCell(entry.cell),
     }));
+    move_preview_world_data = build_world_copy_data_from_voxels(
+      move_preview_source_voxels,
+      opts.get_view_state?.() ?? make_place_view_state('top', 0),
+    );
+    move_preview_rotation_view = move_preview_world_data ? getBaseMovePreviewTargetView(move_preview_world_data) : null;
     move_preview_mode = move_preview_source_voxels.length > 0 ? 'selection_content' : 'selection_mask';
     move_preview_anchor_world = { x: anchorWorld.x, y: anchorWorld.y, z: anchorWorld.z };
     move_preview_plane = getWorldPointPlaneCoordinate(anchorWorld) ?? opts.get_selected_z();
@@ -504,7 +624,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       y: Math.floor(delta.y),
       z: Math.floor(delta.z),
     };
-    if (normalized.x === 0 && normalized.y === 0 && normalized.z === 0) {
+    const hasRotation = !!move_preview_world_data && !!move_preview_rotation_view && (
+      move_preview_rotation_view.principal_view !== move_preview_world_data.source_view.principal_view
+      || move_preview_rotation_view.roll_quarter_turn !== move_preview_world_data.source_view.roll_quarter_turn
+    );
+    if (normalized.x === 0 && normalized.y === 0 && normalized.z === 0 && !hasRotation) {
       clearMovePreview();
       return false;
     }
@@ -512,6 +636,28 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       opts.on_move_selection_commit?.(translateWorldCells(move_preview_source_selection, normalized));
       clearMovePreview();
       showStatus(`Moved selection ${normalized.x},${normalized.y},${normalized.z}`);
+      return true;
+    }
+    if (move_preview_world_data && move_preview_anchor_world) {
+      const targetAnchor = {
+        x: move_preview_anchor_world.x + normalized.x,
+        y: move_preview_anchor_world.y + normalized.y,
+        z: move_preview_anchor_world.z + normalized.z,
+      };
+      const preview = buildWorldRasterTransformChanges(
+        move_preview_world_data,
+        targetAnchor,
+        (world) => cloneGridCell(move_preview_group_snapshot.get(worldKey(world)) ?? makeEmptyCell()),
+        getEffectiveMovePreviewTargetView(move_preview_world_data),
+      );
+      pending_changes = preview.changes;
+      if (pending_changes.length > 0) {
+        const selected_z = targetAnchor.z ?? opts.get_selected_z();
+        commitLoggedCellChanges('draw_cells', hasRotation ? 'Transform Raster Move' : 'Move', selected_z);
+        opts.on_move_selection_commit?.(preview.transformedCells);
+      }
+      clearMovePreview();
+      showStatus(hasRotation ? 'Transformed moved raster content' : `Moved content ${normalized.x},${normalized.y},${normalized.z}`);
       return true;
     }
     const previewChanges = buildMoveContentCommitChanges(move_preview_source_voxels, normalized);
@@ -540,6 +686,75 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
     return commitMovePreviewFromDelta(move_preview_delta);
   }
 
+  function runWheelDepth(dir: -1 | 1): boolean {
+    if (dir !== -1 && dir !== 1) return false;
+    if (opts.on_step_depth) {
+      opts.on_step_depth(dir);
+      return true;
+    }
+    if (opts.cycle_focus_layer) {
+      opts.cycle_focus_layer(dir < 0 ? -1 : 1);
+      return true;
+    }
+    return false;
+  }
+
+  function runWheelBreath(dir: -1 | 1): boolean {
+    if (dir !== -1 && dir !== 1) return false;
+    opts.on_step_breath?.(dir);
+    return !!opts.on_step_breath;
+  }
+
+  function runPrimaryScrollMode(dir: -1 | 1, modeOverride?: 'depth' | 'breaths'): boolean {
+    const mode = modeOverride ?? opts.get_scroll_primary_mode?.() ?? 'depth';
+    return mode === 'breaths' ? runWheelBreath(dir) : runWheelDepth(dir);
+  }
+
+  function getSemanticVerticalWheelDir(e: WheelEvent): -1 | 1 | 0 {
+    if (Math.abs(e.delta_y) >= Math.abs(e.delta_x)) {
+      return e.delta_y < 0 ? -1 : (e.delta_y > 0 ? 1 : 0);
+    }
+    return e.delta_x < 0 ? -1 : (e.delta_x > 0 ? 1 : 0);
+  }
+
+  function stepMovePreviewTransformAction(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): boolean {
+    if (!ensureMovePreviewFromSelection()) return false;
+    if (move_preview_mode !== 'selection_content' || !move_preview_world_data) return false;
+    const current = getEffectiveMovePreviewTargetView(move_preview_world_data);
+    move_preview_rotation_view = step_place_view_action(current, action);
+    applyMovePreviewDelta(move_preview_delta, { force: true });
+    showStatus(`Move preview ${action.replace('_', ' ')}`);
+    return true;
+  }
+
+  function stepSelectionRasterTransformAction(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): boolean {
+    const selected = opts.get_active_group_selected_world_voxels?.() ?? [];
+    if (selected.length < 1) return false;
+    const worldData = build_world_copy_data_from_voxels(selected.map((entry) => ({
+      x: entry.x,
+      y: entry.y,
+      z: entry.z,
+      cell: cloneGridCell(entry.cell),
+    })), opts.get_view_state?.() ?? make_place_view_state('top', 0));
+    if (!worldData) return false;
+    const targetView = step_place_view_action(
+      make_place_view_state(worldData.source_view?.principal_view ?? 'top', worldData.source_view?.roll_quarter_turn ?? 0),
+      action,
+    );
+    const preview = buildWorldRasterTransformChanges(
+      worldData,
+      worldData.anchor,
+      (world) => cloneGridCell(opts.get_active_group_world_cell?.(world) ?? opts.get_world_cell(world)),
+      targetView,
+    );
+    pending_changes = preview.changes;
+    if (pending_changes.length < 1) return false;
+    commitLoggedCellChanges('draw_cells', `Transform Selection (${action.replace('_', ' ')})`, worldData.anchor.z ?? opts.get_selected_z());
+    opts.on_move_selection_commit?.(preview.transformedCells);
+    showStatus(`Transformed selected raster ${action.replace('_', ' ')}`);
+    return true;
+  }
+
   function getPreviewBrush(): Brush {
       return drag_start_buttons
         ? getBrushForButton(getDragButton())
@@ -556,7 +771,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
   const CANVAS_MAX_WIDTH = 200;
   const CANVAS_MAX_HEIGHT = 100;
 
-  let scale = 1;
 
   function getViewportWidth(): number {
     return Math.max(1, rect.x1 - rect.x0 + 1);
@@ -698,6 +912,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
   let paste_preview_loading = false;
   let move_preview_mode: 'selection_content' | 'selection_mask' | null = null;
   let move_preview_anchor_world: { x: number; y: number; z: number } | null = null;
+  let move_preview_world_data: WorldCopyData | null = null;
+  let move_preview_rotation_view: PlaceViewState | null = null;
   let move_preview_plane: number | null = null;
   let move_preview_depth_offset = 0;
   let move_preview_delta: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 };
@@ -2676,6 +2892,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
 
     copySelection: () => copyCurrentSelection(),
 
+    showTransientStatus: (message) => {
+      showStatus(String(message ?? ''));
+    },
+
     nudgeSelectionByWorldDelta: (delta) => {
       const cells = opts.get_local_world_selection_cells?.() ?? [];
       if (cells.length < 1) return false;
@@ -2747,6 +2967,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
     commitMovePreview: () => commitMovePreviewFromDelta(move_preview_delta),
 
     leaveMovePreview: () => leaveMovePreview(),
+
+    stepMovePreviewTransformAction: (action) => stepMovePreviewTransformAction(action),
+
+    stepSelectionRasterTransformAction: (action) => stepSelectionRasterTransformAction(action),
 
     handleDepthStepDuringActiveStroke: (nextPlane: number) => handleDepthStepDuringActiveStroke(nextPlane),
 
@@ -3759,17 +3983,30 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
     },
 
     OnWheel(e: WheelEvent): void {
-      if (e.ctrl) {
-        const zoom_step = 0.1;
-        scale = clamp(scale + (e.delta_y > 0 ? zoom_step : -zoom_step), 0.5, 3.0);
-        return;
+      const semanticWheelDir = getSemanticVerticalWheelDir(e);
+      const wheelDir = semanticWheelDir < 0 ? 1 : (semanticWheelDir > 0 ? -1 : 0);
+
+      // App-default semantic wheel meanings should resolve before any canvas-local override logic.
+      switch (opts.resolve_wheel_action?.(e) ?? null) {
+        case 'painter.scroll.primary_prev':
+          runPrimaryScrollMode(-1);
+          return;
+        case 'painter.scroll.primary_next':
+          runPrimaryScrollMode(1);
+          return;
+        case 'painter.scroll.secondary_prev':
+          runPrimaryScrollMode(-1, (opts.get_scroll_primary_mode?.() ?? 'depth') === 'depth' ? 'breaths' : 'depth');
+          return;
+        case 'painter.scroll.secondary_next':
+          runPrimaryScrollMode(1, (opts.get_scroll_primary_mode?.() ?? 'depth') === 'depth' ? 'breaths' : 'depth');
+          return;
       }
 
-      if (!e.shift && !e.alt && opts.cycle_focus_layer) {
+      // Remaining wheel ownership here is for true local interaction overrides.
+      if (!e.shift && !e.alt) {
         if (isMovePreviewActive()) {
-          const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
-          if (dir !== 0) {
-            move_preview_depth_offset += dir;
+          if (wheelDir !== 0) {
+            move_preview_depth_offset += wheelDir;
             const local_x = e.x - rect.x0;
             const local_y = e.y - rect.y0;
             const grid_coords = localToGrid(local_x, local_y);
@@ -3778,9 +4015,8 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
           }
         }
         if (is_selecting && selection_drag_start) {
-          const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
-          if (dir !== 0) {
-            opts.cycle_focus_layer(dir as 1 | -1);
+          if (wheelDir !== 0) {
+            runWheelDepth(wheelDir);
             selection_drag_end_plane = opts.get_focus_world_plane?.() ?? (selection_drag_end_plane ?? opts.get_selected_z());
             if (selection_drag_end_world && selection_drag_end_plane !== null) {
               selection_drag_end_world = setWorldPointPlaneCoordinate(selection_drag_end_world, selection_drag_end_plane);
@@ -3799,21 +4035,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
             return;
           }
         }
-        const dir = e.delta_y < 0 ? 1 : (e.delta_y > 0 ? -1 : 0);
-        if (dir !== 0) {
-          opts.cycle_focus_layer(dir as 1 | -1);
-          return;
-        }
-      }
-
-      // Plain vertical wheel is reserved for depth navigation.
-      // Shift/Alt wheel keep explicit pan controls available.
-      const scroll_step = 2; // Grid cells per scroll
-      const pan = getCanvasPanAdapter();
-      if (e.shift) {
-        pan.applyAxisDelta?.({ x: e.delta_y > 0 ? scroll_step : -scroll_step });
-      } else if (e.alt) {
-        pan.applyAxisDelta?.({ y: e.delta_y > 0 ? -scroll_step : scroll_step });
       }
     },
 
@@ -3949,11 +4170,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
         return;
       }
 
-      // Space for panning (only when NOT in text mode)
-      if (e.code === 'Space') {
-        e.preventDefault();
-        return;
-      }
     },
 
     OnPointerLeave(): void {
@@ -3970,10 +4186,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       exitTextMode(true);
     },
 
-    OnKeyUp(e: KeyboardEvent): void {
-      if (e.code === 'Space') {
-        return;
-      }
+    OnKeyUp(_e: KeyboardEvent): void {
     },
 
     OnBlur(): void {

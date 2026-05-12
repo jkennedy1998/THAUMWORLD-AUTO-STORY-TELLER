@@ -75,7 +75,6 @@ const spawned_processes = [];
 const host_processes = [
   { name: "event_bridge", cmd: "node", args: ["dist/event_bridge/main.js"], delay: 0 },
   { name: "data_broker", cmd: "node", args: ["dist/data_broker/main.js"], delay: 0 },
-  // { name: "interpreter", cmd: "node", args: ["dist/interpreter_ai/main.js"], delay: 500 },  // ARCHIVED - communication system now in interface_program
   { name: "renderer", cmd: "node", args: ["dist/renderer_ai/main.js"], delay: 500 },
   { name: "rules_lawyer", cmd: "node", args: ["dist/rules_lawyer/main.js"], delay: 500 },
   { name: "npc_ai", cmd: "node", args: ["dist/npc_ai/main.js"], delay: 500 },

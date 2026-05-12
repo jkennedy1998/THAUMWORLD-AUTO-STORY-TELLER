@@ -6,6 +6,85 @@ Date: 2026-05-11
 
 Lock in a production-oriented painter control matrix before implementation.
 
+## Status
+
+This plan is **partially completed** and should **not** be archived yet.
+
+Implemented from this plan:
+
+- time / view / position control-family split
+- arrow-based time stepping and active-group jumps
+- numeric top-row buffered tool sequences
+- removal of hidden non-text keyboard pan
+- app-routed painter edit shortcuts
+- positional routing for move / paste / selection / text
+- pending move / paste leave semantics
+- directional transport state:
+  - `paused`
+  - `playing_forward`
+  - `playing_backward`
+- arrow double-tap transport:
+  - `Left Left` = backward play/pause
+  - `Right Right` = forward play/pause
+  - `Up Up` = onion skin toggle
+- reverse-capable playback stepping
+- painter camera onion skin settings + persistence
+- onion controls in camera UI
+- onion modes:
+  - `Raster Bars`
+  - `Frames`
+- current-layer-first onion rendering with optional `Full File Onion Skin`
+- bidirectional onion traversal
+- loop-aware onion traversal
+- onion fade toggles:
+  - `Onion Opacity Fade`
+  - `Onion Weight Fade`
+- implemented onion weight rule:
+  - `max(0, baseWeight - offset)`
+
+Still open on this plan:
+
+- broader unsupported-action status feedback outside the new raster transform slice
+- focused regression / TAI coverage for raster swing/roll and stubbed vector/group paths
+- focused regression / TAI coverage for configurable painter/game wheel routing
+- controls UX/discoverability for numeric sequences and double-tap semantics
+- unresolved live regression: painter `Ctrl+Scroll` still does not reliably behave like pure zoom in manual testing
+
+### Current regression note: painter `Ctrl+Scroll`
+
+Manual validation after the recent wheel/control work found that painter `Ctrl+Scroll` is still not correct in real use.
+
+Observed behavior:
+
+- user reports `Ctrl+Scroll` does **not** behave like the expected pure zoom gesture
+- user reports it appears to still trigger drawing/edit-adjacent behavior instead of only zooming
+- this means current implementation and current TAI coverage are insufficient to declare the wheel slice done
+
+Attempted fixes already made:
+
+1. stopped app-level painter `Space` play/pause handling from stealing the space-pan modifier path
+2. routed painter wheel `Ctrl+Scroll` into the same `stepZoom(...)` path as keyboard zoom
+3. replaced painter canvas local dead zoom state with app-owned `on_step_zoom(...)` that updates live painter camera state
+4. updated canvas-runtime wheel modifier capture to fall back to tracked modifier state (`this.ctrl_down`, etc.) just like pointer events
+
+Current status:
+
+- these changes typecheck
+- automated coverage indicates some wheel paths change runtime camera values
+- manual testing still says the real interactive path is wrong
+- therefore there is likely another live-path ownership/routing issue beyond the already-fixed modifier propagation and dead local zoom state
+
+Working hypothesis:
+
+- a separate real input path is still handling the gesture before or alongside the intended painter wheel zoom route
+- likely candidates include live module routing, DOM/event-layer ownership, or an interaction-state path that only shows up in manual use and not in current TAI coverage
+
+Required follow-up:
+
+- do a dedicated no-edit-pass trace of real `Ctrl+Scroll` event ownership in live painter use
+- add temporary diagnostics on wheel dispatch / module target / active interaction state before more behavior changes
+- add a focused regression test only after the live path is confirmed
+
 This plan replaces the current mixed model of:
 
 - mapped controls for some painter actions
@@ -771,6 +850,8 @@ The next development should focus on **finishing semantics and reducing transiti
 
 ## Track 0 - timing transport and onion skin workflow
 
+**Status: implemented.**
+
 This track extends the new time-nudge arrow family into a fuller animation transport workflow.
 
 The goal is to support:
@@ -841,9 +922,7 @@ Rules:
 
 ### 0.4 Onion skin controls in Painter Camera
 
-The ASCII painter camera module should gain explicit onion skin controls.
-
-Add to the painter camera panel:
+Implemented in the painter camera panel:
 
 - `Onion Skin` toggle
 - `Onion Skin Distance` slider
@@ -851,69 +930,51 @@ Add to the painter camera panel:
   - min: `1`
   - max: `3`
 - `Onion Skin Step Mode` toggle/cycle
-  - `Per Raster Bar`
-  - `Per Frame`
-  - default: `Per Raster Bar`
+  - `Raster Bars`
+  - `Frames`
+  - default: `Raster Bars`
+- `Full File Onion Skin` toggle
+  - default: off
+- `Onion Opacity Fade` toggle
+- `Onion Weight Fade` toggle
 
-This belongs in the painter camera module because it is a view/render aid rather than an authored document mutation.
+This remains painter camera/view UI state rather than authored document content.
 
 ### 0.5 Onion skin stepping modes
 
-Define the two onion skin stepping modes clearly.
+Implemented stepping behavior:
 
-#### Per Frame
+#### Frames
 
-For onion distance `N`, render the prior authored breaths:
+- onion traversal searches both backward and forward from the current breath
+- traversal respects loop settings
+- distance offset is measured in raw breath steps
 
-- `current_breath - 1`
-- `current_breath - 2`
-- ... up to `N`
+#### Raster Bars
 
-This is raw breath-relative stepping.
+- onion traversal searches both backward and forward through distinct raster-bar states
+- traversal respects loop settings
+- blank bars still count as steps
+- default rendering path is current-layer-focused, with optional `Full File Onion Skin` for broader comparison
 
-#### Per Raster Bar
-
-For onion distance `N`, walk backward through raster timeline bars/states rather than raw breath offsets.
-
-Important rule:
-
-- **blank bars count too**
-- the stepping must count both visible raster-content bars and blank bars
-
-That means the default mode respects authored timing gaps rather than skipping across them.
-
-If the previous raster span is blank, that blank still consumes one onion-skin distance step.
-
-This is the requested production default because it better reflects authored timing structure.
+This keeps the default workflow cheaper and closer to active-layer animation work.
 
 ### 0.6 Onion skin render model
 
-Initial onion skin rendering can stay intentionally simple.
+Implemented render model:
 
-First pass:
+- onion renders underneath current content
+- current content still wins at occupied cells
+- default raster-bar mode is current-layer-focused unless `Full File Onion Skin` is enabled
+- onion traversal can contribute from both backward and forward offsets
+- farther offsets render weaker than nearer offsets
 
-- render only prior onion states, never future states
-- current breath still renders normally on top
-- onion skins render underneath the current breath
-- each older onion layer renders before the newer one
+Implemented falloff controls:
 
-Recommended render order per cell stack:
-
-- oldest onion layer first
-- then newer onion layers
-- current breath last
-
-For example at distance 2:
-
-- onion `n - 2`
-- onion `n - 1`
-- current `n`
-
-Opacity/intensity model for first pass:
-
-- onion layers render at reduced visual strength versus the current breath
-- nearest prior onion should be stronger than older onions
-- implementation can use reduced color intensity / weight / opacity-like presentation depending on the renderer surface
+- `Onion Weight Fade`
+  - weight rule: `max(0, baseWeight - offset)`
+- `Onion Opacity Fade`
+  - visual strength fades by distance offset
 
 ### 0.7 Authority and persistence
 
@@ -1065,25 +1126,19 @@ Future-facing rule:
 
 This keeps the path open for the desired realtime particle workflow.
 
-### 0.10 Recommended execution order for this track
+### 0.10 Outcome
 
-1. define playback-direction state in painter app state
-2. add reverse-capable playback stepping in the timing helper layer
-3. add arrow double-tap interpreter and transport rules
-4. remap `ArrowUp`/`ArrowDown` single-tap semantics to start/end as specified above
-5. rework standalone play binding semantics so it does not compete with directional transport
-6. extend painter camera settings/schema with onion skin enable + distance + stepping mode
-7. add onion skin controls to the painter camera module UI
-8. thread onion skin state into painter render preparation
-9. implement first-pass prior-state onion rendering for distance 1..3
-10. add regression coverage for:
-   - single-step pause behavior
-   - forward/backward double-tap transport toggles
-   - double-up onion toggle
-   - per-frame onion stepping
-   - per-raster-bar onion stepping including blank-bar counting
-   - persistence of onion-skin camera settings
-   - no stale competing play binding behavior
+Track 0 is implemented.
+
+Remaining follow-up work related to this track is only regression coverage:
+
+- single-step pause behavior
+- forward/backward double-tap transport toggles
+- double-up onion toggle
+- per-frame onion stepping
+- per-raster-bar onion stepping including blank-bar counting
+- persistence of onion-skin camera settings
+- no stale competing play binding behavior
 
 ## Track A - finish positional semantics
 
@@ -1242,17 +1297,90 @@ Implementation-wise, this likely means introducing a small helper that resolves:
 
 ### B1. Add positional double-tap swing
 
-Extend the buffered interpreter so that:
+Status update:
+
+- buffered `W/A/S/D` double-tap interpretation is now implemented using the shared timing window
+- real raster transform behavior now routes for:
+  - **world-raster paste preview**
+  - **move-preview raster content**
+  - **selected raster content within selection areas**
+- `Q/E` now route real raster roll behavior on the same raster transform targets
+- text and vector/group transform paths still emit intentional stub status/log messages
+- wheel routing is now integrated into the controls/input system for painter and game:
+  - painter scroll primary mode toggle in Controls (`Depth` / `Breaths`)
+  - painter `Ctrl+Scroll` uses the same zoom function as `-` / `=`
+  - painter `Space+Scroll` pans vertically
+  - painter `Alt+Space+Scroll` pans horizontally
+  - painter plain scroll uses the configured primary mode and `Alt+Scroll` uses the opposite mode
+  - game scroll currently routes to depth through controls bindings
+
+Scope for the next implementation pass:
+
+- expand from paste-only into a broader **raster transform** slice
+- real raster **swing** and **roll** behavior may be implemented for:
+  - move-preview raster content
+  - selected raster content within a selection area
+  - paste preview raster content
+- do **not** attempt vector/group swing authoring in this pass
+- do **not** attempt vector/group roll authoring in this pass
+- do **not** invent fake rotation behavior for targets that do not actually support authored raster transform operations yet
+
+Buffered input shape:
 
 - `W` => delayed single `painter.position.nudge_up`
 - `W W` => `painter.position.swing_up`
-- same for `A/S/D`
+- `A` => delayed single `painter.position.nudge_left`
+- `A A` => `painter.position.swing_left`
+- `S` => delayed single `painter.position.nudge_down`
+- `S S` => `painter.position.swing_down`
+- `D` => delayed single `painter.position.nudge_right`
+- `D D` => `painter.position.swing_right`
 
 Rules:
 
 - use the same timing window already used by numeric tool sequences
 - no single-fire plus double-fire on the same burst
 - allow early commit when later non-positional input makes the single intent clear
+- keep the current text-capture protections intact
+- raster-only means this should route only where a concrete raster/content swing or roll operation exists or can be implemented cleanly in the pending-placement family
+
+Implementation boundary for this pass:
+
+- selection / move / paste raster workflows may implement real double-tap swing behavior if the operation is an actual raster/content transform
+- `Q/E` may implement real raster roll behavior on the same raster transform targets
+- selected raster-area transforms are in scope when the target is actual raster payload, not merely a selection mask outline
+- vector/group swing and vector/group roll-oriented edits remain out of scope
+- where a recognized swing or roll action resolves to a vector/group/rotation-style path, emit an explicit stub status/log instead of silently doing nothing
+
+Required stub messaging:
+
+- describe that the requested action is intentionally stubbed
+- describe whether the blocked path is a vector/group transform path rather than a raster-content transform path
+- describe that proper support must be implemented as real transform authoring rather than a fake immediate shortcut-side transform
+
+Examples:
+
+- `Selection mask swing stub: this target is a mask only; raster-content transform requires raster payload preview support`
+- `Group swing stub: requires authored keyframed transform support; shortcut transform is intentionally not implemented`
+- `Group roll stub: requires authored keyframed transform support; shortcut transform is intentionally not implemented`
+
+### B1a. Planning note: raster transform support vs vector/group transform support
+
+The user-approved boundary is now:
+
+- positional double-tap swing now = raster-edit-oriented workflow
+- raster roll on raster transform targets is also in scope
+- vector swing, group swing, vector roll, and group roll later = separate authored-transform/keyframe work
+
+That later vector/group work should be planned as its own development track because it needs:
+
+- explicit authored transform data model decisions
+- transform support that does not currently exist for vector/group authoring
+- proper keyframe semantics
+- undo/history semantics for transform edits
+- multiplayer/network semantics for authored transform changes
+
+Until then, shortcut handlers should only log/status vector/group transform requests as intentional stubs.
 
 ### B2. Consider extracting a shared buffered input helper
 
@@ -1314,7 +1442,7 @@ This can start as descriptive copy even before full custom rebinding support exi
 
 ## Track E - regression coverage
 
-Once double-tap positional behavior lands, add focused TAI / smoke coverage for:
+Once raster-only double-tap positional behavior lands, add focused TAI / smoke coverage for:
 
 - numeric tool sequence primary assignment
 - numeric tool sequence secondary assignment
@@ -1322,17 +1450,77 @@ Once double-tap positional behavior lands, add focused TAI / smoke coverage for:
 - move-tool positional nudge
 - paste positional nudge and rotate
 - selection positional nudge
-- positional double-tap swing
+- positional double-tap swing on raster-supported targets
+- explicit stub feedback when swing resolves to out-of-scope vector/group/rotation paths
+
+### E1. Coverage goals for raster-only double-tap swing / raster roll
+
+Add focused TAI coverage that proves:
+
+1. single tap still resolves to the delayed nudge path
+2. matching second tap inside the buffer window resolves to swing instead of two nudges
+3. non-matching later input early-commits the pending single nudge
+4. text/type capture disables the swing shortcut path
+5. raster-supported targets perform the intended swing behavior
+6. raster-supported targets perform the intended roll behavior where `Q/E` is mapped to raster transform
+7. unsupported vector/group transform targets emit the expected stub feedback
+
+### E2. Suggested TAI scenarios
+
+Prefer a small painter-focused regression set under `local_data/tool_assisted_inputs/` or a nearby existing painter smoke location.
+
+Suggested cases:
+
+> Planning note: this raster transform slice is now implemented; TAI should treat paste preview, move preview, and selected-raster-area transform paths as real targets. Vector/group transform requests should remain stub assertions.
+
+- `painter_double_tap_swing_selection_raster`
+  - create or load a simple raster selection with real selected content
+  - trigger `A A` / `D D`
+  - verify swing behavior occurred once on raster payload
+  - verify it did not also emit two single nudges
+
+- `painter_double_tap_swing_move_preview_raster`
+  - ensure move-preview path is active on selected raster content
+  - trigger `W W` or `S S`
+  - verify preview-local swing behavior
+  - verify commit/leave still behaves cleanly afterward
+
+- `painter_roll_selection_or_move_raster`
+  - use `Q/E` on a raster transform target
+  - verify roll behavior occurred on raster payload
+  - verify vector/group targets still do not fake-roll
+
+- `painter_double_tap_swing_stub_group_or_vector`
+  - route the same gesture into a target that would require authored vector/group transform support
+  - verify no fake transform is applied
+  - verify status/log text explains that this is an intentional stub pending authored transform support
+
+- `painter_double_tap_swing_text_capture_guard`
+  - enter text capture
+  - press repeated `W/A/S/D`
+  - verify literal typing / existing text behavior remains intact
+  - verify no swing dispatch occurs
+
+### E3. Logging expectations for TAI/debugging
+
+When validating stubbed paths, logs/status should make failure buckets clear:
+
+- raster swing runtime bug
+- shortcut buffering bug
+- text-capture guard bug
+- intentional unsupported vector/rotation stub path
+
+This keeps product/runtime failures separate from planned-not-yet-implemented authored transform work.
 
 ## Recommended execution order
 
-1. lock the positional routing precedence and hand-fallback rule
-2. define pending raster move mode state + lifecycle
-3. align paste with the same pending-placement lifecycle language
-4. add unsupported-action status feedback
-5. implement move-tool raster preview / commit flow
-6. implement positional double-tap swing for `W/A/S/D`
-7. decide whether to extract shared buffered interpreter now or immediately after swing lands
-8. finish remaining canvas keyboard cleanup
-9. improve controls UI wording for numeric sequence and double-tap semantics
-10. add focused TAI regression coverage
+1. plan the raster transform slice around move preview, selected raster areas, and paste preview
+2. define exactly which raster targets get real swing behavior in this pass
+3. define exactly which raster targets get real roll behavior in this pass
+4. add explicit stub status/log messaging for vector/group transform paths that are intentionally out of scope
+5. preserve text-capture guards and early-commit behavior
+6. add focused TAI regression coverage for both real raster transform paths and intentional stub paths
+7. add unsupported-action status feedback for the remaining non-swing positional gaps
+8. decide whether to extract shared buffered interpreter now or immediately after the raster transform slice lands
+9. finish remaining canvas keyboard cleanup
+10. improve controls UI wording for numeric sequence and double-tap semantics

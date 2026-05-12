@@ -1,0 +1,26 @@
+{
+  "id": "painter_wheel_primary_mode_breaths_smoke",
+  "test_name": "paint_test_wheel_primary_mode_breaths_smoke",
+  "clock_mode": "realtime_ms",
+  "open_ms": 14000,
+  "description": "Verify painter plain wheel can be switched to breaths and alt+wheel becomes the opposite depth route.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 100, "type": "invoke_helper", "helper": "reset_painter_module_layout" },
+    { "at_ms": 200, "type": "invoke_helper", "helper": "set_painter_scroll_primary_mode", "payload": { "mode": "breaths" } },
+    { "at_ms": 300, "type": "assert_text_value_literal", "source": "runtime_value", "field": "scroll_primary_mode", "value": "breaths" },
+    { "at_ms": 500, "type": "pointer_move", "space": "grid", "x": 60, "y": 24, "pointer_action": "primary" },
+    { "at_ms": 700, "type": "capture_text_value", "slot": "breath_before_plain", "source": "runtime_value", "field": "current_breath" },
+    { "at_ms": 750, "type": "capture_text_value", "slot": "focus_before_plain", "source": "runtime_value", "field": "focus_plane" },
+    { "at_ms": 1000, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": 120 },
+    { "at_ms": 1400, "type": "assert_text_value_changed", "slot": "breath_before_plain", "source": "runtime_value", "field": "current_breath" },
+    { "at_ms": 1600, "type": "assert_text_value_equals", "slot": "focus_before_plain", "source": "runtime_value", "field": "focus_plane" },
+    { "at_ms": 1800, "type": "capture_text_value", "slot": "breath_after_plain", "source": "runtime_value", "field": "current_breath" },
+    { "at_ms": 1850, "type": "capture_text_value", "slot": "focus_after_plain", "source": "runtime_value", "field": "focus_plane" },
+    { "at_ms": 2100, "type": "wheel", "space": "grid", "x": 60, "y": 24, "delta_x": 0, "delta_y": -120, "alt": true },
+    { "at_ms": 2500, "type": "assert_text_value_changed", "slot": "focus_after_plain", "source": "runtime_value", "field": "focus_plane" },
+    { "at_ms": 2700, "type": "assert_text_value_equals", "slot": "breath_after_plain", "source": "runtime_value", "field": "current_breath" }
+  ]
+}

@@ -1,20 +1,20 @@
-# ASCII Painter Brush Aliasing Exploration Plan
+# ASCII Painter Brush Aliasing Exploration Notes
 
-Status: Planning only / no implementation yet
+Status: Exploration notes / goals only / no implementation yet
 
 Date: 2026-05-11
 
 ## Purpose
 
-This document is a holding plan for improving brush behavior in the ASCII painter.
+This document is a holding note for improving brush behavior in the ASCII painter.
 
-It is intentionally **not** an implementation plan yet.
+It is intentionally **not** an implementation plan.
 
 We do **not** fully know the final system shape. The immediate goal is to:
 
-1. clean up the current mental model
-2. outline likely UX directions simply
-3. identify the first architectural cleanup to make later decisions easier
+1. capture a few important brush goals
+2. clean up the current mental model
+3. outline likely UX directions simply
 4. avoid firing on code changes before the model is clearer
 
 ## Scope
@@ -34,7 +34,7 @@ This includes possible future aliasing for:
 
 This plan does **not** lock the final architecture yet.
 
-## Current planning stance
+## Current stance
 
 The system is still exploratory.
 
@@ -46,11 +46,13 @@ We are not yet choosing:
 - the final relationship between gradiator and brush aliasing
 - the final subcell / quadrant interaction model
 
-We should do some cleanup first, then decide.
+For now this document should stay lightweight.
+
+It is mainly a place to record goals and good ideas while we mull the system over.
 
 ---
 
-## First cleanup direction to lock before implementation
+## Current goals and likely cleanup direction
 
 The first code concept we should touch later is the current tool/action split.
 
@@ -90,7 +92,7 @@ If line shares the same positive brush pipeline, then any future work on:
 
 can naturally apply to line as well, rather than requiring a second implementation.
 
-### Planning rule
+### Guiding rule
 
 Before adding advanced aliasing behavior, we should move mentally toward:
 
@@ -112,6 +114,8 @@ This cleanup should come before deep brush feature expansion.
 ## UX-side outline only
 
 Below is a simple outline of likely future UX surfaces. These are not locked yet.
+
+These are goals and idea buckets, not committed work.
 
 ## 1. Shared brush settings area
 
@@ -419,38 +423,19 @@ These are open and should remain open for now.
 
 ---
 
-## Suggested planning sequence
+## Current goals
 
-### Phase 0: no implementation yet
-
-- [ ] keep this as a planning-only document
+- [ ] keep this document lightweight and exploratory
 - [ ] avoid starting aliasing implementation before the cleanup direction is accepted
-- [ ] keep UX descriptions lightweight and non-binding
-
-### Phase 1: conceptual cleanup decision
-
+- [ ] keep UX descriptions simple and non-binding
 - [ ] confirm the positive/negative brush model
 - [ ] confirm that line should reuse the positive brush path rather than becoming a separate deep system
-- [ ] confirm that future brush-driven tools should be evaluated in terms of shape sampling + positive/negative application
-
-### Phase 2: current-code cleanup pass
-
-- [ ] identify where pencil and eraser application paths currently diverge unnecessarily
-- [ ] identify where line currently behaves as its own special editing path instead of a sampled positive brush path
-- [ ] identify which shape tools can later collapse into shared application logic
-
-### Phase 3: architecture decision after cleanup
-
-- [ ] decide whether aliasing is best modeled by channel processors, character families, or both
-- [ ] decide how much of the first version should be density-ramp only
-- [ ] decide whether subcell support is part of v1 or deferred
-- [ ] decide whether gradiator should be reused directly or only conceptually
-
-### Phase 4: UX decision pass
-
-- [ ] choose the smallest useful first brush-settings UI
-- [ ] decide which settings must be per-hand
-- [ ] decide which settings belong in the existing tool properties panel versus a future specialized panel
+- [ ] confirm that future brush-driven tools should be thought of as shape sampling + positive/negative application
+- [ ] keep stroke speed as a likely future brush input
+- [ ] keep subcell position and subcell path thinking in view
+- [ ] keep connectivity-aware character and sprite brushes in view
+- [ ] prefer explicit transition logic over a hidden general accumulation layer
+- [ ] decide later whether the first implemented version should stay density-ramp-first
 
 ---
 
@@ -475,5 +460,7 @@ The next meaningful direction is:
 
 1. simplify the brush mental model into **positive** and **negative** acts
 2. make **line** conceptually inherit the same positive brush behavior as pencil
-3. keep advanced aliasing ideas outlined but undecided
-4. clean current paths first, then choose the real system
+3. prefer explicit character/sprite transition logic over a hidden generic accumulation layer
+4. keep stroke speed, subcell pathing, and connectivity-aware brushes in view
+5. keep advanced aliasing ideas outlined but undecided
+6. clean current paths first, then choose the real system

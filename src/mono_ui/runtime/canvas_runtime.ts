@@ -51,6 +51,11 @@ export type CanvasRuntimeOptions = {
     on_pointer_up_global?: (x: number, y: number, e: PointerEvent) => void;
     on_module_pointer_down?: (module: Module) => void;
 
+    // Optional runtime-owned wheel-pan intent resolver.
+    // When this returns an axis delta, the runtime routes that pan through
+    // module pan target -> viewport fallback before module-local OnWheel.
+    resolve_pan_wheel_delta?: (module: Module | null, e: WheelEvent) => Partial<{ x: number; y: number; z: number }> | null;
+
     // Called after modules compose each frame (for overlays)
     on_after_compose?: (canvas: Canvas) => void;
 };
@@ -138,6 +143,7 @@ export class CanvasRuntime {
     private on_pointer_down_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
     private on_pointer_up_global: ((x: number, y: number, e: PointerEvent) => void) | null = null;
     private on_module_pointer_down: ((module: Module) => void) | null = null;
+    private resolve_pan_wheel_delta: ((module: Module | null, e: WheelEvent) => Partial<{ x: number; y: number; z: number }> | null) | null = null;
     private on_after_compose: ((canvas: Canvas) => void) | null = null;
     private window_layout_refresh_handler: (() => void) | null = null;
     private window_focus_refresh_handler: (() => void) | null = null;
@@ -165,6 +171,7 @@ export class CanvasRuntime {
     private ctrl_down = false;
     private alt_down = false;
     private meta_down = false;
+    private held_key_codes = new Set<string>();
     private last_published_ui_context_key = '';
     private gameplay_bridge_down_codes = new Set<string>();
 
@@ -184,8 +191,16 @@ export class CanvasRuntime {
 
     private clear_transient_input_state(): void {
         this.gameplay_bridge_down_codes.clear();
+        this.held_key_codes.clear();
         this.space_down = false;
         this.clear_modifier_state();
+    }
+
+    private set_key_held(code: string, held: boolean): void {
+        const normalized = String(code ?? '').trim();
+        if (!normalized) return;
+        if (held) this.held_key_codes.add(normalized);
+        else this.held_key_codes.delete(normalized);
     }
 
     public inject_tool_assisted_gameplay_key(type: 'keydown' | 'keyup', payload: { code: string; key?: string; repeat?: boolean }): void {
@@ -200,6 +215,7 @@ export class CanvasRuntime {
         if (code === 'Space') {
             this.space_down = type === 'keydown';
         }
+        this.set_key_held(code, type === 'keydown');
         if (type === 'keydown') {
             if (!payload.repeat && !this.gameplay_bridge_down_codes.has(code)) {
                 this.gameplay_bridge_down_codes.add(code);
@@ -240,6 +256,7 @@ export class CanvasRuntime {
                 // ignore readonly override failures
             }
         }
+        this.set_key_held(code, type === 'keydown');
         if (type === 'keydown') {
             this.handle_runtime_keydown(ev);
             return;
@@ -292,6 +309,7 @@ export class CanvasRuntime {
         this.on_pointer_down_global = opts.on_pointer_down_global ?? null;
         this.on_pointer_up_global = opts.on_pointer_up_global ?? null;
         this.on_module_pointer_down = opts.on_module_pointer_down ?? null;
+        this.resolve_pan_wheel_delta = opts.resolve_pan_wheel_delta ?? null;
         this.on_after_compose = opts.on_after_compose ?? null;
 
         this.engine_canvas = create_canvas(this.grid_width, this.grid_height);
@@ -377,6 +395,17 @@ export class CanvasRuntime {
 
     private clamp_scale(scale: number): number {
         return clamp_ui_scale(scale);
+    }
+
+    private apply_global_ui_scale_step(dir: -1 | 1): boolean {
+        if (dir !== -1 && dir !== 1) return false;
+        const next = dir > 0
+            ? this.clamp_scale(Number((this.scale * 1.01).toFixed(4)))
+            : this.clamp_scale(Number((this.scale / 1.01).toFixed(4)));
+        if (next === this.scale) return false;
+        this.set_scale(next);
+        this.persist_scale_best_effort(next);
+        return true;
     }
 
     private ensure_overlay_canvas(): void {
@@ -918,6 +947,15 @@ export class CanvasRuntime {
                 this.pan_dirty = true;
                 this.update_canvas_pan_transform();
             },
+            apply_axis_delta: (delta) => {
+                const step_x = Math.trunc(Number(delta.x ?? 0));
+                const step_y = Math.trunc(Number(delta.y ?? 0));
+                if (step_x === 0 && step_y === 0) return;
+                this.pan_tiles_x += step_x;
+                this.pan_tiles_y += step_y;
+                this.pan_dirty = true;
+                this.update_canvas_pan_transform();
+            },
         });
     }
 
@@ -926,7 +964,10 @@ export class CanvasRuntime {
         const allow_blank_space_viewport_pan = module === null;
         const should_try_pan = this.space_down || allow_blank_space_viewport_pan;
         if (!should_try_pan) return null;
+        return this.resolve_explicit_pan_target(module);
+    }
 
+    private resolve_explicit_pan_target(module: Module | null): IPanTargetAdapter | null {
         const router = create_pan_gesture_router<Module>({
             resolveModuleTarget: (target_module) => this.get_module_pan_target(target_module),
             resolveViewportTarget: () => this.get_viewport_pan_target(),
@@ -934,8 +975,8 @@ export class CanvasRuntime {
 
         return router.resolveTarget({
             module,
-            prefer_module_target: this.space_down,
-            allow_viewport_fallback: this.space_down || allow_blank_space_viewport_pan,
+            prefer_module_target: true,
+            allow_viewport_fallback: true,
         });
     }
 
@@ -1243,18 +1284,16 @@ export class CanvasRuntime {
 
         if (!typing || allow_while_typing) {
             if (ev.key === '+' || ev.key === '=') {
-                const next = this.clamp_scale(Number((this.scale * 1.01).toFixed(4)));
-                this.set_scale(next);
-                this.persist_scale_best_effort(next);
-                ev.preventDefault();
-                return true;
+                if (this.apply_global_ui_scale_step(1)) {
+                    ev.preventDefault();
+                    return true;
+                }
             }
             if (ev.key === '-' || ev.key === '_') {
-                const next = this.clamp_scale(Number((this.scale / 1.01).toFixed(4)));
-                this.set_scale(next);
-                this.persist_scale_best_effort(next);
-                ev.preventDefault();
-                return true;
+                if (this.apply_global_ui_scale_step(-1)) {
+                    ev.preventDefault();
+                    return true;
+                }
             }
         }
 
@@ -1348,6 +1387,7 @@ export class CanvasRuntime {
         if (ev.code === 'Space') {
             this.space_down = true;
         }
+        this.set_key_held(ev.code, true);
         this.sync_modifier_state(ev);
         if (!ev.repeat && !this.gameplay_bridge_down_codes.has(ev.code)) {
             this.gameplay_bridge_down_codes.add(ev.code);
@@ -1371,6 +1411,7 @@ export class CanvasRuntime {
         if (ev.code === 'Space') {
             this.space_down = false;
         }
+        this.set_key_held(ev.code, false);
         this.sync_modifier_state(ev);
         if (this.gameplay_bridge_down_codes.has(ev.code)) {
             this.gameplay_bridge_down_codes.delete(ev.code);
@@ -1392,6 +1433,7 @@ export class CanvasRuntime {
         if (this.input_host.source_kind !== 'electron_bridge' && ev.code === 'Space' && !typing) {
             this.space_down = true;
         }
+        this.set_key_held(ev.code, true);
         this.sync_modifier_state(ev);
         if (ev.repeat && is_directional_action(action)) {
             if (!typing) {
@@ -1471,6 +1513,7 @@ export class CanvasRuntime {
         if (this.input_host.source_kind !== 'electron_bridge' && ev.code === 'Space') {
             this.space_down = false;
         }
+        this.set_key_held(ev.code, false);
         this.sync_modifier_state(ev);
         const input_context = this.build_input_context(typing);
         this.log_input_debug('window keyup received', {
@@ -1987,6 +2030,11 @@ export class CanvasRuntime {
         add_surface_listener('contextmenu', (ev) => {
             ev.preventDefault();
         });
+        add_surface_listener('wheel', (ev: any) => {
+            if (Boolean(ev.ctrlKey) || this.ctrl_down || Boolean(ev.metaKey) || this.meta_down) {
+                ev.preventDefault();
+            }
+        }, { passive: false, capture: true } as any);
 
         // Some drivers / browsers emit auxclick for middle/right.
         // Route it as a regular click so pen/mouse middle/right clicks are usable.
@@ -2148,6 +2196,17 @@ export class CanvasRuntime {
         add_surface_listener('wheel', (ev: any) => {
             ev.preventDefault();
 
+            const ctrlOrMeta = Boolean(ev.ctrlKey) || this.ctrl_down || Boolean(ev.metaKey) || this.meta_down;
+            if (ctrlOrMeta) {
+                const dominantDirection = Math.abs(Number(ev.deltaY) || 0) >= Math.abs(Number(ev.deltaX) || 0)
+                    ? ((Number(ev.deltaY) || 0) < 0 ? 'up' : (Number(ev.deltaY) || 0) > 0 ? 'down' : null)
+                    : ((Number(ev.deltaX) || 0) < 0 ? 'left' : (Number(ev.deltaX) || 0) > 0 ? 'right' : null);
+                if ((dominantDirection === 'up' || dominantDirection === 'down')
+                    && this.apply_global_ui_scale_step(dominantDirection === 'up' ? 1 : -1)) {
+                    return;
+                }
+            }
+
             const hit = this.resolve_pointer_hit(ev as any);
             if (!hit) return;
             const t = hit.tile;
@@ -2158,7 +2217,13 @@ export class CanvasRuntime {
                 x: t.x,
                 y: t.y,
                 delta_mode: ev.deltaMode,
-                mods: { shift: ev.shiftKey, ctrl: ev.ctrlKey, alt: ev.altKey, meta: ev.metaKey },
+                mods: {
+                    shift: Boolean(ev.shiftKey) || this.shift_down,
+                    ctrl: Boolean(ev.ctrlKey) || this.ctrl_down,
+                    alt: Boolean(ev.altKey) || this.alt_down,
+                    meta: Boolean(ev.metaKey) || this.meta_down,
+                    held_keys: Array.from(this.held_key_codes),
+                },
             };
         }, { passive: false });
 
@@ -2337,14 +2402,29 @@ export class CanvasRuntime {
 
         if (this.wheel_pending) {
             const { x, y, delta_mode, mods } = this.wheel_pending;
-            const top = this.route_to_top_module(x, y);
-            top?.OnWheel?.({
+            const wheelEvent = {
                 x, y,
                 delta_x: this.wheel_accum_dx,
                 delta_y: this.wheel_accum_dy,
                 delta_mode,
                 ...mods,
-            });
+            };
+            const top = this.route_to_top_module(x, y) ?? null;
+            const pan_delta = this.resolve_pan_wheel_delta?.(top, wheelEvent) ?? null;
+            if (pan_delta) {
+                const typing = this.focused_owner_wants_text_capture();
+                const pan_target = typing ? null : this.resolve_explicit_pan_target(top);
+                const step_x = Math.trunc(Number(pan_delta.x ?? 0));
+                const step_y = Math.trunc(Number(pan_delta.y ?? 0));
+                const step_z = Math.trunc(Number(pan_delta.z ?? 0));
+                if (pan_target && (step_x !== 0 || step_y !== 0 || step_z !== 0)) {
+                    pan_target.applyAxisDelta?.({ x: step_x, y: step_y, z: step_z });
+                } else {
+                    top?.OnWheel?.(wheelEvent);
+                }
+            } else {
+                top?.OnWheel?.(wheelEvent);
+            }
 
             this.wheel_accum_dx = 0;
             this.wheel_accum_dy = 0;

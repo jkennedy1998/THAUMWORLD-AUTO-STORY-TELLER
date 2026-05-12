@@ -1,0 +1,23 @@
+{
+  "id": "painter_numeric_tool_sequences_smoke",
+  "test_name": "paint_test_numeric_tool_sequences_smoke",
+  "clock_mode": "realtime_ms",
+  "open_ms": 14000,
+  "description": "Verify top-row digit tool shortcuts cover single-digit, repeated secondary assignment, and multi-digit tool sequences.",
+  "start_delay_ms": 1800,
+  "end_delay_ms": 1000,
+  "actions": [
+    { "at_ms": 0, "type": "invoke_helper", "helper": "reset_painter_document" },
+    { "at_ms": 200, "type": "key_tap", "code": "Digit1", "key": "1", "hold_ms": 30 },
+    { "at_ms": 600, "type": "assert_painter_primary_tool", "tool": "pencil" },
+    { "at_ms": 900, "type": "key_tap", "code": "Digit2", "key": "2", "hold_ms": 30 },
+    { "at_ms": 1020, "type": "key_tap", "code": "Digit2", "key": "2", "hold_ms": 30 },
+    { "at_ms": 1400, "type": "assert_painter_secondary_tool", "tool": "eraser" },
+    { "at_ms": 1700, "type": "key_tap", "code": "Digit1", "key": "1", "hold_ms": 30 },
+    { "at_ms": 1820, "type": "key_tap", "code": "Digit0", "key": "0", "hold_ms": 30 },
+    { "at_ms": 2300, "type": "assert_painter_primary_tool", "tool": "selectangle" },
+    { "at_ms": 2600, "type": "key_tap", "code": "Digit1", "key": "1", "hold_ms": 30 },
+    { "at_ms": 2720, "type": "key_tap", "code": "Digit3", "key": "3", "hold_ms": 30 },
+    { "at_ms": 3200, "type": "assert_painter_primary_tool", "tool": "paste" }
+  ]
+}

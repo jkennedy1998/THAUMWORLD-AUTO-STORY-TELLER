@@ -31,7 +31,7 @@ This repo is designed to be worked on by humans and LLM agents without needing �
 
 - `docs/archive/` (historical)
 - `docs/analysis/` (preserved retrospectives; useful for debugging, not for “current truth”)
-- Old pipeline descriptions that assume `interpreter_ai` is live (it’s archived in this build)
+- Old pipeline descriptions that do not match the current ActionPipeline-first runtime
 
 ## Local Workflow (Slot 1)
 
