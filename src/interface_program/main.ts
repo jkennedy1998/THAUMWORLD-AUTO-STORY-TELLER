@@ -9742,6 +9742,7 @@ import {
   hasValidTarget 
 } from "./target_state.js";
 import { handleTargetRoute } from "./target/route.js";
+import { handleSessionHealthRoute } from "./session_health/route.js";
 import { 
   setVolume, 
   getVolume, 
@@ -11203,100 +11204,21 @@ function start_http_server(log_path: string): void {
             return;
         }
 
-        if (url.pathname === "/api/log") {
-            if (req.method !== "GET") {
-                res.writeHead(405, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
-                return;
-            }
-
-            const slot_raw = url.searchParams.get("slot");
-            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
-            if (!Number.isFinite(slot) || slot <= 0) {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
-                return;
-            }
-
-            try {
-                const log = read_log(get_log_path(slot));
-                const all = url.searchParams.get("all") === "1";
-                const messages = all ? log.messages : log.messages.filter((m) => isCurrentSession(m));
-                res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, messages }));
-            } catch (err: any) {
-                res.writeHead(500, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: err?.message ?? "read_failed" }));
-            }
-            return;
-        }
-
-        if (url.pathname === "/api/status") {
-            if (req.method !== "GET") {
-                res.writeHead(405, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
-                return;
-            }
-
-            const slot_raw = url.searchParams.get("slot");
-            const slot = slot_raw ? Number(slot_raw) : data_slot_number;
-            if (!Number.isFinite(slot) || slot <= 0) {
-                res.writeHead(400, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "invalid_slot" }));
-                return;
-            }
-
-            try {
-                const status = read_status(get_status_path(slot));
-                const time: GameTime | null = load_time(slot);
-                res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({
-                    ok: true,
-                    status,
-                    game_time: time,
-                    time_short: time ? format_short_time(time) : null,
-                    day: time ? time.day : null,
-                }));
-            } catch (err: any) {
-                res.writeHead(500, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: err?.message ?? "read_failed" }));
-            }
-            return;
-        }
-
-        if (url.pathname === "/api/health") {
-            if (req.method !== "GET") {
-                res.writeHead(405, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
-                return;
-            }
-
-            // Check if services are responsive by checking recent log activity
-            try {
-                const log = read_log(log_path);
-                const recentMessages = log.messages.slice(-10);
-                const serviceActivity: Record<string, number> = {};
-                
-                for (const msg of recentMessages) {
-                    const sender = msg.sender?.toLowerCase() ?? 'unknown';
-                    serviceActivity[sender] = (serviceActivity[sender] ?? 0) + 1;
-                }
-
-                res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ 
-                    ok: true, 
-                    status: "healthy",
-                    session_id: SESSION_ID,
-                    services: {
-                        interface_program: true,
-                        recent_activity: serviceActivity,
-                        total_recent_messages: recentMessages.length
-                    }
-                }));
-            } catch (err: any) {
-                res.writeHead(500, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: err?.message ?? "health_check_failed" }));
-            }
+        if (handleSessionHealthRoute({
+            req,
+            res,
+            data_slot_number,
+            deps: {
+                read_log,
+                read_status,
+                load_time,
+                format_short_time,
+                get_log_path,
+                get_status_path,
+                session_id: SESSION_ID,
+                isCurrentSession,
+            },
+        })) {
             return;
         }
 
@@ -15824,28 +15746,6 @@ function start_http_server(log_path: string): void {
                 error: "deprecated",
                 message: "Use /api/movement/intent or /api/movement/move_to (server-authoritative movement)."
             }));
-            return;
-        }
-
-        if (url.pathname === "/api/health/session") {
-            if (req.method !== "GET") {
-                res.writeHead(405, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: "method_not_allowed" }));
-                return;
-            }
-
-            // Dedicated session health endpoint
-            try {
-                res.writeHead(200, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ 
-                    ok: true, 
-                    session_id: SESSION_ID,
-                    status: "session_active"
-                }));
-            } catch (err: any) {
-                res.writeHead(500, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: false, error: err?.message ?? "session_check_failed" }));
-            }
             return;
         }
 

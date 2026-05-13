@@ -534,7 +534,7 @@ export function log_sense_broadcast(
   entity_ref: string,
   verb: string,
   subtype: string | undefined,
-  location: { x: number; y: number }
+  location: { x: number; y: number; z?: number }
 ): void {
   const profile = get_sense_profile(verb, subtype);
   if (!profile) return;
@@ -552,7 +552,11 @@ export function log_sense_broadcast(
         window.dispatchEvent(new CustomEvent('thaumworld_ui_sense_broadcast', {
           detail: {
             source_ref: entity_ref,
-            origin: { x: location.x, y: location.y, z: NaN },
+            origin: {
+              x: location.x,
+              y: location.y,
+              z: Number.isFinite(Number(location.z)) ? Math.floor(Number(location.z)) : NaN,
+            },
             sense: b.sense,
             range: b.range_tiles,
           }

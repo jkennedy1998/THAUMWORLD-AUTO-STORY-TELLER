@@ -10,10 +10,10 @@
     "maxZ": 12
   },
   "occupied_bounds": {
-    "minX": -15,
+    "minX": -18,
     "minY": -41,
     "minZ": -1,
-    "maxX": 20,
+    "maxX": 21,
     "maxY": 41,
     "maxZ": 12
   },
@@ -63948,7 +63948,7 @@
     "orientation": "xy",
     "principal_view": "bottom",
     "roll_quarter_turn": 3,
-    "focus_plane": 2,
+    "focus_plane": 0,
     "parallax_intensity": 0.7,
     "show_all_layers": false,
     "use_focus_layer_opacity": false,

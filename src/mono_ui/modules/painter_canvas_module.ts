@@ -34,7 +34,8 @@ import type { CameraAnchor } from '../runtime/camera_anchor_runtime.js';
 import { get_principal_view_plane_axis, make_place_view_state, map_screen_direction_to_world_delta, project_world_point_with_roll, remap_world_offset_between_views, step_place_view_action, unproject_plane_point_with_roll, type PlaceViewState } from '../runtime/place_view_projection.js';
 import { diag_log } from '../../shared/diagnostics.js';
 import { create_painter_canvas_pan_adapter } from './adapters/painter_canvas_pan_adapter.js';
-import { cells_match_edit_channels, get_flood_fill_voxels } from '../../shared/painter_tools.js';
+import { cells_match_edit_channels } from '../../shared/painter_tools.js';
+import { get_flood_fill_voxels } from '../../shared/geometry/voxel_raster.js';
 import {
   order_resolved_targets,
   type OrderedResolvedTargets,

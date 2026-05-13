@@ -254,14 +254,14 @@ Broadcast and perception debug rendering should render from canonical world/z pa
 
 ## Phase 1 - Define canonical shared perception builder surface
 
-- [ ] Introduce or extract a shared helper layer for canonical perception event building.
+- [~] Introduce or extract a shared helper layer for canonical perception event building.
 - [ ] Factor shared event-building concerns out of `src/shared/movement_perception_runtime.ts` and/or `src/action_system/perception.ts` without creating a second runtime authority.
-- [ ] Standardize the canonical meaning of:
-  - [ ] `detectable`
-  - [ ] `bestSense`
-  - [ ] `detections`
-  - [ ] `observerPositionWorld`
-  - [ ] `actorPositionWorld`
+- [~] Standardize the canonical meaning of:
+  - [~] `detectable`
+  - [~] `bestSense`
+  - [~] `detections`
+  - [~] `observerPositionWorld`
+  - [~] `actorPositionWorld`
   - [ ] `actorVisibility`
   - [ ] `identityKnown`
   - [ ] `locationKnown`
@@ -269,8 +269,8 @@ Broadcast and perception debug rendering should render from canonical world/z pa
 
 ## Phase 2 - Unify observer discovery
 
-- [ ] Replace non-movement action perception candidate gathering with the same observer discovery model used by movement.
-- [ ] Reuse `src/shared/broadcast_observers.ts` or shared helpers extracted from it.
+- [x] Replace non-movement action perception candidate gathering with the same observer discovery model used by movement.
+- [x] Reuse `src/shared/broadcast_observers.ts` or shared helpers extracted from it.
 - [ ] Ensure action broadcasts can reach valid observers across adjacent places when sense/range rules allow.
 - [ ] Preserve self-exclusion and actor/npc handling semantics.
 - [ ] Add targeted logs comparing old candidate counts vs new candidate counts during rollout.
@@ -288,7 +288,7 @@ Broadcast and perception debug rendering should render from canonical world/z pa
 
 ## Phase 4 - Unify awareness mutation from canonical action perception
 
-- [ ] Route non-movement action perception awareness updates through `src/shared/awareness_runtime.ts`.
+- [x] Route non-movement action perception awareness updates through `src/shared/awareness_runtime.ts`.
 - [ ] Avoid adapter-only awareness hooks as the only path.
 - [ ] Review whether `src/state_applier/apply.ts` duplicate-skip behavior is acceptable for explicit scripted awareness effects.
 - [ ] Separate explicit scripted awareness effects from ordinary sensory awareness updates in docs and implementation.
@@ -302,8 +302,8 @@ Broadcast and perception debug rendering should render from canonical world/z pa
 
 ## Phase 6 - Canonical debug / visualization path
 
-- [ ] Change debug sense broadcast rendering to consume authoritative world/z origins.
-- [ ] Remove `z: NaN` style fallback payloads from canonical debug events.
+- [~] Change debug sense broadcast rendering to consume authoritative world/z origins.
+- [~] Remove `z: NaN` style fallback payloads from canonical debug events.
 - [ ] Ensure renderer particles for broadcasts/vision reflect the same event semantics gameplay uses.
 - [ ] Keep optional local-only UX particles clearly separate from authoritative debug visualization.
 

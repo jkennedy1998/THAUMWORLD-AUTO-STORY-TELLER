@@ -7,12 +7,12 @@
 import type { Grid, GridCell, GridPoint, Brush, ToolType, AppearanceSlotTargetMask } from './types.js';
 import { clone_appearance_slot_assignments, DEFAULT_APPEARANCE_SLOT_TARGET_MASK, get_enabled_appearance_slots, getCell, setCell } from './types.js';
 import type { EditChannels } from './edit_mask.js';
+import { get_flood_fill_points } from '../shared/painter_tools.js';
 import {
-  get_flood_fill_points,
   get_line_points,
   get_rect_fill_points,
   get_rect_stroke_points,
-} from '../shared/painter_tools.js';
+} from '../shared/geometry/plane_raster.js';
 
 /**
  * Draw a single cell with the brush

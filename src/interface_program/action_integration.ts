@@ -2,11 +2,15 @@
 // Simplified interface for Interface Program to use ActionPipeline
 
 import { ActionPipeline, type ActionIntent, type ActionResult } from "../action_system/index.js";
+import type { PerceptionEvent } from "../action_system/perception.js";
 import { load_actor } from "../actor_storage/store.js";
 import { find_npcs, load_npc } from "../npc_storage/store.js";
 import { has_awareness_entry } from "../shared/awareness.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { getAvailableTargets } from "../action_system/target_resolution.js";
+import { get_senses_for_action } from "../action_system/sense_broadcast.js";
+import { get_broadcast_observer_candidates } from "../shared/broadcast_observers.js";
+import { update_awareness_from_perception } from "../shared/awareness_runtime.js";
 import { debug_log, debug_warn } from "../shared/debug.js";
 import { can_actor_afford_action_cost, can_actor_afford_movement_cost, consume_actor_action_cost, consume_actor_movement_cost, get_active_actor_ref, is_timed_event_active } from "../world_storage/store.js";
 import { finalize_timed_event_turn_if_exhausted } from "../timed_events/runtime.js";
@@ -46,6 +50,55 @@ function createPipelineDependencies(dataSlot: number) {
       return getAvailableTargets(location, radius);
     },
     
+    getPerceptionObservers: async (intent: ActionIntent) => {
+      const place_id = typeof intent.actorLocation?.place_id === "string" ? intent.actorLocation.place_id : "";
+      const x = Number(intent.actorLocation?.x);
+      const y = Number(intent.actorLocation?.y);
+      if (!place_id || !Number.isFinite(x) || !Number.isFinite(y)) {
+        debug_warn("ActionPipeline", "perception_observers_missing_actor_place", {
+          actor_ref: intent.actorRef,
+          verb: intent.verb,
+          place_id,
+          x,
+          y,
+        });
+        return [];
+      }
+
+      const subtype_raw = typeof intent.parameters?.subtype === "string"
+        ? intent.parameters.subtype
+        : typeof intent.parameters?.volume === "string"
+          ? intent.parameters.volume
+          : undefined;
+      const subtype = typeof subtype_raw === "string" ? subtype_raw.toUpperCase() : undefined;
+      const broadcasts = get_senses_for_action(intent.verb, subtype);
+      const candidates = get_broadcast_observer_candidates({
+        slot: dataSlot,
+        source_place_id: place_id,
+        source_position: {
+          x: Math.floor(x),
+          y: Math.floor(y),
+          z: Number.isFinite(Number(intent.actorLocation?.z)) ? Math.floor(Number(intent.actorLocation.z)) : 0,
+        },
+        broadcasts,
+        exclude_refs: [intent.actorRef],
+      });
+
+      return candidates.map((candidate) => ({
+        ref: candidate.ref,
+        location: {
+          world_x: candidate.location.x,
+          world_y: candidate.location.y,
+          region_x: candidate.location.x,
+          region_y: candidate.location.y,
+          x: candidate.location.x,
+          y: candidate.location.y,
+          z: candidate.location.z,
+          place_id: candidate.location.place_id,
+        },
+      }));
+    },
+
     // Get actor location
     getActorLocation: async (actorRef: string) => {
       if (actorRef.startsWith("actor.")) {
@@ -155,6 +208,10 @@ function createPipelineDependencies(dataSlot: number) {
         return null;
       },
     
+    recordPerceivedAwareness: async (event: PerceptionEvent) => {
+      update_awareness_from_perception(dataSlot, event);
+    },
+
     // Execute effect
     executeEffect: async (effect: any) => {
       // Not implemented: persistent effect execution.

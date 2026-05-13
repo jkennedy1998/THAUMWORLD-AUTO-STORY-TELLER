@@ -55,6 +55,7 @@ export interface PipelineDependencies {
   getDataSlot: () => number;
   // Storage access
   getAvailableTargets: (location: Location, radius: number) => Promise<AvailableTarget[]>;
+  getPerceptionObservers?: (intent: ActionIntent) => Promise<Array<{ ref: string; location: Location }>>;
   getActorLocation: (actorRef: string) => Promise<Location | null>;
   checkActorAwareness: (actorRef: string, targetRef: string) => Promise<boolean>;
   checkActionCost: (actorRef: string, cost: ActionCost, intent?: ActionIntent) => Promise<boolean>;
@@ -449,6 +450,7 @@ export class ActionPipeline {
     const events = await broadcastPerception(intent, "before", undefined, {
       dataSlot: this.deps.getDataSlot(),
       getCharactersInRange: this.deps.getAvailableTargets,
+      getPerceptionObservers: this.deps.getPerceptionObservers,
       onPerceived: this.deps.recordPerceivedAwareness,
     });
     
@@ -719,7 +721,7 @@ export class ActionPipeline {
         intent.actorRef,
         intent.verb,
         intent.parameters.subtype as string | undefined,
-        { x: intent.actorLocation.x ?? 0, y: intent.actorLocation.y ?? 0 }
+        { x: intent.actorLocation.x ?? 0, y: intent.actorLocation.y ?? 0, z: intent.actorLocation.z }
       );
     }
     
@@ -727,6 +729,7 @@ export class ActionPipeline {
     const events = await broadcastPerception(intent, "after", result, {
       dataSlot: this.deps.getDataSlot(),
       getCharactersInRange: this.deps.getAvailableTargets,
+      getPerceptionObservers: this.deps.getPerceptionObservers,
       onPerceived: this.deps.recordPerceivedAwareness,
     });
     

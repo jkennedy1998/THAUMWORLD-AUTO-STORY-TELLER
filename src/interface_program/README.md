@@ -45,29 +45,37 @@ This folder is moving toward feature-folder encapsulation:
 
 Transitional `routes/` and `services/` files may remain as compatibility shims while seams are moved into feature folders.
 
-## First extracted seam
+## Extracted seams
 
-The first low-risk extraction is target selection:
+### `target/`
 
 - `target/README.md`
 - `target/route.ts`
 - `target/service.ts`
 - backing state: `target_state.ts`
 
-### What it does
-
 Handles `/api/target` by:
 - authorizing the actor
 - setting or clearing the selected target
 - returning a stable result payload
 
-### Why this was first
-
-It is:
+Why it was first:
 - small
 - already partially encapsulated
 - low risk
 - useful to non-HTTP callers
+
+### `session_health/`
+
+- `session_health/README.md`
+- `session_health/route.ts`
+- `session_health/service.ts`
+
+Handles read-only operational endpoints:
+- `/api/log`
+- `/api/status`
+- `/api/health`
+- `/api/health/session`
 
 ## Rule of thumb for future work
 

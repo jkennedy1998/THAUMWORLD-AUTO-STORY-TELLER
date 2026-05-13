@@ -9,6 +9,7 @@ import { calculateDistance } from "./target_resolution.js";
 import { DEBUG_LEVEL } from "../shared/debug.js";
 import { debug_event } from "../shared/debug_event.js";
 import { evaluate_sense_detection, get_observer_sense_mag, is_supported_runtime_sense } from "../shared/sense_mag.js";
+import { get_region_place_index_record } from "../place_storage/region_place_index.js";
 
 // Perception event types
 export type PerceptionEventType = 
@@ -245,6 +246,43 @@ function make_fallback_detection(sense: SenseType, clarity: PerceptionClarity): 
   };
 }
 
+function to_world_location(dataSlot: number, location: Location): Location {
+  const local_x = Number(location.x);
+  const local_y = Number(location.y);
+  const local_z = Number(location.z);
+  const place_id = typeof location.place_id === "string" ? location.place_id : undefined;
+  const bounds = place_id ? get_region_place_index_record(dataSlot, place_id)?.bounds ?? null : null;
+
+  if (bounds && Number.isFinite(local_x) && Number.isFinite(local_y)) {
+    const world_x = bounds.origin.x + Math.floor(local_x);
+    const world_y = bounds.origin.y + Math.floor(local_y);
+    const world_z = bounds.origin.z + (Number.isFinite(local_z) ? Math.floor(local_z) : 0);
+    return {
+      world_x,
+      world_y,
+      region_x: world_x,
+      region_y: world_y,
+      x: world_x,
+      y: world_y,
+      z: world_z,
+      place_id,
+    };
+  }
+
+  const fallback_world_x = Number.isFinite(Number(location.world_x)) ? Number(location.world_x) : (Number.isFinite(local_x) ? Number(local_x) : 0);
+  const fallback_world_y = Number.isFinite(Number(location.world_y)) ? Number(location.world_y) : (Number.isFinite(local_y) ? Number(local_y) : 0);
+  return {
+    world_x: fallback_world_x,
+    world_y: fallback_world_y,
+    region_x: Number.isFinite(Number(location.region_x)) ? Number(location.region_x) : fallback_world_x,
+    region_y: Number.isFinite(Number(location.region_y)) ? Number(location.region_y) : fallback_world_y,
+    x: Number.isFinite(local_x) ? Number(local_x) : fallback_world_x,
+    y: Number.isFinite(local_y) ? Number(local_y) : fallback_world_y,
+    z: Number.isFinite(local_z) ? Number(local_z) : undefined,
+    place_id,
+  };
+}
+
 // Check if observer can perceive an action
 export async function checkPerception(
   dataSlot: number,
@@ -258,7 +296,9 @@ export async function checkPerception(
     return { canPerceive: false, clarity: "obscured", senses: [], distance: 0, details: {} };
   }
   
-  const distance = calculateDistance(observerLocation, actorLocation);
+  const observer_world_location = to_world_location(dataSlot, observerLocation);
+  const actor_world_location = to_world_location(dataSlot, actorLocation);
+  const distance = calculateDistance(observer_world_location, actor_world_location);
   const perceptibility = actionDef.perceptibility;
   const subtype_raw = typeof intent.parameters?.subtype === "string"
     ? intent.parameters.subtype
@@ -310,8 +350,8 @@ export async function checkPerception(
       detectable: true,
       bestSense: best.sense,
       detections: runtime_detections,
-      observerPositionWorld: observerLocation,
-      actorPositionWorld: actorLocation,
+      observerPositionWorld: observer_world_location,
+      actorPositionWorld: actor_world_location,
       details: {},
       obscured: !anyIdentity,
     };
@@ -346,8 +386,8 @@ export async function checkPerception(
     detectable: true,
     bestSense: fallback_detections[0]?.sense,
     detections: fallback_detections,
-    observerPositionWorld: observerLocation,
-    actorPositionWorld: actorLocation,
+    observerPositionWorld: observer_world_location,
+    actorPositionWorld: actor_world_location,
     details: {},
     obscured: !identityKnown
   };
@@ -502,6 +542,7 @@ export async function broadcastPerception(
   options: {
     dataSlot: number;
     getCharactersInRange?: (location: Location, radius: number) => Promise<Array<{ ref: string; location: Location }>>;
+    getPerceptionObservers?: (intent: ActionIntent) => Promise<Array<{ ref: string; location: Location }>>;
     onPerceived?: (event: PerceptionEvent) => Promise<void>;
   }
 ): Promise<PerceptionEvent[]> {
@@ -554,10 +595,20 @@ export async function broadcastPerception(
   // Get nearby characters
   const nearbyCharacters: Array<{ ref: string; location: Location }> = [];
   
-  if (options.getCharactersInRange) {
+  if (options.getPerceptionObservers) {
+    const chars = await options.getPerceptionObservers(intent);
+    if (DEBUG_LEVEL >= 4) {
+      debug_event("PERCEPTION", "broadcast.nearby_characters", {
+        source: "getPerceptionObservers",
+        count: chars.length,
+      });
+    }
+    nearbyCharacters.push(...chars);
+  } else if (options.getCharactersInRange) {
     const chars = await options.getCharactersInRange(intent.actorLocation, radius);
     if (DEBUG_LEVEL >= 4) {
       debug_event("PERCEPTION", "broadcast.nearby_characters", {
+        source: "getCharactersInRange",
         count: chars.length,
       });
     }
@@ -567,7 +618,7 @@ export async function broadcastPerception(
       timing,
       verb: intent.verb,
       actor_ref: intent.actorRef,
-      reason: "no_getCharactersInRange",
+      reason: "no_observer_source",
     });
   }
   

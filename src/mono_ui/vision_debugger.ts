@@ -19,8 +19,10 @@
 import type { TilePosition } from "../types/place.js";
 import type { SenseType } from "../action_system/perception.js";
 import type { Direction } from "../npc_ai/facing_system.js";
-import { trace_voxel_ray_3d } from "../shared/math3d.js";
-import { sphere_plane_intersection_radius } from "../shared/math3d.js";
+import {
+  get_sphere_outline_plane_slices,
+  project_vision_cone_to_planes,
+} from "../shared/geometry/shape3d.js";
 
 /** Particle type matching the place module */
 export type Particle = {
@@ -104,10 +106,6 @@ export type BlocksLosAt = (x: number, y: number, world_z: number) => boolean;
 export type WorldPos = { x: number; y: number; z: number };
 export type VisiblePlanesZ = readonly number[];
 
-function clamp_int(n: number, lo: number, hi: number): number {
-  return Math.max(lo, Math.min(hi, Math.trunc(n)));
-}
-
 function plane_index_for_world_z(world_z: number, planes: VisiblePlanesZ): number {
   const z = Number(world_z);
   if (!Number.isFinite(z)) return Math.floor(planes.length / 2);
@@ -170,72 +168,39 @@ function vision_vertical_fov_deg_for_mag(mag: number): number {
   return Math.max(5, Math.min(120, out));
 }
 
-function add_circle_points(keys: Set<string>, cx: number, cy: number, x: number, y: number): void {
-  keys.add(`${cx + x},${cy + y}`);
-  keys.add(`${cx - x},${cy + y}`);
-  keys.add(`${cx + x},${cy - y}`);
-  keys.add(`${cx - x},${cy - y}`);
-  keys.add(`${cx + y},${cy + x}`);
-  keys.add(`${cx - y},${cy + x}`);
-  keys.add(`${cx + y},${cy - x}`);
-  keys.add(`${cx - y},${cy - x}`);
-}
-
-function circle_outline_keys(cx: number, cy: number, r: number): Set<string> {
-  const rr = Math.max(0, Math.floor(r));
-  const keys = new Set<string>();
-  if (rr <= 0) {
-    keys.add(`${cx},${cy}`);
-    return keys;
-  }
-  let x = rr;
-  let y = 0;
-  let err = 0;
-  while (x >= y) {
-    add_circle_points(keys, cx, cy, x, y);
-    y++;
-    if (err <= 0) {
-      err += 2 * y + 1;
-    }
-    if (err > 0) {
-      x--;
-      err -= 2 * x + 1;
-    }
-  }
-  return keys;
-}
-
 function spawn_ring_tint(opts: {
-  origin: { x: number; y: number };
+  origin: WorldPos;
   radius: number;
   rgb: { r: number; g: number; b: number };
   now: number;
   lifespan_ms: number;
   weight: number;
-  world_z: 0 | 1 | 2;
-}): number {
-  const range = Number(opts.radius);
-  if (!Number.isFinite(range) || range <= 0) return 0;
-
-  // 1-cell shell: ring is the last-heard boundary.
-  // Quantize to integer radius so adjacent z-slices differ when they should.
-  const r0 = Math.max(0, Math.floor(range + 1e-6));
-  const ring_keys = circle_outline_keys(Math.round(opts.origin.x), Math.round(opts.origin.y), r0);
-  for (const key of ring_keys) {
-    const [xs, ys] = key.split(",");
-    spawn_debug_particle({
-      x: Number(xs),
-      y: Number(ys),
-      world_z: opts.world_z,
-      char: "•",
-      rgb: opts.rgb,
-      created_at: opts.now,
-      lifespan_ms: opts.lifespan_ms,
-      weight: opts.weight,
-      op: 'tint_fg',
-    });
+  visible_planes_z: VisiblePlanesZ;
+}): number[] {
+  const slices = get_sphere_outline_plane_slices({
+    origin: opts.origin,
+    radius: opts.radius,
+    visible_planes_z: opts.visible_planes_z,
+  });
+  const counts = new Array<number>(opts.visible_planes_z.length).fill(0);
+  for (const slice of slices) {
+    counts[slice.plane_index] = slice.keys.size;
+    for (const key of slice.keys) {
+      const [xs, ys] = key.split(",");
+      spawn_debug_particle({
+        x: Number(xs),
+        y: Number(ys),
+        world_z: slice.plane_index,
+        char: "•",
+        rgb: opts.rgb,
+        created_at: opts.now,
+        lifespan_ms: opts.lifespan_ms,
+        weight: opts.weight,
+        op: 'tint_fg',
+      });
+    }
   }
-  return ring_keys.size;
+  return counts;
 }
 
 /**
@@ -292,79 +257,20 @@ export function spawn_vision_cone_particles(
   const vertical_fov_deg = vision_vertical_fov_deg_for_mag(vision_mag);
   if (cone.range_tiles <= 0 || cone.angle_degrees <= 0 || vertical_fov_deg <= 0) return;
 
-  const origin2: TilePosition = { x: origin.x, y: origin.y };
-
-  // 3Dification: draw vision as true 3D voxel raycasting within a yaw/pitch cone.
   const center_angle = direction_to_angle(direction);
-  const half_yaw = (cone.angle_degrees * Math.PI) / 180 / 2;
-  const half_pitch = (vertical_fov_deg * Math.PI) / 180 / 2;
-
-  const slot_by_world_z = new Map<number, number>();
-  for (let i = 0; i < visible_planes_z.length; i += 1) {
-    const wz = visible_planes_z[i];
-    if (typeof wz === 'number' && Number.isFinite(wz)) slot_by_world_z.set(Math.floor(wz), i);
-  }
-
-  const vis_sets = visible_planes_z.map(() => new Set<string>());
-  const out_sets = visible_planes_z.map(() => new Set<string>());
-  const fallback_slot = Math.floor(visible_planes_z.length / 2);
-  const sets_for_slot = (slot: number): Set<string> => vis_sets[slot] ?? vis_sets[fallback_slot]!;
-  const outline_for_slot = (slot: number): Set<string> => out_sets[slot] ?? out_sets[fallback_slot]!;
-
-  const origin_cont = { x: origin2.x + 0.5, y: origin2.y + 0.5, z: origin.z + 0.5 };
-
-  const range = cone.range_tiles;
-  const yaw_steps = Math.max(30, Math.min(90, Math.floor(range * 6)));
-  let pitch_steps = Math.max(5, Math.min(13, Math.floor(vertical_fov_deg / 8)));
-  if (pitch_steps % 2 === 0) pitch_steps += 1;
-
-  let rays_cast = 0;
-  let rays_blocked = 0;
-  let vox_steps = 0;
-
-  const cast_ray = (yaw: number, pitch: number, boundary: boolean) => {
-    const cp = Math.cos(pitch);
-    const dir = { x: cp * Math.cos(yaw), y: cp * Math.sin(yaw), z: Math.sin(pitch) };
-    let blocked = false;
-    const oxv = Math.floor(origin_cont.x);
-    const oyv = Math.floor(origin_cont.y);
-    const ozv = Math.floor(origin_cont.z);
-
-    trace_voxel_ray_3d(origin_cont, dir, range, (vx, vy, vz, _t) => {
-      vox_steps++;
-      const slot = slot_by_world_z.get(vz);
-      if (slot !== undefined) {
-        const key = `${vx},${vy}`;
-        sets_for_slot(slot).add(key);
-        if (boundary) outline_for_slot(slot).add(key);
-      }
-
-      // Never let the observer voxel block its own rays.
-      if (vx === oxv && vy === oyv && vz === ozv) {
-        return;
-      }
-
-      if (blocks_los_at && blocks_los_at(vx, vy, vz)) {
-        blocked = true;
-        return false;
-      }
-    });
-    if (blocked) rays_blocked++;
-  };
-
-  // Core ray grid.
-  for (let iy = 0; iy <= yaw_steps; iy++) {
-    const ty = yaw_steps > 0 ? (iy / yaw_steps) : 0;
-    const yaw = center_angle + (-half_yaw + (2 * half_yaw) * ty);
-    for (let ip = 0; ip <= pitch_steps; ip++) {
-      const tp = pitch_steps > 0 ? (ip / pitch_steps) : 0;
-      const pitch = -half_pitch + (2 * half_pitch) * tp;
-      const boundary = DEBUG_VISION.show_vision_cones && (iy === 0 || iy === yaw_steps || ip === 0 || ip === pitch_steps);
-      rays_cast++;
-      cast_ray(yaw, pitch, boundary);
-    }
-  }
-
+  const projection = project_vision_cone_to_planes({
+    origin,
+    center_yaw_rad: center_angle,
+    yaw_fov_deg: cone.angle_degrees,
+    pitch_fov_deg: vertical_fov_deg,
+    range: cone.range_tiles,
+    visible_planes_z,
+    include_boundary: DEBUG_VISION.show_vision_cones,
+    blocks_los_at,
+  });
+  const vis_sets = projection.visible_by_plane;
+  const out_sets = projection.outline_by_plane;
+  const { rays_cast, rays_blocked, vox_steps } = projection.stats;
 
   if (DEBUG_VISION.show_visible_vision) {
     const spawn_set = (slot: number, set: Set<string>) => {
@@ -438,29 +344,24 @@ export function spawn_hearing_range_particles(
   const hearing_range = hearing_range_tiles_for_mag(pressure_mag);
   if (hearing_range <= 0) return;
 
-  // 3D hearing sphere projected onto the currently visible planes.
-  for (let plane_idx = 0 as 0 | 1 | 2; plane_idx <= 2; plane_idx = ((plane_idx + 1) as any)) {
-    const plane_z = Number(visible_planes_z[plane_idx]);
-    const r_plane = sphere_plane_intersection_radius(hearing_range, plane_z - origin.z);
-    if (r_plane === null || r_plane <= 0) continue;
-    spawn_ring_tint({
-      origin: { x: origin.x, y: origin.y },
-      radius: r_plane,
-      rgb: { r: 0, g: 255, b: 255 },
-      now,
-      lifespan_ms: 900,
-      weight: 7,
-      world_z: plane_idx,
-    });
-  }
+  const hearing_slices = get_sphere_outline_plane_slices({ origin, radius: hearing_range, visible_planes_z });
+  spawn_ring_tint({
+    origin,
+    radius: hearing_range,
+    rgb: { r: 0, g: 255, b: 255 },
+    now,
+    lifespan_ms: 900,
+    weight: 7,
+    visible_planes_z,
+  });
 
   // Debug: show slice radii/quantization.
   const dbg_key = `hearing:${entity_ref}`;
   const last_dbg = last_broadcast3d_log_by_key.get(dbg_key) ?? 0;
   if (now - last_dbg > 1200) {
     last_broadcast3d_log_by_key.set(dbg_key, now);
-    const radii = visible_planes_z.map((pz) => sphere_plane_intersection_radius(hearing_range, Number(pz) - origin.z));
-    const quant = radii.map((r) => (r === null ? 0 : Math.max(0, Math.floor(r + 1e-6))));
+    const radii = hearing_slices.map((slice) => slice.radius);
+    const quant = hearing_slices.map((slice) => slice.quantized_radius);
     debug_log(
       'VisionDebug',
       `Hearing3D ${entity_ref} mag=${pressure_mag} range=${hearing_range} origin_z=${origin.z} planes=[${visible_planes_z.join(',')}] radii=[${radii.map(r => (r === null ? 'x' : r.toFixed(2))).join(',')}] quant=[${quant.join(',')}]`
@@ -486,25 +387,18 @@ export function spawn_sense_broadcast_particles(opts: {
   const color = get_sense_color(opts.sense);
   const now = Date.now();
 
-  const counts: number[] = [0, 0, 0];
-  const radii: Array<number | null> = [null, null, null];
-  const quant: number[] = [0, 0, 0];
-  for (let plane_idx = 0 as 0 | 1 | 2; plane_idx <= 2; plane_idx = ((plane_idx + 1) as any)) {
-    const plane_z = Number(opts.visible_planes_z[plane_idx]);
-    const r_plane = sphere_plane_intersection_radius(range, plane_z - origin.z);
-    radii[plane_idx] = r_plane;
-    quant[plane_idx] = (r_plane === null) ? 0 : Math.max(0, Math.floor(r_plane + 1e-6));
-    if (r_plane === null || r_plane <= 0) continue;
-    counts[plane_idx] = spawn_ring_tint({
-      origin: { x: origin.x, y: origin.y },
-      radius: r_plane,
-      rgb: color,
-      now,
-      lifespan_ms: 900,
-      weight: 7,
-      world_z: plane_idx,
-    });
-  }
+  const slices = get_sphere_outline_plane_slices({ origin, radius: range, visible_planes_z: opts.visible_planes_z });
+  const counts = spawn_ring_tint({
+    origin,
+    radius: range,
+    rgb: color,
+    now,
+    lifespan_ms: 900,
+    weight: 7,
+    visible_planes_z: opts.visible_planes_z,
+  });
+  const radii = slices.map((slice) => slice.radius);
+  const quant = slices.map((slice) => slice.quantized_radius);
 
   const src = typeof opts.source_ref === 'string' && opts.source_ref.length > 0 ? opts.source_ref : 'broadcast';
   const log_key = `${src}:${opts.sense}`;
