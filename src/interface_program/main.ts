@@ -8209,8 +8209,31 @@ function handle_item_spoils_tag_breath(ctx: BreathReactiveRouteContext, target: 
 
     const current_breath = Math.floor(Number(ctx.breath_index ?? 0)) || 0;
     const initial_last = Number(item.last_breath_processed);
+    const initial_tag_state = resolve_tag_state_from_instance(tag as any);
+    const initial_config = normalize_spoils_config(build_spoils_tag_config(initial_tag_state));
+    if (!initial_config) {
+        debug_warn('SPOILS', 'item has SPOILS tag but no valid spoil config', {
+            place_id: ctx.state.place_id,
+            def_id: String(item?.def_id ?? ''),
+            breath_index: current_breath,
+            spoil_time_mag: Number((initial_tag_state?.dim_mag ?? {})?.spoil_time_mag ?? 0),
+        });
+        item.last_breath_processed = current_breath;
+        ctx.mark_dirty();
+        return;
+    }
+
     if (!Number.isFinite(initial_last)) {
         item.last_breath_processed = current_breath;
+        debug_log('SPOILS', 'item spoil tracker initialized', {
+            place_id: ctx.state.place_id,
+            def_id: String(item?.def_id ?? ''),
+            qty: Number(item?.qty ?? 1),
+            spoil_time_mag: Number((initial_tag_state?.dim_mag ?? {})?.spoil_time_mag ?? 0),
+            period_breaths: initial_config.period_breaths,
+            result_item_def_id: initial_config.result_item_def_id,
+            breath_index: current_breath,
+        });
         ctx.mark_dirty();
         return;
     }
@@ -8230,6 +8253,16 @@ function handle_item_spoils_tag_breath(ctx: BreathReactiveRouteContext, target: 
         const delta = current_breath - last_processed;
         if (delta < config.period_breaths) break;
         last_processed += config.period_breaths;
+
+        debug_log('SPOILS', 'item spoil tick fired', {
+            place_id: ctx.state.place_id,
+            def_id: String(item?.def_id ?? ''),
+            qty: Number(item?.qty ?? 1),
+            spoil_time_mag: Number((resolve_tag_state_from_instance(active_tag as any)?.dim_mag ?? {})?.spoil_time_mag ?? 0),
+            period_breaths: config.period_breaths,
+            elapsed_breaths: delta,
+            breath_index: current_breath,
+        });
 
         if (!config.result_item_def_id) {
             debug_log('SPOILS', 'item spoiled and was deleted', {
@@ -8264,6 +8297,8 @@ function handle_item_spoils_tag_breath(ctx: BreathReactiveRouteContext, target: 
             from_def_id,
             to_def_id: config.result_item_def_id,
             qty: Number(item?.qty ?? 1),
+            spoil_time_mag: Number((resolve_tag_state_from_instance(active_tag as any)?.dim_mag ?? {})?.spoil_time_mag ?? 0),
+            period_breaths: config.period_breaths,
             breath_index: current_breath,
             last_processed: last_processed,
         });

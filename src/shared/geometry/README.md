@@ -39,6 +39,14 @@ Current first migrated helper surfaces:
 - `./shape3d.ts`
 - `./plane_raster.ts`
 - `./voxel_raster.ts`
+- `./raster2.ts`
+- `./raster3.ts`
+- `./raster_ops2.ts`
+- `./raster_ops3.ts`
+- `./shape_specs.ts`
+- `./shape_rasterize2.ts`
+- `./shape_rasterize3.ts`
+- `./selection_bridge.ts`
 
 Expected usage style:
 - pass explicit numeric coordinates and dimensions
@@ -74,3 +82,14 @@ Current repo alignment:
 - domain systems should increasingly consume this folder rather than owning duplicate shape logic
 
 The initial implementation starts by moving proto-geometry helpers out of `src/shared/shape3d.ts` and shared plane/voxel raster helpers out of `src/shared/painter_tools.ts` into this seam while preserving compatibility exports during migration.
+
+The current next steps add a minimal raster core and thin utility layer:
+- `Raster2<T>` in `./raster2.ts`
+- `Raster3<T>` in `./raster3.ts`
+- small create/get/set/index/in-bounds helpers only
+- `./raster_ops2.ts` for thin 2D draw/extract helpers
+- `./raster_ops3.ts` for thin 3D extract helpers
+- `./shape_specs.ts` for small shared shape specs and render-mode vocabulary
+- `./shape_rasterize2.ts` for first 2D shape-spec rasterizers, now including shared line/rect/polygon generation
+- `./shape_rasterize3.ts` for first 3D shape-spec rasterizers, now including shared line/box generation, editor-facing box-session rasterization, first sphere/cylinder/cone session rasterization, and used by painter rect-selection volume generation
+- `./selection_bridge.ts` for shared selection/world conversion helpers such as bitmap/depth expansion and brush/box selection world-cell generation

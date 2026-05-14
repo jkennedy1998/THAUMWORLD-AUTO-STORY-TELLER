@@ -17,7 +17,7 @@ import type { AppearanceSlotAssignments, AppearanceSlotValue, InlineMaterialAssi
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
 import { ALL_EDIT_CHANNELS, sanitize_edit_channels, type EditChannels } from './edit_mask.js';
 
-const VALID_TOOL_TYPES: readonly ToolType[] = ['pencil', 'eraser', 'line', 'rect_stroke', 'rect_fill', 'bucket', 'eyedropper', 'text', 'selectangle', 'lassoselect', 'copy', 'paste', 'move'] as const;
+const VALID_TOOL_TYPES: readonly ToolType[] = ['pencil', 'eraser', 'line', 'rect_stroke', 'rect_fill', 'shape', 'bucket', 'eyedropper', 'text', 'lassoselect', 'copy', 'paste', 'move'] as const;
 
 function clamp_integer(value: unknown, fallback: number, min: number, max: number): number {
   const n = typeof value === 'number' ? Math.trunc(value) : fallback;
@@ -106,7 +106,11 @@ function sanitize_appearance_slot_assignments(value: unknown): AppearanceSlotAss
 
 function sanitize_tool_type(value: unknown, fallback: ToolType): ToolType {
   if (value === 'weighter' || value === 'colorer') return 'pencil';
-  return typeof value === 'string' && (VALID_TOOL_TYPES as readonly string[]).includes(value) ? value as ToolType : fallback;
+  if (value === 'selectangle') return 'rect_stroke';
+  if (typeof value === 'string') {
+    return (VALID_TOOL_TYPES as readonly string[]).includes(value) ? value as ToolType : 'pencil';
+  }
+  return fallback;
 }
 
 function sanitize_tool_target(value: unknown, fallback: ToolEditTarget): ToolEditTarget {
@@ -115,6 +119,14 @@ function sanitize_tool_target(value: unknown, fallback: ToolEditTarget): ToolEdi
 
 function sanitize_paste_angle_mode(value: unknown, fallback: 'relative' | 'absolute'): 'relative' | 'absolute' {
   return value === 'absolute' || value === 'relative' ? value : fallback;
+}
+
+function sanitize_shape_primitive(value: unknown, fallback: 'box' | 'sphere' | 'cylinder' | 'cone'): 'box' | 'sphere' | 'cylinder' | 'cone' {
+  return value === 'sphere' || value === 'cylinder' || value === 'cone' || value === 'box' ? value : fallback;
+}
+
+function sanitize_shape_render_mode(value: unknown, fallback: 'outline' | 'fill'): 'outline' | 'fill' {
+  return value === 'outline' || value === 'fill' ? value : fallback;
 }
 
 function sanitize_boolean(value: unknown, fallback: boolean): boolean {
@@ -484,6 +496,8 @@ export interface ToolProperties {
   right_line_target: ToolEditTarget;
   left_rect_target: ToolEditTarget;
   right_rect_target: ToolEditTarget;
+  shape_primitive: 'box' | 'sphere' | 'cylinder' | 'cone';
+  shape_render_mode: 'outline' | 'fill';
   
   // Text tool settings
   text_spacing: number;
@@ -555,6 +569,8 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   right_line_target: 'content',
   left_rect_target: 'content',
   right_rect_target: 'content',
+  shape_primitive: 'box',
+  shape_render_mode: 'outline',
   text_spacing: 1,
   text_charlead: 0,
   text_enterlead: 1,
@@ -595,6 +611,8 @@ export function loadToolProperties(): ToolProperties {
     if (!data) return DEFAULT_TOOL_PROPERTIES;
     
     const parsed = JSON.parse(data) as Record<string, unknown>;
+    const legacy_left_selectangle = parsed.left_click_tool === 'selectangle';
+    const legacy_right_selectangle = parsed.right_click_tool === 'selectangle';
     const sanitized: ToolProperties = {
       brush_size: clamp_integer(parsed.brush_size, DEFAULT_TOOL_PROPERTIES.brush_size, 1, 5),
       left_brush_size: clamp_integer(parsed.left_brush_size ?? parsed.brush_size, DEFAULT_TOOL_PROPERTIES.left_brush_size, 1, 5),
@@ -627,8 +645,12 @@ export function loadToolProperties(): ToolProperties {
       rect_select_all_depths: sanitize_boolean(parsed.rect_select_all_depths, DEFAULT_TOOL_PROPERTIES.rect_select_all_depths),
       lasso_select_all_depths: sanitize_boolean(parsed.lasso_select_all_depths, DEFAULT_TOOL_PROPERTIES.lasso_select_all_depths),
       user_selection_color_rgb: sanitize_rgb(parsed.user_selection_color_rgb, DEFAULT_TOOL_PROPERTIES.user_selection_color_rgb),
-      left_target: sanitize_tool_target(parsed.left_target ?? parsed.left_pencil_target ?? parsed.left_eraser_target ?? parsed.left_bucket_target ?? parsed.left_line_target ?? parsed.left_rect_target, DEFAULT_TOOL_PROPERTIES.left_target),
-      right_target: sanitize_tool_target(parsed.right_target ?? parsed.right_pencil_target ?? parsed.right_eraser_target ?? parsed.right_bucket_target ?? parsed.right_line_target ?? parsed.right_rect_target, DEFAULT_TOOL_PROPERTIES.right_target),
+      left_target: legacy_left_selectangle
+        ? 'selection'
+        : sanitize_tool_target(parsed.left_target ?? parsed.left_pencil_target ?? parsed.left_eraser_target ?? parsed.left_bucket_target ?? parsed.left_line_target ?? parsed.left_rect_target, DEFAULT_TOOL_PROPERTIES.left_target),
+      right_target: legacy_right_selectangle
+        ? 'selection'
+        : sanitize_tool_target(parsed.right_target ?? parsed.right_pencil_target ?? parsed.right_eraser_target ?? parsed.right_bucket_target ?? parsed.right_line_target ?? parsed.right_rect_target, DEFAULT_TOOL_PROPERTIES.right_target),
       left_pencil_target: sanitize_tool_target(parsed.left_pencil_target, DEFAULT_TOOL_PROPERTIES.left_pencil_target),
       right_pencil_target: sanitize_tool_target(parsed.right_pencil_target, DEFAULT_TOOL_PROPERTIES.right_pencil_target),
       left_eraser_target: sanitize_tool_target(parsed.left_eraser_target, DEFAULT_TOOL_PROPERTIES.left_eraser_target),
@@ -637,8 +659,10 @@ export function loadToolProperties(): ToolProperties {
       right_bucket_target: sanitize_tool_target(parsed.right_bucket_target, DEFAULT_TOOL_PROPERTIES.right_bucket_target),
       left_line_target: sanitize_tool_target(parsed.left_line_target, DEFAULT_TOOL_PROPERTIES.left_line_target),
       right_line_target: sanitize_tool_target(parsed.right_line_target, DEFAULT_TOOL_PROPERTIES.right_line_target),
-      left_rect_target: sanitize_tool_target(parsed.left_rect_target, DEFAULT_TOOL_PROPERTIES.left_rect_target),
-      right_rect_target: sanitize_tool_target(parsed.right_rect_target, DEFAULT_TOOL_PROPERTIES.right_rect_target),
+      left_rect_target: legacy_left_selectangle ? 'selection' : sanitize_tool_target(parsed.left_rect_target, DEFAULT_TOOL_PROPERTIES.left_rect_target),
+      right_rect_target: legacy_right_selectangle ? 'selection' : sanitize_tool_target(parsed.right_rect_target, DEFAULT_TOOL_PROPERTIES.right_rect_target),
+      shape_primitive: sanitize_shape_primitive(parsed.shape_primitive, DEFAULT_TOOL_PROPERTIES.shape_primitive),
+      shape_render_mode: sanitize_shape_render_mode(parsed.shape_render_mode, DEFAULT_TOOL_PROPERTIES.shape_render_mode),
       text_spacing: clamp_integer(parsed.text_spacing, DEFAULT_TOOL_PROPERTIES.text_spacing, -16, 16),
       text_charlead: clamp_integer(parsed.text_charlead, DEFAULT_TOOL_PROPERTIES.text_charlead, -16, 16),
       text_enterlead: clamp_integer(parsed.text_enterlead, DEFAULT_TOOL_PROPERTIES.text_enterlead, -16, 16),

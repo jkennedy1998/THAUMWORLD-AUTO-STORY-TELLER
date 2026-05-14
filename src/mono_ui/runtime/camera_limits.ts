@@ -29,11 +29,11 @@ export type CameraLimitProfile = {
 export const CAMERA_LIMIT_PROFILES: Record<CameraSettingsAppId, CameraLimitProfile> = {
   thaum_painter: {
     movement_per_layer: { min: -500, max: 500, step: 1, digits: 0 },
-    scale_per_layer: { min: -1, max: 1, step: 0.01, digits: 2 },
+    scale_per_layer: { min: -0.25, max: 0.25, step: 0.01, digits: 2 },
     mouse_angle_yaw_deg: { min: -45, max: 45, step: 0.5, digits: 1 },
     mouse_angle_pitch_deg: { min: -45, max: 45, step: 0.5, digits: 1 },
     mouse_angle_spring: { min: 1, max: 30, step: 0.5, digits: 1 },
-    render_distance_planes: { min: 0, max: 8, step: 1, digits: 0 },
+    render_distance_planes: { min: 0, max: 16, step: 1, digits: 0 },
     calibration_x: { min: -500, max: 500, step: 1, digits: 0 },
     calibration_y: { min: -500, max: 500, step: 1, digits: 0 },
     base_layer_scale: { min: 0.2, max: 1.5, step: 0.01, digits: 2 },
@@ -45,11 +45,11 @@ export const CAMERA_LIMIT_PROFILES: Record<CameraSettingsAppId, CameraLimitProfi
   },
   thaum_world: {
     movement_per_layer: { min: -500, max: 500, step: 1, digits: 0 },
-    scale_per_layer: { min: -1, max: 1, step: 0.01, digits: 2 },
+    scale_per_layer: { min: -0.25, max: 0.25, step: 0.01, digits: 2 },
     mouse_angle_yaw_deg: { min: -45, max: 45, step: 0.5, digits: 1 },
     mouse_angle_pitch_deg: { min: -45, max: 45, step: 0.5, digits: 1 },
     mouse_angle_spring: { min: 1, max: 30, step: 0.5, digits: 1 },
-    render_distance_planes: { min: 0, max: 8, step: 1, digits: 0 },
+    render_distance_planes: { min: 0, max: 16, step: 1, digits: 0 },
     calibration_x: { min: -500, max: 500, step: 1, digits: 0 },
     calibration_y: { min: -500, max: 500, step: 1, digits: 0 },
     base_layer_scale: { min: 0.2, max: 1.5, step: 0.01, digits: 2 },

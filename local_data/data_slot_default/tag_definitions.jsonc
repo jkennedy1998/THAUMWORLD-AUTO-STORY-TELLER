@@ -448,7 +448,7 @@
           "default_mag": 0,
           "min_mag": -5,
           "max_mag": 8,
-          "description": "Canonical time MAG for how long this item takes to spoil into its configured result.",
+          "description": "Canonical time MAG for how long this item takes to spoil into its configured result. Higher MAG spoils faster.",
           "value_up_per_mag": 0,
           "value_down_per_mag": 0,
           "runtime_projection": {

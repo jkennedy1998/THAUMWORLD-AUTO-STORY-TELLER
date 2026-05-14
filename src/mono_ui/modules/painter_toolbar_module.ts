@@ -44,7 +44,8 @@ export function make_painter_toolbar_module(opts: PainterToolbarOptions): Module
     { tool: 'line', label: 'LINE', shortcut: 'L', x: 38, y: 1, width: 6 },
     { tool: 'rect_stroke', label: 'RECT', shortcut: 'R', x: 45, y: 1, width: 6 },
     { tool: 'rect_fill', label: 'FILL', shortcut: 'S', x: 52, y: 1, width: 6 },
-    { tool: 'text', label: 'TEXT', shortcut: 'T', x: 59, y: 1, width: 6 },
+    { tool: 'shape', label: 'SHAPE', shortcut: '', x: 59, y: 1, width: 7 },
+    { tool: 'text', label: 'TEXT', shortcut: 'T', x: 67, y: 1, width: 6 },
   ];
   
   function get_button_at(x: number, y: number): ToolButton | null {

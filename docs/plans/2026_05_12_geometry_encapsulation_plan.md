@@ -18,6 +18,27 @@ It combines:
 It still does **not** commit to broad final APIs yet.
 It still should avoid over-designing the seam too early.
 
+Consumer-specific implementation planning for the new painter parametric shape workflow now lives in:
+
+- `docs/plans/2026_05_12_parametric_shape_tool_plan.md`
+
+## Single-Authority Rule
+
+The repo should end with **one source of truth for shape systems**.
+
+That means:
+
+- shared `src/shared/geometry/` owns reusable shape specs, transforms, evaluation, and rasterization
+- consumer app state owns transient editing/session state
+- consumer UI/modules own interaction and rendering
+- legacy shape helpers or legacy shape flows may exist temporarily during migration, but should not remain as separate long-term authorities
+
+In particular:
+
+- the ASCII painter should become the first full consumer of the unified shape system
+- the place painter/game-side editor should adopt that same system later through unification
+- gameplay/debug adoption should follow the same shared geometry contracts rather than grow parallel shape implementations
+
 Initial implementation has already started with a very small migration slice:
 
 - `src/shared/geometry/README.md`
@@ -26,6 +47,18 @@ Initial implementation has already started with a very small migration slice:
 - `src/shared/geometry/voxel_raster.ts`
 - compatibility re-export preserved in `src/shared/shape3d.ts`
 - compatibility exports preserved in `src/shared/painter_tools.ts` for migrated plane/voxel raster helpers
+
+Current migration status also now includes:
+
+- shared 2D line rasterization routed through `src/shared/geometry/shape_rasterize2.ts`
+- shared 3D line rasterization routed through `src/shared/geometry/shape_rasterize3.ts`
+- shared 2D polygon rasterization routed through `src/shared/geometry/shape_rasterize2.ts`
+- painter/world selection brush-square generation routed through the shared 2D rect raster path
+- painter rect-selection world-volume generation routed through `src/shared/geometry/shape_rasterize3.ts`
+- projected painter 3D line generation now uses the shared 3D line path for size-1 strokes and shared projected center/stamp rasterization for thicker strokes
+- lasso polygon selection now uses the shared 2D polygon raster path
+- painter selection/world conversion now begins moving into `src/shared/geometry/selection_bridge.ts`
+- `src/canvas_app/painter_app_state.ts` projected bitmap → world selection expansion now also uses the shared selection bridge
 
 ## Why This Exists
 
@@ -177,6 +210,17 @@ The README should likely use the same sections as `src/interface_program/target/
 - `## Dependencies`
 - `## Side effects`
 - `## Notes`
+
+## Migration Rule
+
+When migrating consumers, prefer this order:
+
+1. establish or refine the shared geometry contract
+2. make the ASCII painter fully use that contract for the targeted shape workflow
+3. retire or hard-route any legacy shape-authoring path that overlaps the new authority
+4. only then adopt the same authority in place painter/game-side consumers
+
+This avoids locking in two consumer-specific shape systems.
 
 ## Current Repo Reality
 

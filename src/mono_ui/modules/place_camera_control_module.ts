@@ -12,7 +12,7 @@ import {
   update_plain_text_hover,
 } from '../ux/plain_text_controls.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
-import type { CameraConfig, OnionSkinStepMode } from '../../ascii_painter/voxel_space.js';
+import { DEFAULT_CAMERA_VALUES, type CameraConfig, type OnionSkinStepMode } from '../../ascii_painter/voxel_space.js';
 
 export type PlaceCameraControlOptions = {
   id: string;
@@ -120,10 +120,10 @@ const DEFAULT_SLIDER_SPECS: Record<SliderKind, { min: number; max: number; step:
   mouse_angle_pitch_deg: { min: -45, max: 45, step: 0.5, digits: 1 },
   mouse_angle_spring: { min: 1, max: 30, step: 0.5, digits: 1 },
   movement_per_layer: { min: -500, max: 500, step: 1, digits: 0 },
-  scale_per_layer: { min: -1, max: 1, step: 0.01, digits: 2 },
+  scale_per_layer: { min: -0.25, max: 0.25, step: 0.01, digits: 2 },
   calibration_x: { min: -500, max: 500, step: 1, digits: 0 },
   calibration_y: { min: -500, max: 500, step: 1, digits: 0 },
-  render_distance_planes: { min: 0, max: 8, step: 1, digits: 0 },
+  render_distance_planes: { min: 0, max: 16, step: 1, digits: 0 },
   onion_skin_distance: { min: 1, max: 3, step: 1, digits: 0 },
 };
 
@@ -316,7 +316,7 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
     else if (kind === 'scale_per_layer') opts.onScalePerLayerChange?.(quantizeSliderValue(kind, (cam.scale_per_layer ?? 0) + dir * spec.step));
     else if (kind === 'calibration_x') opts.onCalibrationChange?.(quantizeSliderValue(kind, (cam.calibration?.x ?? 0) + dir * spec.step), Math.round(cam.calibration?.y ?? 0));
     else if (kind === 'calibration_y') opts.onCalibrationChange?.(Math.round(cam.calibration?.x ?? 0), quantizeSliderValue(kind, (cam.calibration?.y ?? 0) + dir * spec.step));
-    else if (kind === 'render_distance_planes') opts.onRenderDistancePlanesChange?.(quantizeSliderValue(kind, ((cam.render_distance_planes ?? 2)) + dir * spec.step));
+    else if (kind === 'render_distance_planes') opts.onRenderDistancePlanesChange?.(quantizeSliderValue(kind, ((cam.render_distance_planes ?? DEFAULT_CAMERA_VALUES.render_distance_planes)) + dir * spec.step));
     else if (kind === 'onion_skin_distance') opts.onOnionSkinDistanceChange?.(quantizeSliderValue(kind, ((cam.onion_skin_distance ?? 1)) + dir * spec.step));
   }
 
@@ -390,8 +390,8 @@ export function makePlaceCameraControlModule(opts: PlaceCameraControlOptions): M
       if (opts.onRenderDistancePlanesChange) {
         drawSeparator(c, ROW_SEPARATOR_8);
         drawLabel(c, ROW_RENDER_DISTANCE_LABEL, 'Render Distance');
-        drawValue(c, ROW_RENDER_DISTANCE, formatSliderValue('render_distance_planes', cam.render_distance_planes ?? 2));
-        drawSlider(c, ROW_RENDER_DISTANCE_SLIDER, cam.render_distance_planes ?? 2, getSliderSpec('render_distance_planes').min, getSliderSpec('render_distance_planes').max);
+        drawValue(c, ROW_RENDER_DISTANCE, formatSliderValue('render_distance_planes', cam.render_distance_planes ?? DEFAULT_CAMERA_VALUES.render_distance_planes));
+        drawSlider(c, ROW_RENDER_DISTANCE_SLIDER, cam.render_distance_planes ?? DEFAULT_CAMERA_VALUES.render_distance_planes, getSliderSpec('render_distance_planes').min, getSliderSpec('render_distance_planes').max);
       }
       if (opts.onOnionSkinToggle || opts.onOnionSkinDistanceChange || opts.onOnionSkinStepModeChange || opts.onOnionSkinFullFileToggle || opts.onOnionSkinOpacityToggle || opts.onOnionSkinWeightToggle) {
         drawSeparator(c, ROW_SEPARATOR_9);

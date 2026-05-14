@@ -37,6 +37,7 @@ import { resolve_char } from '../render_shaders/resolver.js';
 import { can_place_volume } from '../place_storage/movement_legality.js';
 import { set_command_handler_place } from '../mono_ui/modules/movement_command_handler.js';
 import { get_color_by_name } from '../mono_ui/colors.js';
+import { get_ui_semantic_rgb } from '../mono_ui/runtime/ui_customization_store.js';
 import type { ModuleGizmosConfig } from '../mono_ui/module_gizmos.js';
 import { make_floating_panel_module } from '../mono_ui/modules/floating_panel_module.js';
 import { make_program_nav_bar_module, type ProgramNavAction } from '../mono_ui/modules/program_nav_bar_module.js';
@@ -90,7 +91,9 @@ import { eval_body_model_voxels, get_body_model_def } from '../shared/body_model
 import { get_character_camera_focus_tile } from '../shared/character_camera_focus.js';
 import { get_defined_place_world_zs as get_authored_place_world_zs, get_place_tile_kind_at_world_z as get_shared_place_tile_kind_at_world_z } from '../shared/place_layers.js';
 import { get_flood_fill_points, type PainterPoint } from '../shared/painter_tools.js';
-import { get_line_points, get_rect_fill_points, get_rect_stroke_points } from '../shared/geometry/plane_raster.js';
+import { get_line_points } from '../shared/geometry/plane_raster.js';
+import { rasterize_rect2_to_points } from '../shared/geometry/shape_rasterize2.js';
+import type { ShapeRenderMode2 } from '../shared/geometry/shape_specs.js';
 import { play_sfx } from '../mono_ui/sfx/sfx_player.js';
 import { format_interval_avg, format_interval_min, format_sample_p50, format_sample_p95, get_movement_debug_snapshot } from '../shared/movement_debug_state.js';
 import { has_resolved_tag } from '../tag_system/canonical_readers.js';
@@ -114,7 +117,7 @@ import { create_module_3d_camera } from '../engine/camera/camera_core.js';
 import type { Module3DCameraView, WorldPoint3 } from '../engine/camera/camera_types.js';
 import { create_thaumworld_place_camera_resolver, type ThaumworldPlaceCameraSubject } from '../thaumworld/camera/place_camera_resolver.js';
 import { get_thaumworld_place_camera_turn_start_policy, get_thaumworld_place_camera_world_sim_policy } from '../thaumworld/camera/place_camera_policy.js';
-import { get_thaumworld_place_painter_boot_policy, get_thaumworld_place_painter_detached_policy } from '../thaumworld/camera/place_painter_camera_policy.js';
+import { get_thaumworld_place_painter_detached_policy } from '../thaumworld/camera/place_painter_camera_policy.js';
 import { control_binding_matches_keyboard_event, resolve_wheel_binding_action } from '../mono_ui/runtime/controls_binding_matcher.js';
 import { create_profile_scope, type ProfileScope } from '../user_profiles/profile_scope.js';
 import { resolve_profile_scope } from '../user_profiles/named_profile_store.js';
@@ -1605,11 +1608,15 @@ export function create_app_state(): AppState {
         return `L:${get_place_painter_erase_targets_summary_for_side('left')} R:${get_place_painter_erase_targets_summary_for_side('right')}`;
     }
 
+    function get_place_painter_rect_points(x0: number, y0: number, x1: number, y1: number, mode: ShapeRenderMode2): PainterPoint[] {
+        return rasterize_rect2_to_points({ x0, y0, x1, y1 }, mode);
+    }
+
     function get_place_painter_brush_points(x: number, y: number, size: number): PainterPoint[] {
         const span = Math.max(1, Math.min(5, Math.floor(size)));
         const start_x = x - Math.floor(span / 2);
         const start_y = y - Math.floor(span / 2);
-        return get_rect_fill_points(start_x, start_y, start_x + span - 1, start_y + span - 1);
+        return get_place_painter_rect_points(start_x, start_y, start_x + span - 1, start_y + span - 1, 'fill');
     }
 
     function set_place_painter_selected_tile_by_id(id: string): boolean {
@@ -1655,8 +1662,13 @@ export function create_app_state(): AppState {
         const session = ui_state.place_painter.shape_session;
         if (!session) return [];
         if (session.tool === 'line') return get_line_points(session.start_x, session.start_y, session.current_x, session.current_y);
-        if (session.tool === 'rect_stroke') return get_rect_stroke_points(session.start_x, session.start_y, session.current_x, session.current_y);
-        return get_rect_fill_points(session.start_x, session.start_y, session.current_x, session.current_y);
+        return get_place_painter_rect_points(
+            session.start_x,
+            session.start_y,
+            session.current_x,
+            session.current_y,
+            session.tool === 'rect_stroke' ? 'edge' : 'fill',
+        );
     }
 
     function clear_place_painter_shape_session(): void {
@@ -3004,9 +3016,19 @@ export function create_app_state(): AppState {
             }
             const render_place = get_render_place();
             if (render_place?.id) {
-                apply_place_camera_subject({ kind: 'place_center', place_id: render_place.id }, get_thaumworld_place_painter_boot_policy());
-                place_camera.setFollowPolicy(get_thaumworld_place_painter_detached_policy().follow_policy);
+                const previous_anchor = get_place_camera_world_anchor();
+                const detached_policy = get_thaumworld_place_painter_detached_policy();
+                place_camera.setMotionStyle(detached_policy.motion_style);
+                place_camera.setFollowPolicy(detached_policy.follow_policy);
                 sync_place_camera_derived_state_from_runtime();
+                log_place_camera_follow_diag('place_painter_activate_preserve_focus', {
+                    render_place_id: render_place.id,
+                    previous_anchor,
+                    next_anchor: get_place_camera_world_anchor(),
+                    target: get_place_camera_focus_world(),
+                    subject: get_place_camera_subject(),
+                    follow_active: is_place_camera_follow_active(),
+                });
             }
             set_place_painter_modules_visible(true);
             save_place_painter_prefs_debounced();
@@ -3103,8 +3125,13 @@ export function create_app_state(): AppState {
 
     function get_place_painter_shape_preview_points_from_session(session: NonNullable<typeof ui_state.place_painter.shape_session>): PainterPoint[] {
         if (session.tool === 'line') return get_line_points(session.start_x, session.start_y, session.current_x, session.current_y);
-        if (session.tool === 'rect_stroke') return get_rect_stroke_points(session.start_x, session.start_y, session.current_x, session.current_y);
-        return get_rect_fill_points(session.start_x, session.start_y, session.current_x, session.current_y);
+        return get_place_painter_rect_points(
+            session.start_x,
+            session.start_y,
+            session.current_x,
+            session.current_y,
+            session.tool === 'rect_stroke' ? 'edge' : 'fill',
+        );
     }
 
     function get_place_painter_character_targets_at(place_id: string, x: number, y: number, z: number): Array<{ entity_ref: string; entity_type: 'actor' | 'npc' }> {
@@ -3586,6 +3613,8 @@ export function create_app_state(): AppState {
         title: string;
         draw_content: (c: Canvas, rect: Rect) => void;
         on_pointer_down_content?: (e: PointerEvent, rect: Rect) => void;
+        on_pointer_move_content?: (e: PointerEvent, rect: Rect) => void;
+        on_pointer_leave_content?: (e: PointerEvent, rect: Rect) => void;
     }): Module {
         const gizmo_config: ModuleGizmosConfig = {
             enabled: ['move', 'resize', 'close', 'seamless'],
@@ -3601,7 +3630,7 @@ export function create_app_state(): AppState {
             rect: opts.rect,
             title: opts.title,
             gizmos: gizmo_config,
-            background: { rgb: get_color_by_name('off_black').rgb },
+            background: { rgb: get_ui_semantic_rgb('background') },
             resize: {
                 min_width: 12,
                 min_height: 6,
@@ -3610,6 +3639,8 @@ export function create_app_state(): AppState {
             },
             draw_content: opts.draw_content,
             on_pointer_down_content: opts.on_pointer_down_content,
+            on_pointer_move_content: opts.on_pointer_move_content,
+            on_pointer_leave_content: opts.on_pointer_leave_content,
         });
     }
 
@@ -3726,6 +3757,7 @@ export function create_app_state(): AppState {
             rect,
             title: 'PROPS',
             get_current_tool: () => get_place_painter_tool_for_side(ui_state.place_painter.active_property_side),
+            get_current_tool_target: () => 'content',
             get_brush_size: () => 1,
             on_brush_size_change: () => {},
             get_space_replace: () => false,
@@ -3961,6 +3993,70 @@ export function create_app_state(): AppState {
     }
 
     function make_place_painter_palette_module(rect: Rect): Module {
+        let hovered_palette_entry_id: string | null = null;
+
+        const parse_rgb = (value: string): Rgb => {
+            const trimmed = String(value ?? '').trim();
+            const hex_match = /^#?([0-9a-fA-F]{6})$/.exec(trimmed);
+            if (hex_match?.[1]) {
+                const hex = hex_match[1];
+                return {
+                    r: Number.parseInt(hex.slice(0, 2), 16),
+                    g: Number.parseInt(hex.slice(2, 4), 16),
+                    b: Number.parseInt(hex.slice(4, 6), 16),
+                };
+            }
+            try {
+                return get_color_by_name(trimmed as any).rgb;
+            } catch {
+                return get_ui_semantic_rgb('medium');
+            }
+        };
+
+        const resolve_entry_rgb = (entry: { display_color: string }): Rgb => parse_rgb(entry.display_color);
+
+        const get_entries = (): Array<{
+            id: string;
+            name: string;
+            display_char: string;
+            display_color: string;
+        }> => ui_state.place_painter.selected_palette_kind === 'item'
+            ? ui_state.place_painter.item_palette_entries
+            : get_active_place_painter_tile_entries();
+
+        const get_selected_id = (): string | null => ui_state.place_painter.selected_palette_kind === 'item'
+            ? ui_state.place_painter.selected_item_palette_entry_id
+            : ui_state.place_painter.selected_palette_entry_id;
+
+        const get_layout = (entries: Array<{ id: string }>, selected_id: string | null) => {
+            const cols = Math.max(2, Math.floor((rect.x1 - rect.x0 - 2) / 2));
+            const rows = Math.max(1, rect.y1 - rect.y0 - 3);
+            const selected_index = Math.max(0, entries.findIndex((entry) => entry.id === selected_id));
+            const page_size = cols * rows;
+            const page = Math.floor(selected_index / page_size);
+            const start = page * page_size;
+            return { cols, rows, page_size, start };
+        };
+
+        const hit_test_entry = (e: PointerEvent): { entry: { id: string; name: string; display_char: string; display_color: string }; entries: Array<{ id: string; name: string; display_char: string; display_color: string }>; cols: number; rows: number; start: number } | null => {
+            const entries = get_entries();
+            const selected_id = get_selected_id();
+            const { cols, rows, start } = get_layout(entries, selected_id);
+            const row = rect.y1 - 3 - e.y;
+            const col = Math.floor((e.x - (rect.x0 + 2)) / 2);
+            if (row < 0 || col < 0 || col >= cols || row >= rows) return null;
+            const entry = entries[start + (row * cols) + col];
+            return entry ? { entry, entries, cols, rows, start } : null;
+        };
+
+        const set_hover_from_pointer = (e: PointerEvent): void => {
+            if (e.y === rect.y1 - 2) {
+                hovered_palette_entry_id = null;
+                return;
+            }
+            hovered_palette_entry_id = hit_test_entry(e)?.entry.id ?? null;
+        };
+
         return make_place_painter_window_module({
             id: 'place_painter_palette',
             rect,
@@ -3968,33 +4064,36 @@ export function create_app_state(): AppState {
                 ? 'ITEMS'
                 : `TILES:${ui_state.place_painter.selected_tile_palette_section.toUpperCase()}`,
             draw_content(c, rect) {
-                const activeLabel = ui_state.place_painter.selected_palette_kind === 'item' ? '[ITEMS]' : '[TILES]';
-                const inactiveLabel = ui_state.place_painter.selected_palette_kind === 'item' ? ' tiles ' : ' items ';
+                const active_kind = ui_state.place_painter.selected_palette_kind;
+                const activeLabel = active_kind === 'item' ? '[ITEMS]' : '[TILES]';
+                const inactiveLabel = active_kind === 'item' ? ' tiles ' : ' items ';
+                const active_rgb = get_ui_semantic_rgb('vivid');
+                const inactive_rgb = get_ui_semantic_rgb('medium');
+                const section_rgb = get_ui_semantic_rgb('bright');
+                const label_rgb = get_ui_semantic_rgb('medium');
+                const muted_rgb = get_ui_semantic_rgb('dimmest');
+                const entries = get_entries();
+                const selectedId = get_selected_id();
+                const { cols, rows, page_size, start } = get_layout(entries, selectedId);
+                const visible = entries.slice(start, start + page_size);
+
+                if (hovered_palette_entry_id && !visible.some((entry) => entry.id === hovered_palette_entry_id)) {
+                    hovered_palette_entry_id = null;
+                }
+
                 for (let i = 0; i < activeLabel.length && rect.x0 + 2 + i < rect.x1; i += 1) {
-                    c.set(rect.x0 + 2 + i, rect.y1 - 2, { char: activeLabel[i]!, rgb: get_color_by_name('vivid_yellow').rgb, weight_index: 2, render_index: 6, style: 'regular' });
+                    c.set(rect.x0 + 2 + i, rect.y1 - 2, { char: activeLabel[i]!, rgb: active_rgb, weight_index: 2, render_index: 6, style: 'regular' });
                 }
                 for (let i = 0; i < inactiveLabel.length && rect.x0 + 11 + i < rect.x1; i += 1) {
-                    c.set(rect.x0 + 11 + i, rect.y1 - 2, { char: inactiveLabel[i]!, rgb: get_color_by_name('medium_gray').rgb, weight_index: 2, render_index: 6, style: 'regular' });
+                    c.set(rect.x0 + 11 + i, rect.y1 - 2, { char: inactiveLabel[i]!, rgb: inactive_rgb, weight_index: 2, render_index: 6, style: 'regular' });
                 }
-                if (ui_state.place_painter.selected_palette_kind === 'tile') {
+                if (active_kind === 'tile') {
                     const sectionLabel = `[${ui_state.place_painter.selected_tile_palette_section.toUpperCase()}]`;
                     for (let i = 0; i < sectionLabel.length && rect.x0 + 20 + i < rect.x1; i += 1) {
-                        c.set(rect.x0 + 20 + i, rect.y1 - 2, { char: sectionLabel[i]!, rgb: get_color_by_name('vivid_blue').rgb, weight_index: 2, render_index: 6, style: 'regular' });
+                        c.set(rect.x0 + 20 + i, rect.y1 - 2, { char: sectionLabel[i]!, rgb: section_rgb, weight_index: 2, render_index: 6, style: 'regular' });
                     }
                 }
-                const entries = ui_state.place_painter.selected_palette_kind === 'item'
-                    ? ui_state.place_painter.item_palette_entries
-                    : get_active_place_painter_tile_entries();
-                const selectedId = ui_state.place_painter.selected_palette_kind === 'item'
-                    ? ui_state.place_painter.selected_item_palette_entry_id
-                    : ui_state.place_painter.selected_palette_entry_id;
-                const cols = Math.max(2, Math.floor((rect.x1 - rect.x0 - 2) / 2));
-                const rows = Math.max(1, rect.y1 - rect.y0 - 3);
-                const selectedIndex = Math.max(0, entries.findIndex((entry) => entry.id === selectedId));
-                const pageSize = cols * rows;
-                const page = Math.floor(selectedIndex / pageSize);
-                const start = page * pageSize;
-                const visible = entries.slice(start, start + pageSize);
+
                 for (let idx = 0; idx < visible.length; idx += 1) {
                     const entry = visible[idx]!;
                     const row = Math.floor(idx / cols);
@@ -4003,11 +4102,38 @@ export function create_app_state(): AppState {
                     const y = rect.y1 - 3 - row;
                     if (y <= rect.y0 || x >= rect.x1) continue;
                     const isSelected = entry.id === selectedId;
-                    c.set(x, y, { char: entry.display_char, rgb: isSelected ? get_color_by_name('off_white').rgb : get_color_by_name('off_white').rgb, weight_index: isSelected ? 3 : 2, render_index: 6, style: 'regular' });
-                    if (isSelected && x - 1 > rect.x0) {
-                        c.set(x - 1, y, { char: '>', rgb: get_color_by_name('vivid_yellow').rgb, weight_index: 3, render_index: 6, style: 'regular' });
+                    const isHovered = entry.id === hovered_palette_entry_id;
+                    const emphasis = isSelected || isHovered;
+                    const entry_rgb = resolve_entry_rgb(entry);
+                    const marker_rgb = isSelected ? active_rgb : isHovered ? section_rgb : muted_rgb;
+                    const marker_char = isSelected ? '>' : isHovered ? '*' : ' ';
+                    c.set(x, y, {
+                        char: entry.display_char,
+                        rgb: entry_rgb,
+                        weight_index: emphasis ? 3 : 2,
+                        render_index: 6,
+                        style: emphasis ? 'reverse' : 'regular',
+                    });
+                    if (emphasis && x - 1 > rect.x0) {
+                        c.set(x - 1, y, { char: marker_char, rgb: marker_rgb, weight_index: 3, render_index: 6, style: 'regular' });
                     }
                 }
+
+                if (entries.length > visible.length) {
+                    const max_scroll = Math.max(1, entries.length - rows * cols);
+                    const scroll_percent = start / max_scroll;
+                    const indicator_y = rect.y1 - 3 - Math.floor(scroll_percent * Math.max(0, rows - 1));
+                    if (indicator_y > rect.y0) {
+                        c.set(rect.x1 - 1, indicator_y, { char: '│', rgb: label_rgb, weight_index: 2, render_index: 6, style: 'regular' });
+                    }
+                }
+            },
+            on_pointer_move_content(e, rect) {
+                if (!ui_state.place_painter.active) return;
+                set_hover_from_pointer(e);
+            },
+            on_pointer_leave_content(_e, _rect) {
+                hovered_palette_entry_id = null;
             },
             on_pointer_down_content(e, rect) {
                 if (e.button !== 0 || !ui_state.place_painter.active) return;
@@ -4031,24 +4157,9 @@ export function create_app_state(): AppState {
                     flash_status([`Tile section: ${ui_state.place_painter.selected_tile_palette_section}`], 1200);
                     return;
                 }
-                const cols = Math.max(2, Math.floor((rect.x1 - rect.x0 - 2) / 2));
-                const rows = Math.max(1, rect.y1 - rect.y0 - 3);
-                const row = rect.y1 - 3 - e.y;
-                const col = Math.floor((e.x - (rect.x0 + 2)) / 2);
-                if (row < 0 || col < 0 || col >= cols || row >= rows) return;
-                if (row < 0) return;
-                const entries = ui_state.place_painter.selected_palette_kind === 'item'
-                    ? ui_state.place_painter.item_palette_entries
-                    : get_active_place_painter_tile_entries();
-                const selectedId = ui_state.place_painter.selected_palette_kind === 'item'
-                    ? ui_state.place_painter.selected_item_palette_entry_id
-                    : ui_state.place_painter.selected_palette_entry_id;
-                const selectedIndex = Math.max(0, entries.findIndex((entry) => entry.id === selectedId));
-                const pageSize = cols * rows;
-                const page = Math.floor(selectedIndex / pageSize);
-                const start = page * pageSize;
-                const entry = entries[start + (row * cols) + col];
-                if (!entry) return;
+                const hit = hit_test_entry(e);
+                if (!hit) return;
+                const entry = hit.entry;
                 if (ui_state.place_painter.selected_palette_kind === 'item') {
                     ui_state.place_painter.selected_item_palette_entry_id = entry.id;
                     save_place_painter_prefs_debounced();
@@ -8616,9 +8727,19 @@ export function create_app_state(): AppState {
         }
         if (opts?.center_camera) {
             if (had_painter && selected?.id) {
-                apply_place_camera_subject({ kind: 'place_center', place_id: selected.id }, get_thaumworld_place_painter_boot_policy());
-                place_camera.setFollowPolicy(get_thaumworld_place_painter_detached_policy().follow_policy);
+                const previous_anchor = get_place_camera_world_anchor();
+                const detached_policy = get_thaumworld_place_painter_detached_policy();
+                place_camera.setMotionStyle(detached_policy.motion_style);
+                place_camera.setFollowPolicy(detached_policy.follow_policy);
                 sync_place_camera_derived_state_from_runtime();
+                log_place_camera_follow_diag('place_painter_preserve_focus_on_select', {
+                    place_id: selected.id,
+                    previous_anchor,
+                    next_anchor: get_place_camera_world_anchor(),
+                    target: get_place_camera_focus_world(),
+                    subject: get_place_camera_subject(),
+                    follow_active: is_place_camera_follow_active(),
+                });
             } else if (!had_painter) {
                 focus_place_camera_on_active_subject();
             }
@@ -9012,9 +9133,19 @@ export function create_app_state(): AppState {
                     if (!is_current_place_paused_by('place_painter')) {
                         await set_current_place_pause_source('place_painter', true);
                     }
-                    apply_place_camera_subject({ kind: 'place_center', place_id: next_place.id }, get_thaumworld_place_painter_boot_policy());
-                    place_camera.setFollowPolicy(get_thaumworld_place_painter_detached_policy().follow_policy);
+                    const previous_anchor = get_place_camera_world_anchor();
+                    const detached_policy = get_thaumworld_place_painter_detached_policy();
+                    place_camera.setMotionStyle(detached_policy.motion_style);
+                    place_camera.setFollowPolicy(detached_policy.follow_policy);
                     sync_place_camera_derived_state_from_runtime();
+                    log_place_camera_follow_diag('place_painter_preserve_focus_on_load', {
+                        place_id: next_place.id,
+                        previous_anchor,
+                        next_anchor: get_place_camera_world_anchor(),
+                        target: get_place_camera_focus_world(),
+                        subject: get_place_camera_subject(),
+                        follow_active: is_place_camera_follow_active(),
+                    });
                 } else {
                     focus_place_camera_on_active_subject();
                 }

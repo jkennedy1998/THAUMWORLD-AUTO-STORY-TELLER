@@ -60,8 +60,8 @@ const PAINTER_TOOL_ACTIONS: Record<ToolType, string> = {
   line: 'painter.tool_assign.line',
   rect_stroke: 'painter.tool_assign.rect_stroke',
   rect_fill: 'painter.tool_assign.rect_fill',
+  shape: 'painter.tool_assign.shape',
   text: 'painter.tool_assign.text',
-  selectangle: 'painter.tool_assign.selectangle',
   lassoselect: 'painter.tool_assign.lassoselect',
   copy: 'painter.tool_assign.copy',
   paste: 'painter.tool_assign.paste',
@@ -78,10 +78,10 @@ export const PAINTER_TOOL_SEQUENCE_BINDINGS: PainterToolSequenceBinding[] = [
   { sequence: '7', tool: 'rect_fill' },
   { sequence: '8', tool: 'text' },
   { sequence: '9', tool: 'move' },
-  { sequence: '10', tool: 'selectangle' },
-  { sequence: '11', tool: 'lassoselect' },
-  { sequence: '12', tool: 'copy' },
-  { sequence: '13', tool: 'paste' },
+  { sequence: '13', tool: 'shape' },
+  { sequence: '10', tool: 'lassoselect' },
+  { sequence: '11', tool: 'copy' },
+  { sequence: '12', tool: 'paste' },
 ];
 
 export function create_painter_controls_runtime(data_slot: number, opts?: { get_profile_scope?: () => ProfileScope | null }) {

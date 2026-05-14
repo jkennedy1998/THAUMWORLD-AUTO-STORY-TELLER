@@ -502,6 +502,10 @@ export class VoxelDOMRenderer {
    * Calculate transform for a projected display slot.
    * Selected slot is reference point (scale 1.0, at viewport center).
    * Other slots scale and parallax relative to the selected slot.
+   *
+   * Important authority rule:
+   * - principal-view orientation already comes from projected slot contents/order
+   * - DOM transforms here are presentation-only and must not become a second camera system
    */
   private calculateTransform(displaySlot: PainterProjectedSlot, selectedSlot: number): { transform: string; origin: string } {
     const camera = this.scene?.camera;
@@ -557,11 +561,12 @@ export class VoxelDOMRenderer {
     const panOffsetX = -clampedPanX * cellW * panFactor;
     const panOffsetY = clampedPanY * cellH * panFactor;
 
-    const baseEuler = camera.euler_rotation ?? { x: 0, y: 0, z: 0 };
     const transitionEuler = (camera as any).transition_euler ?? { x: 0, y: 0, z: 0 };
-    const totalPitchDeg = baseEuler.x + transitionEuler.x + this.smoothedViewAngles.pitchDeg;
-    const totalYawDeg = baseEuler.y + transitionEuler.y + this.smoothedViewAngles.yawDeg;
-    const totalRollDeg = baseEuler.z + transitionEuler.z;
+    const presentationPitchDeg = transitionEuler.x;
+    const presentationYawDeg = transitionEuler.y;
+    const presentationRollDeg = transitionEuler.z;
+    const parallaxPitchDeg = this.smoothedViewAngles.pitchDeg;
+    const parallaxYawDeg = this.smoothedViewAngles.yawDeg;
 
     // Camera-angle offset derived from the spring-centered mouse pose.
     let parallaxX = 0;
@@ -569,8 +574,8 @@ export class VoxelDOMRenderer {
     if (moveParallaxEnabled && !isSelected) {
       const movePerLayer = camera.movement_per_layer ?? DEFAULT_CAMERA_VALUES.movement_per_layer;
       const depthPx = zDistance * movePerLayer;
-      const yawRad = totalYawDeg * (Math.PI / 180);
-      const pitchRad = totalPitchDeg * (Math.PI / 180);
+      const yawRad = parallaxYawDeg * (Math.PI / 180);
+      const pitchRad = parallaxPitchDeg * (Math.PI / 180);
       parallaxX = Math.tan(yawRad) * depthPx;
       parallaxY = -Math.tan(pitchRad) * depthPx;
     }
@@ -579,13 +584,23 @@ export class VoxelDOMRenderer {
     // In place mode, the selected/reference layer must stay at true 1:1 scale so
     // the hard camera and DOM layer agree on tile pitch. Otherwise calibration only
     // aligns locally and drifts as the target moves away from the module center.
+    //
+    // Keep scaling symmetric around the focus plane:
+    // - focus plane stays regular size (1.0 relative scale)
+    // - positive/negative depth distances mirror each other
+    // - negative scale_per_layer flips which side grows/shrinks
     const baseLayerScale = camera.base_layer_scale ?? DEFAULT_CAMERA_VALUES.base_layer_scale;
     let scale = uniformPan ? 1.0 : baseLayerScale;
     if (sizeParallaxEnabled && !isSelected) {
-      const scalePerLayer = camera.scale_per_layer ?? 0.12;
-      const relativeScale = 1 + (zDistance * scalePerLayer);
+      const scalePerLayer = camera.scale_per_layer ?? DEFAULT_CAMERA_VALUES.scale_per_layer;
+      const scaleMagnitude = Math.max(0, Math.min(0.9, Math.abs(scalePerLayer)));
+      const direction = scalePerLayer < 0 ? -1 : 1;
+      const perLayerFactor = 1 + scaleMagnitude;
+      const relativeScale = Math.pow(perLayerFactor, zDistance * direction);
+      const maxRelativeScale = 1.8;
+      const minRelativeScale = 1 / maxRelativeScale;
       const scaleBase = uniformPan ? 1.0 : baseLayerScale;
-      scale = scaleBase * Math.max(0.75, Math.min(1.35, relativeScale));
+      scale = scaleBase * Math.max(minRelativeScale, Math.min(maxRelativeScale, relativeScale));
     }
 
     // Get calibration from camera config
@@ -627,9 +642,9 @@ export class VoxelDOMRenderer {
         transform: `
           translate3d(${layerLeft}px, ${layerTop}px, 0)
           scale(${scale})
-          rotateX(${totalPitchDeg}deg)
-          rotateY(${totalYawDeg}deg)
-          rotateZ(${totalRollDeg}deg)
+          rotateX(${presentationPitchDeg}deg)
+          rotateY(${presentationYawDeg}deg)
+          rotateZ(${presentationRollDeg}deg)
         `,
         origin: `${originX}px ${originY}px`,
       };
@@ -640,9 +655,9 @@ export class VoxelDOMRenderer {
         translate3d(${layerX}px, ${layerY}px, 0)
         translate3d(-50%, -50%, 0)
         scale(${scale})
-        rotateX(${totalPitchDeg}deg)
-        rotateY(${totalYawDeg}deg)
-        rotateZ(${totalRollDeg}deg)
+        rotateX(${presentationPitchDeg}deg)
+        rotateY(${presentationYawDeg}deg)
+        rotateZ(${presentationRollDeg}deg)
       `,
       origin: 'center center',
     };

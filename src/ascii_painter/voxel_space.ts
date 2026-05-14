@@ -143,7 +143,7 @@ export interface CameraConfig {
   calibration: CalibrationOffset;     // Pixel offset to align layers with grid
 
   // Per-layer calibration for fine-tuning the 3D effect
-  scale_per_layer: number;            // Scale multiplier per Z layer (default 0.12)
+  scale_per_layer: number;            // Symmetric per-layer depth scale amount around the focus plane (default 0.08)
   movement_per_layer: number;         // Parallax movement per Z layer in pixels (default 50)
   mouse_angle_yaw_deg: number;        // Max spring-centered yaw from mouse input
   mouse_angle_pitch_deg: number;      // Max spring-centered pitch from mouse input
@@ -188,12 +188,12 @@ export const DEFAULT_CAMERA_VALUES = {
   transition_euler: { x: 0, y: 0, z: 0 },
   visual_pivot_px: { x: 0, y: 0 },
   calibration: { x: 0, y: 0 },
-  scale_per_layer: 0.12,
+  scale_per_layer: 0.08,
   movement_per_layer: 29,
   mouse_angle_yaw_deg: 18,
   mouse_angle_pitch_deg: 14,
   mouse_angle_spring: 12,
-  render_distance_planes: 2,
+  render_distance_planes: 4,
   base_layer_scale: 1.0,
   char_spacing_x: 1.0,
   char_spacing_y: 1.0,

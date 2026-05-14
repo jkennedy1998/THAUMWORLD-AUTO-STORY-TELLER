@@ -35,6 +35,9 @@ import { get_principal_view_plane_axis, make_place_view_state, map_screen_direct
 import { diag_log } from '../../shared/diagnostics.js';
 import { create_painter_canvas_pan_adapter } from './adapters/painter_canvas_pan_adapter.js';
 import { cells_match_edit_channels } from '../../shared/painter_tools.js';
+import { rasterize_line2_to_points, rasterize_polygon2_to_points, rasterize_rect2_to_points } from '../../shared/geometry/shape_rasterize2.js';
+import { rasterize_line3_to_voxels } from '../../shared/geometry/shape_rasterize3.js';
+import { brush_rect_selection_to_world_cells, box_selection_to_world_cells, selection_bitmap_to_world_cells } from '../../shared/geometry/selection_bridge.js';
 import { get_flood_fill_voxels } from '../../shared/geometry/voxel_raster.js';
 import {
   order_resolved_targets,
@@ -75,6 +78,12 @@ export type PainterCanvasOptions = {
   get_active_group_locked?: () => boolean;
   on_group_location_drag_commit?: (delta: { x: number; y: number; z: number }) => boolean;
   get_current_tool: () => ToolType;
+  has_active_shape_session?: () => boolean;
+  get_active_shape_preview_world_cells?: () => Array<{ x: number; y: number; z: number }>;
+  on_shape_session_start?: (world: { x: number; y: number; z: number }, button: number) => void;
+  on_shape_session_update?: (world: { x: number; y: number; z: number }) => void;
+  on_shape_session_commit?: () => boolean;
+  on_shape_session_cancel?: () => boolean;
   get_preview_brush?: () => Brush;
   get_brush_for_button?: (button: number) => Brush;
   get_brush_edit_channels_for_button?: (button: number) => EditChannels;
@@ -921,6 +930,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
   let group_location_drag_plane: number | null = null;
   let group_location_drag_preview_delta: { x: number; y: number; z: number } | null = null;
   let active_line_selection_target = false;
+  let is_shape_session_dragging = false;
 
   function cloneGridCell(cell: GridCell): GridCell {
     return {
@@ -1084,34 +1094,50 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
   }
 
   function getProjectedSizedLineWorldCells(start_world: { x: number; y: number; z: number }, end_world: { x: number; y: number; z: number }, size: number): Array<{ x: number; y: number; z: number }> {
+    const span = Math.max(1, Math.floor(size));
+    if (span === 1) {
+      return rasterize_line3_to_voxels({
+        x0: start_world.x,
+        y0: start_world.y,
+        z0: start_world.z,
+        x1: end_world.x,
+        y1: end_world.y,
+        z1: end_world.z,
+      });
+    }
+
     const viewState = opts.get_view_state?.() ?? make_place_view_state('top', 0);
     const startProjected = project_world_point_with_roll(start_world, viewState);
     const endProjected = project_world_point_with_roll(end_world, viewState);
-    const du = endProjected.u - startProjected.u;
-    const dv = endProjected.v - startProjected.v;
-    const dPlane = endProjected.plane - startProjected.plane;
-    const steps = Math.max(Math.abs(du), Math.abs(dv), Math.abs(dPlane));
-    const offset = Math.floor(size / 2);
+    const centers = rasterize_line3_to_voxels({
+      x0: startProjected.u,
+      y0: startProjected.v,
+      z0: startProjected.plane,
+      x1: endProjected.u,
+      y1: endProjected.v,
+      z1: endProjected.plane,
+    });
+    const offset = Math.floor(span / 2);
     const out: Array<{ x: number; y: number; z: number }> = [];
     const seen = new Set<string>();
 
-    for (let step = 0; step <= steps; step += 1) {
-      const t = steps === 0 ? 0 : step / steps;
-      const centerU = Math.round(startProjected.u + du * t);
-      const centerV = Math.round(startProjected.v + dv * t);
-      const plane = Math.round(startProjected.plane + dPlane * t);
-      for (let dy = 0; dy < size; dy += 1) {
-        for (let dx = 0; dx < size; dx += 1) {
-          const world = unproject_plane_point_with_roll({
-            u: centerU - offset + dx,
-            v: centerV - offset + dy,
-            plane,
-          }, viewState);
-          const key = worldKey(world);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push(world);
-        }
+    for (const center of centers) {
+      const stamp = rasterize_rect2_to_points({
+        x0: center.x - offset,
+        y0: center.y - offset,
+        x1: center.x - offset + span - 1,
+        y1: center.y - offset + span - 1,
+      }, 'fill');
+      for (const point of stamp) {
+        const world = unproject_plane_point_with_roll({
+          u: point.x,
+          v: point.y,
+          plane: center.z,
+        }, viewState);
+        const key = worldKey(world);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(world);
       }
     }
 
@@ -1127,7 +1153,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
     return getProjectedSizedLineWorldCells(start_world, end_world, size);
   }
 
-  function setPreviewPointsFromWorldCells(cells: Array<{ x: number; y: number; z: number }>): void {
+  function getPreviewPointsFromWorldCells(cells: Array<{ x: number; y: number; z: number }>): Array<{ x: number; y: number }> {
     const seen = new Set<string>();
     const points: Array<{ x: number; y: number }> = [];
     for (const world of cells) {
@@ -1139,7 +1165,11 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       seen.add(key);
       points.push(point);
     }
-    setPreviewPoints(points);
+    return points;
+  }
+
+  function setPreviewPointsFromWorldCells(cells: Array<{ x: number; y: number; z: number }>): void {
+    setPreviewPoints(getPreviewPointsFromWorldCells(cells));
   }
 
   function applyLineSelectionStroke(start_world: { x: number; y: number; z: number }, end_world: { x: number; y: number; z: number }, size: number): void {
@@ -1276,7 +1306,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
   }
 
   function updateLineRectPreview(end: { x: number; y: number }): void {
-    if (!drag_start || !isShapeTool(active_stroke_tool)) return;
+    if (!drag_start || !isLegacyDragShapeTool(active_stroke_tool)) return;
     if (active_stroke_tool === 'line' && shape_start_world) {
       const endWorld = getWorldPointForEditPlane(end.x, end.y, active_stroke_world_plane ?? opts.get_selected_z());
       if (!endWorld) {
@@ -1517,8 +1547,12 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
     return last_draw_pos ? { ...last_draw_pos } : null;
   }
 
-  function isShapeTool(tool: ToolType | null | undefined): tool is 'line' | 'rect_stroke' | 'rect_fill' {
+  function isLegacyDragShapeTool(tool: ToolType | null | undefined): tool is 'line' | 'rect_stroke' | 'rect_fill' {
     return tool === 'line' || tool === 'rect_stroke' || tool === 'rect_fill';
+  }
+
+  function isShapeSessionTool(tool: ToolType | null | undefined): tool is 'shape' {
+    return tool === 'shape';
   }
 
   function isActivePencilStroke(): boolean {
@@ -1530,7 +1564,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
   }
 
   function isActiveShapeStroke(): boolean {
-    return is_drawing && isShapeTool(active_stroke_tool) && !!drag_start;
+    return is_drawing && isLegacyDragShapeTool(active_stroke_tool) && !!drag_start;
   }
 
   function isActiveLineStroke(): boolean {
@@ -1539,6 +1573,7 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
 
   function clearActiveStrokeState(): void {
     clearLiveStrokePreview();
+    is_shape_session_dragging = false;
     is_drawing = false;
     is_erasing = false;
     active_draw_channels = { char: true, color: true, weight: true };
@@ -2353,23 +2388,10 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
   }
 
   function getBrushSelectionWorldCells(x: number, y: number, size: number, plane: number): Array<{ x: number; y: number; z: number }> {
-    const out: Array<{ x: number; y: number; z: number }> = [];
-    const seen = new Set<string>();
-    const offset = Math.floor(size / 2);
-    for (let dy = 0; dy < size; dy += 1) {
-      for (let dx = 0; dx < size; dx += 1) {
-        const draw_x = x - offset + dx;
-        const draw_y = y - offset + dy;
-        if (draw_x < 0 || draw_x >= opts.grid.width || draw_y < 0 || draw_y >= opts.grid.height) continue;
-        const world = getWorldPointForEditPlane(draw_x, draw_y, plane);
-        if (!world) continue;
-        const key = worldKey(world);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        out.push(world);
-      }
-    }
-    return out;
+    return brush_rect_selection_to_world_cells(x, y, size, plane, {
+      map_point_to_world: (point, depth) => getWorldPointForEditPlane(point.x, point.y, depth),
+      point_filter: (point) => point.x >= 0 && point.x < opts.grid.width && point.y >= 0 && point.y < opts.grid.height,
+    });
   }
 
   function applySelectionBrushAt(x: number, y: number, size: number, mode: SelectionMode, plane: number): void {
@@ -2391,63 +2413,24 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
   }
 
   function buildSelectionWorldCellsFromBitmap(bitmap: SelectionBitmap, args: { depthMin: number; depthMax: number }): Array<{ x: number; y: number; z: number }> {
-    const out: Array<{ x: number; y: number; z: number }> = [];
-    const seen = new Set<string>();
     const bounds = getActiveGroupWorldBounds();
-    if (!bounds) return out;
-    for (let y = 0; y < bitmap.height; y += 1) {
-      for (let x = 0; x < bitmap.width; x += 1) {
-        if (!isSelected(bitmap, x, y)) continue;
-        for (let plane = Math.min(args.depthMin, args.depthMax); plane <= Math.max(args.depthMin, args.depthMax); plane += 1) {
-          const world = opts.get_world_point_for_grid_on_plane?.(x, y, plane) ?? null;
-          if (!world || !isWorldInsideBounds(world, bounds)) continue;
-          const key = worldKey(world);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          out.push({ x: world.x, y: world.y, z: world.z });
-        }
-      }
-    }
-    return out;
+    if (!bounds) return [];
+    return selection_bitmap_to_world_cells(bitmap, {
+      depthMin: args.depthMin,
+      depthMax: args.depthMax,
+      map_point_to_world: (point, plane) => opts.get_world_point_for_grid_on_plane?.(point.x, point.y, plane) ?? null,
+      bounds,
+    });
   }
 
   function buildRectSelectionWorldCells(startWorld: { x: number; y: number; z: number }, endWorld: { x: number; y: number; z: number }, allDepths: boolean): Array<{ x: number; y: number; z: number }> {
     const bounds = getActiveGroupWorldBounds();
     if (!bounds) return [];
-    const axis = getActiveViewPlaneAxis();
-    let minX = Math.min(startWorld.x, endWorld.x);
-    let maxX = Math.max(startWorld.x, endWorld.x);
-    let minY = Math.min(startWorld.y, endWorld.y);
-    let maxY = Math.max(startWorld.y, endWorld.y);
-    let minZ = Math.min(startWorld.z, endWorld.z);
-    let maxZ = Math.max(startWorld.z, endWorld.z);
-    if (allDepths) {
-      if (axis === 'x') {
-        minX = bounds.minX;
-        maxX = bounds.maxX;
-      } else if (axis === 'y') {
-        minY = bounds.minY;
-        maxY = bounds.maxY;
-      } else {
-        minZ = bounds.minZ;
-        maxZ = bounds.maxZ;
-      }
-    }
-    minX = Math.max(minX, bounds.minX);
-    maxX = Math.min(maxX, bounds.maxX);
-    minY = Math.max(minY, bounds.minY);
-    maxY = Math.min(maxY, bounds.maxY);
-    minZ = Math.max(minZ, bounds.minZ);
-    maxZ = Math.min(maxZ, bounds.maxZ);
-    const out: Array<{ x: number; y: number; z: number }> = [];
-    for (let z = minZ; z <= maxZ; z += 1) {
-      for (let y = minY; y <= maxY; y += 1) {
-        for (let x = minX; x <= maxX; x += 1) {
-          out.push({ x, y, z });
-        }
-      }
-    }
-    return out;
+    return box_selection_to_world_cells(startWorld, endWorld, {
+      bounds,
+      axis: getActiveViewPlaneAxis(),
+      allDepths,
+    });
   }
 
   function emitWorldSelectionChange(args: { kind: 'rect' | 'lasso' | 'clear' | 'select_all' | 'invert'; mode?: SelectionMode; cells?: Array<{ x: number; y: number; z: number }> }): void {
@@ -3046,15 +3029,19 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       }
       */
 
-      // Draw preview points for line/rect/select/lasso tools
-      if (opts.preview_points.length > 0) {
+      // Draw preview points for line/rect/select/lasso tools and active shape sessions
+      const shape_preview_points = opts.get_active_shape_preview_world_cells
+        ? getPreviewPointsFromWorldCells(opts.get_active_shape_preview_world_cells())
+        : [];
+      const combined_preview_points = shape_preview_points.length > 0 ? shape_preview_points : opts.preview_points;
+      if (combined_preview_points.length > 0) {
         const is_selection_preview = is_selecting || is_lasso_selecting;
         const preview_brush = getPreviewBrush();
         const preview_color = is_selection_preview 
           ? get_ui_semantic_rgb('vivid')
           : preview_brush.rgb;
         const preview_char = is_selection_preview ? '▫' : preview_brush.char;
-        for (const point of opts.preview_points) {
+        for (const point of combined_preview_points) {
           const canvas_x = rect.x0 + (opts.get_world_point_for_grid ? point.x : (point.x - start_x));
           const canvas_y = rect.y0 + (opts.get_world_point_for_grid ? point.y : (point.y - start_y));
           if (canvas_x >= rect.x0 && canvas_x <= rect.x1 &&
@@ -3482,21 +3469,6 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
           return;
         }
 
-        // Selection tool (rectangular)
-        if (tool_for_button === 'selectangle') {
-          is_selecting = true;
-          selection_drag_start = { x: grid_x, y: grid_y };
-          selection_drag_start_plane = opts.get_focus_world_plane?.() ?? opts.get_selected_z();
-          selection_drag_end_plane = selection_drag_start_plane;
-          selection_drag_start_world = getWorldPointForEditPlane(grid_x, grid_y, selection_drag_start_plane) ?? opts.get_world_point_for_grid?.(grid_x, grid_y) ?? { x: grid_x, y: grid_y, z: selection_drag_start_plane };
-          selection_drag_end_world = cloneWorldPoint(selection_drag_start_world);
-          setInteractionCurrentWorld(selection_drag_start_world);
-          setInteractionEndWorld(null);
-          emitLiveInteractionAnchor(interaction_current_world, true);
-          showStatus('Selection: drag to select area');
-          return;
-        }
-
         if (tool_target === 'selection' && tool_for_button.startsWith('rect_')) {
           is_selecting = true;
           selection_drag_start = { x: grid_x, y: grid_y };
@@ -3533,6 +3505,22 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
           } else {
             showStatus('Nothing selected to move');
           }
+          return;
+        }
+
+        if (isShapeSessionTool(tool_for_button)) {
+          const anchor_world = getWorldPointForEditPlane(grid_x, grid_y, opts.get_selected_z());
+          if (!anchor_world) {
+            showStatus('Cannot start shape on selected depth here');
+            return;
+          }
+          opts.on_shape_session_start?.(anchor_world, e.button);
+          is_shape_session_dragging = true;
+          setInteractionCurrentWorld(anchor_world);
+          setInteractionEndWorld(null);
+          setPreviewPoints([]);
+          emitLiveInteractionAnchor(anchor_world, true);
+          showStatus('Shape: drag to size, release to keep editing');
           return;
         }
 
@@ -3688,7 +3676,33 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
           lasso_points.push({ x: grid_x, y: grid_y });
           // Preview the lasso outline - mutate in place to preserve reference
           opts.preview_points.length = 0;
-          opts.preview_points.push(...lasso_points);
+          if (lasso_points.length === 1) {
+            opts.preview_points.push(...lasso_points);
+          } else {
+            const last = lasso_points[lasso_points.length - 1]!;
+            const prev = lasso_points[lasso_points.length - 2]!;
+            const segment = rasterize_line2_to_points({ x0: prev.x, y0: prev.y, x1: last.x, y1: last.y });
+            const existing = new Set(opts.preview_points.map((point) => `${point.x},${point.y}`));
+            const rebuilt: Array<{ x: number; y: number }> = [];
+            for (let i = 1; i < lasso_points.length; i += 1) {
+              for (const point of rasterize_line2_to_points({
+                x0: lasso_points[i - 1]!.x,
+                y0: lasso_points[i - 1]!.y,
+                x1: lasso_points[i]!.x,
+                y1: lasso_points[i]!.y,
+              })) {
+                const key = `${point.x},${point.y}`;
+                if (existing.has(key)) continue;
+                existing.add(key);
+                rebuilt.push(point);
+              }
+            }
+            if (segment.length === 0) {
+              opts.preview_points.push(...lasso_points);
+            } else {
+              opts.preview_points.push(...rebuilt);
+            }
+          }
           showStatus(`Lasso: ${lasso_points.length} points`);
         }
         return;
@@ -3700,7 +3714,24 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
         return;
       }
 
-        if (isActiveShapeStroke()) {
+      if (is_shape_session_dragging) {
+        const grid_coords = localToGrid(local_x, local_y);
+        const world = getWorldPointForEditPlane(grid_coords.x, grid_coords.y, opts.get_selected_z());
+        if (!world) return;
+        opts.on_shape_session_update?.(world);
+        setInteractionCurrentWorld(world);
+        emitLiveInteractionAnchor(world);
+        const preview_cells = opts.get_active_shape_preview_world_cells?.() ?? [];
+        if (preview_cells.length > 0) {
+          const xs = preview_cells.map((cell) => cell.x);
+          const ys = preview_cells.map((cell) => cell.y);
+          const zs = preview_cells.map((cell) => cell.z);
+          showStatus(`Shape: ${Math.max(...xs) - Math.min(...xs) + 1}x${Math.max(...ys) - Math.min(...ys) + 1}x${Math.max(...zs) - Math.min(...zs) + 1}`);
+        }
+        return;
+      }
+
+      if (isActiveShapeStroke()) {
           const current_coords = localToGrid(local_x, local_y);
           const current_x = current_coords.x;
           const current_y = current_coords.y;
@@ -3784,6 +3815,13 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
         return;
       }
 
+      if (is_shape_session_dragging) {
+        is_shape_session_dragging = false;
+        setInteractionEndWorld(interaction_current_world);
+        drag_start_buttons = 0;
+        return;
+      }
+
       if (!is_drawing && !is_erasing) {
         drag_start_buttons = 0;
         return;
@@ -3804,6 +3842,21 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
       }
 
       const tool_for_up = (drag_start_buttons & 2) ? opts.get_right_click_tool() : opts.get_left_click_tool();
+      if ((is_shape_session_dragging || (isShapeSessionTool(tool_for_up) && opts.has_active_shape_session?.())) && tool_for_up === 'shape') {
+        const local_x = e.x - rect.x0;
+        const local_y = e.y - rect.y0;
+        const end_coords = localToGrid(local_x, local_y);
+        const end_world = getWorldPointForEditPlane(end_coords.x, end_coords.y, opts.get_selected_z());
+        if (end_world) {
+          opts.on_shape_session_update?.(end_world);
+          setInteractionCurrentWorld(end_world);
+          setInteractionEndWorld(end_world);
+        }
+        is_shape_session_dragging = false;
+        drag_start_buttons = 0;
+        showStatus('Shape session active: Enter commit, Esc cancel');
+        return;
+      }
       if (isActiveLineStroke() && tool_for_up === 'line') {
         const local_x = e.x - rect.x0;
         const local_y = e.y - rect.y0;
@@ -4029,6 +4082,27 @@ export function make_painter_canvas_module(opts: PainterCanvasOptions): PainterC
 
     OnKeyDown(e: KeyboardEvent): void {
       ensureGridShapeState();
+
+      if (opts.has_active_shape_session?.()) {
+        if (e.key === 'Enter') {
+          const committed = opts.on_shape_session_commit?.() ?? false;
+          if (committed) {
+            showStatus('Shape committed');
+          } else {
+            showStatus('Shape commit skipped');
+          }
+          setPreviewPoints([]);
+          e.preventDefault();
+          return;
+        }
+        if (e.key === 'Escape') {
+          const canceled = opts.on_shape_session_cancel?.() ?? false;
+          if (canceled) showStatus('Shape canceled');
+          setPreviewPoints([]);
+          e.preventDefault();
+          return;
+        }
+      }
 
       // Text mode handling
       if (text_mode_active) {

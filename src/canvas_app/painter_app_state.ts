@@ -8,12 +8,12 @@
 import type { Canvas, Module, PointerEvent, Rect, Rgb, WheelEvent } from '../mono_ui/types.js';
 import { create_module_registry, type ModuleRegistry } from '../mono_ui/module_registry.js';
 import type { AppearanceSlotTargetMask, AppearanceSlotValue, Grid, Brush, ToolEditTarget, ToolType, GridCell } from '../ascii_painter/types.js';
-import { clone_appearance_slot_assignments, createGrid, exportGrid, get_enabled_appearance_slots, importGrid } from '../ascii_painter/types.js';
+import { clone_appearance_slot_assignments, createGrid, DEFAULT_APPEARANCE_SLOT_TARGET_MASK, exportGrid, get_enabled_appearance_slots, importGrid } from '../ascii_painter/types.js';
 import { createHistoryManager, logCellAction, logGroupAction, clearHistory, canUndoGroup, canRedoGroup, getGroupHistoryState, popRedoGroupAction, popUndoGroupAction, type HistoryAction, type HistoryManager } from '../ascii_painter/history.js';
 import { get_color_by_name, nearest_indexed_lerp_rgb, nearest_indexed_rgb } from '../mono_ui/colors.js';
 import { resolve_material_rgb } from '../mono_ui/runtime/material_registry.js';
 import type { SelectionMode } from '../ascii_painter/selection.js';
-import { clearSelection, createSelectionBitmap, invertSelection, isSelected, selectAll, setSelected, type SelectionBitmap } from '../ascii_painter/selection.js';
+import { clearSelection, createSelectionBitmap, invertSelection, selectAll, setSelected, type SelectionBitmap } from '../ascii_painter/selection.js';
 import { make_painter_canvas_module, type PainterInteractionAnchor } from '../mono_ui/modules/painter_canvas_module.js';
 import { make_file_menu_module } from '../mono_ui/modules/painter_file_menu_module.js';
 import { make_character_selector_module } from '../mono_ui/modules/character_selector_module.js';
@@ -65,6 +65,7 @@ import {
 // 3D VoxelSpace imports
 import type { VoxelSpace, VoxelLayer, CameraConfig, CameraMode, OnionSkinStepMode } from '../ascii_painter/voxel_space.js';
 import { 
+  DEFAULT_CAMERA_VALUES,
   createVoxelSpace, 
   getLayer, 
   getOrCreateLayer, 
@@ -97,6 +98,43 @@ function normalize_painter_tool(tool: ToolType): ToolType {
   return tool;
 }
 
+function normalize_shape_size_step(value: number): number {
+  const normalized = Math.max(1, Math.trunc(value));
+  return Number.isFinite(normalized) ? normalized : 1;
+}
+
+function to_signed_axis3(value: number): -1 | 0 | 1 {
+  return value < 0 ? -1 : value > 0 ? 1 : 0;
+}
+
+function to_axis_vector3(axis: { x: number; y: number; z: number }): AxisVector3 {
+  return {
+    x: to_signed_axis3(axis.x),
+    y: to_signed_axis3(axis.y),
+    z: to_signed_axis3(axis.z),
+  };
+}
+
+function clone_world_point3(world: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  return { x: Math.trunc(world.x), y: Math.trunc(world.y), z: Math.trunc(world.z) };
+}
+
+function add_world_point3(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+}
+
+function scale_axis_vector3(axis: AxisVector3, amount: number): { x: number; y: number; z: number } {
+  return {
+    x: axis.x * amount,
+    y: axis.y * amount,
+    z: axis.z * amount,
+  };
+}
+
+function dot_world_axis3(delta: { x: number; y: number; z: number }, axis: AxisVector3): number {
+  return delta.x * axis.x + delta.y * axis.y + delta.z * axis.z;
+}
+
 import { makePlaceCameraControlModule } from '../mono_ui/modules/place_camera_control_module.js';
 import { VoxelDOMRenderer, createVoxelDOMRenderer } from '../ascii_painter/voxel_dom_renderer.js';
 import { clone_projected_scene, commit_grid_to_painter_world, get_painter_focus_slot_for_anchor, get_painter_world_content_bounds_center, painter_projection_grid_point_to_world, painter_projection_world_to_grid_point, project_painter_display_space, project_painter_runtime_display_space, project_world_to_painter_display_cell, sync_grid_to_painter_projection, type PainterDisplayProjection, type PainterProjectedScene } from '../ascii_painter/painter_view_projection_adapter.js';
@@ -107,6 +145,9 @@ import { clamp_anchor_to_viewport_px, compute_anchor_relative_mouse_parallax } f
 import { resolve_place_view_transition_frame } from '../mono_ui/runtime/place_view_camera_runtime.js';
 import { apply_world_selection_mode, clear_world_selection, create_world_selection, decode_world_copy_data, encode_world_copy_data, get_world_selection_bounds, has_world_selection, parse_world_cell_key, set_world_selected, type WorldCopyData, type WorldSelection } from '../ascii_painter/world_selection.js';
 import { project_world_point_with_roll, unproject_plane_point_with_roll } from '../mono_ui/runtime/place_view_projection.js';
+import { selection_bitmap_to_world_cells } from '../shared/geometry/selection_bridge.js';
+import { rasterize_box3_session_to_voxels, rasterize_cone3_session_to_voxels, rasterize_cylinder3_session_to_voxels, rasterize_sphere3_session_to_voxels } from '../shared/geometry/shape_rasterize3.js';
+import type { AxisVector3, OrthoBasis3 } from '../shared/geometry/shape_specs.js';
 import { create_painter_controls_runtime, PAINTER_TOOL_SEQUENCE_BINDINGS } from './controls_wiring.js';
 import { control_binding_matches_keyboard_event, resolve_wheel_binding_action } from '../mono_ui/runtime/controls_binding_matcher.js';
 import {
@@ -219,6 +260,22 @@ export const PAINTER_CONFIG = PAINTER_APP_CONFIG;
 // Canvas dimensions (separate from grid dimensions)
 const CANVAS_WIDTH = 80;
 const CANVAS_HEIGHT = 40;
+
+type PainterShapePrimitive = 'box' | 'sphere' | 'cylinder' | 'cone';
+type PainterShapeRenderMode = 'outline' | 'fill';
+
+type PainterShapeSession = {
+  primitive: PainterShapePrimitive;
+  render_mode: PainterShapeRenderMode;
+  origin_world: { x: number; y: number; z: number };
+  seed_world: { x: number; y: number; z: number };
+  drag_world: { x: number; y: number; z: number };
+  size: { x: number; y: number; z: number };
+  orientation_mode: 'view_basis';
+  view_state: PlaceViewState;
+  side: 'left' | 'right';
+  active: boolean;
+};
 
 export type PainterAppState = {
   modules: readonly Module[];
@@ -1318,6 +1375,15 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     return out;
   }
 
+  function getActiveGroupWorldCell(world: { x: number; y: number; z: number }): GridCell {
+    const active_group_id = resolve_current_runtime_group_id();
+    if (!active_group_id) return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+    const coordKey = `${Math.floor(world.x)}:${Math.floor(world.y)}:${Math.floor(world.z)}`;
+    const record = painter_document_runtime.group_voxel_index.get(active_group_id)?.get(coordKey) ?? null;
+    if (!record) return { char: ' ', graphic: undefined, appearance_slots: undefined, materials: undefined, rgb: { r: 0, g: 0, b: 0 }, weight_index: 0 };
+    return make_history_cell_from_runtime_record(record);
+  }
+
   function get_active_group_world_bounds(): { minX: number; minY: number; minZ: number; maxX: number; maxY: number; maxZ: number } | null {
     const active_group_id = resolve_current_runtime_group_id();
     if (!active_group_id) return null;
@@ -1904,7 +1970,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       mouse_angle_yaw_deg: clampPainterCameraScalar(painter_camera_state.mouse_angle_yaw_deg ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_yaw_deg),
       mouse_angle_pitch_deg: clampPainterCameraScalar(painter_camera_state.mouse_angle_pitch_deg ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_pitch_deg),
       mouse_angle_spring: clampPainterCameraScalar(painter_camera_state.mouse_angle_spring ?? 0, PAINTER_CAMERA_LIMITS.mouse_angle_spring),
-      render_distance_planes: Math.round(clampPainterCameraScalar(painter_camera_state.render_distance_planes ?? 2, PAINTER_CAMERA_LIMITS.render_distance_planes)),
+      render_distance_planes: Math.round(clampPainterCameraScalar(painter_camera_state.render_distance_planes ?? DEFAULT_CAMERA_VALUES.render_distance_planes, PAINTER_CAMERA_LIMITS.render_distance_planes)),
       calibration: {
         x: clampPainterCameraScalar(Math.round(painter_camera_state.calibration?.x ?? 0), PAINTER_CAMERA_LIMITS.calibration_x),
         y: clampPainterCameraScalar(Math.round(painter_camera_state.calibration?.y ?? 0), PAINTER_CAMERA_LIMITS.calibration_y),
@@ -2094,6 +2160,45 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function getPainterDisplayViewState(): PlaceViewState {
     return painter_display_view;
+  }
+
+  function get_shape_session_basis_for_view(view_state: PlaceViewState): OrthoBasis3 {
+    const basis = get_view_basis_for_state(make_place_view_state(view_state.principal_view, view_state.roll_quarter_turn));
+    return {
+      right: to_axis_vector3(basis.right),
+      up: to_axis_vector3(basis.up),
+      forward: to_axis_vector3(basis.forward),
+    };
+  }
+
+  function rebuild_shape_session_box_from_drag(session: PainterShapeSession, target_world: { x: number; y: number; z: number }): PainterShapeSession {
+    const basis = get_shape_session_basis_for_view(session.view_state);
+    const next_drag_world = clone_world_point3(target_world);
+    const delta = {
+      x: next_drag_world.x - session.seed_world.x,
+      y: next_drag_world.y - session.seed_world.y,
+      z: next_drag_world.z - session.seed_world.z,
+    };
+    const delta_right = dot_world_axis3(delta, basis.right);
+    const delta_up = dot_world_axis3(delta, basis.up);
+    const delta_forward = dot_world_axis3(delta, basis.forward);
+    const origin_world = add_world_point3(
+      add_world_point3(
+        add_world_point3(session.seed_world, scale_axis_vector3(basis.right, Math.min(0, delta_right))),
+        scale_axis_vector3(basis.up, Math.min(0, delta_up)),
+      ),
+      scale_axis_vector3(basis.forward, Math.min(0, delta_forward)),
+    );
+    return {
+      ...session,
+      drag_world: next_drag_world,
+      origin_world,
+      size: {
+        x: Math.abs(delta_right) + 1,
+        y: Math.abs(delta_up) + 1,
+        z: delta_forward === 0 ? normalize_shape_size_step(session.size.z) : Math.abs(delta_forward) + 1,
+      },
+    };
   }
 
   function getPainterTextCursorAnchor(): PainterInteractionAnchor | null {
@@ -2442,6 +2547,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       viewport_height: viewport.height,
       center_target_in_view: shouldCenterPainterTarget(anchor),
       render_distance_planes: getEffectivePainterCameraForProjection().render_distance_planes,
+      focus_world_plane: getPainterFocusWorldPlane(),
     });
     const previousAxis = painter_display_projection
       ? get_principal_view_plane_axis(painter_display_projection.view_state.principal_view)
@@ -2549,6 +2655,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     viewport_width: Math.max(1, canvas_rect.x1 - canvas_rect.x0 + 1),
     viewport_height: Math.max(1, canvas_rect.y1 - canvas_rect.y0 + 1),
     render_distance_planes: getEffectivePainterCameraForProjection().render_distance_planes,
+    focus_world_plane: getPainterFocusWorldPlane(),
   });
   sync_grid_to_painter_projection(grid, painter_display_projection);
 
@@ -3455,18 +3562,18 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       apply_world_selection_mode(get_local_world_selection(), incoming, mode);
       return;
     }
-    for (let y = 0; y < bitmap.height; y += 1) {
-      for (let x = 0; x < bitmap.width; x += 1) {
-        if (!isSelected(bitmap, x, y)) continue;
-        const u = x + painter_display_projection.projected_bounds.min_u;
-        const v = y + painter_display_projection.projected_bounds.min_v;
-        const depthMin = depthRange?.depthMin ?? focusPlane;
-        const depthMax = depthRange?.depthMax ?? focusPlane;
-        for (let plane = Math.min(depthMin, depthMax); plane <= Math.max(depthMin, depthMax); plane += 1) {
-          const world = unproject_plane_point_with_roll({ u, v, plane }, painter_display_projection.view_state);
-          set_world_selected(incoming, world.x, world.y, world.z, true);
-        }
-      }
+    const depthMin = depthRange?.depthMin ?? focusPlane;
+    const depthMax = depthRange?.depthMax ?? focusPlane;
+    for (const world of selection_bitmap_to_world_cells(bitmap, {
+      depthMin,
+      depthMax,
+      map_point_to_world: (point, plane) => {
+        const u = point.x + painter_display_projection.projected_bounds.min_u;
+        const v = point.y + painter_display_projection.projected_bounds.min_v;
+        return unproject_plane_point_with_roll({ u, v, plane }, painter_display_projection.view_state);
+      },
+    })) {
+      set_world_selected(incoming, world.x, world.y, world.z, true);
     }
     apply_world_selection_mode(get_local_world_selection(), incoming, mode);
     syncPainterCanvasSelectionFromWorld();
@@ -3701,6 +3808,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   resetPainterHistoryState('initial painter state');
   
+  let shape_primitive: PainterShapePrimitive = saved_tool_props.shape_primitive ?? 'box';
+  let shape_render_mode: PainterShapeRenderMode = saved_tool_props.shape_render_mode === 'fill' ? 'fill' : 'outline';
+  let active_shape_session: PainterShapeSession | null = null;
+
   // Current tool state
   let current_tool: ToolType = 'pencil';
   
@@ -3709,6 +3820,9 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let right_click_tool: ToolType = normalize_painter_tool(saved_tool_props.right_click_tool as ToolType || 'eraser');
 
   function maybeCommitPendingPainterPlacementModes(nextLeftTool: ToolType, nextRightTool: ToolType): void {
+    if (active_shape_session && nextLeftTool !== 'shape' && nextRightTool !== 'shape') {
+      cancel_shape_session();
+    }
     if (canvas_module?.hasMovePreview() && nextLeftTool !== 'move' && nextRightTool !== 'move') {
       canvas_module.leaveMovePreview();
     }
@@ -3901,10 +4015,17 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const orderedSides: Array<'left' | 'right'> = active_property_side === 'right' ? ['right', 'left'] : ['left', 'right'];
     const hasSelection = has_world_selection(get_local_world_selection());
 
+    if (active_shape_session) {
+      if (worldDelta) return !!nudge_shape_session(worldDelta);
+      if (action === 'rotate_left') return !!step_shape_view_action('roll_left');
+      if (action === 'rotate_right') return !!step_shape_view_action('roll_right');
+      return false;
+    }
+
     if (hasSelection) {
       for (const side of orderedSides) {
         const tool = getToolForSide(side);
-        if (tool === 'selectangle' || tool === 'lassoselect' || tool === 'copy') {
+        if (isSelectionTransformToolForSide(side)) {
           active_property_side = side;
           if (worldDelta) {
             if (!canvas_module) return false;
@@ -4011,10 +4132,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const orderedSides: Array<'left' | 'right'> = active_property_side === 'right' ? ['right', 'left'] : ['left', 'right'];
     const hasSelection = has_world_selection(get_local_world_selection());
 
+    if (active_shape_session) {
+      return !!step_shape_view_action(pasteActionBySwing[action]);
+    }
+
     if (hasSelection) {
       for (const side of orderedSides) {
         const tool = getToolForSide(side);
-        if (tool === 'selectangle' || tool === 'lassoselect' || tool === 'copy') {
+        if (isSelectionTransformToolForSide(side)) {
           active_property_side = side;
           if (stepPainterRasterTransformAction(pasteActionBySwing[action])) return true;
           return showPainterPositionalStubStatus('Selection mask swing stub: this target is a mask only; raster-content transform requires raster payload preview support', {
@@ -4160,6 +4285,271 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function getBrushSlotTargetsForSide(side: 'left' | 'right'): AppearanceSlotTargetMask {
     return side === 'right' ? right_brush_slot_targets : left_brush_slot_targets;
+  }
+
+  function clonePainterGridCell(cell: GridCell): GridCell {
+    return {
+      char: cell.char,
+      graphic: cell.graphic ? { ...cell.graphic } : undefined,
+      appearance_slots: clone_appearance_slot_assignments(cell.appearance_slots),
+      materials: cell.materials ? { ...cell.materials } : undefined,
+      rgb: { ...cell.rgb },
+      weight_index: cell.weight_index,
+      render_index: cell.render_index,
+    };
+  }
+
+  function makePainterCellFromBrush(brush: Brush): GridCell {
+    return {
+      char: brush.char,
+      graphic: brush.graphic ? { ...brush.graphic } : undefined,
+      appearance_slots: clone_appearance_slot_assignments(brush.appearance_slots),
+      materials: brush.materials ? { ...brush.materials } : undefined,
+      rgb: { ...brush.rgb },
+      weight_index: brush.weight_index,
+    };
+  }
+
+  function mergePainterBrushColorIntoSlots(cell: GridCell, brush: Brush, slot_targets?: AppearanceSlotTargetMask): GridCell {
+    const next = clonePainterGridCell(cell);
+    const slots = get_enabled_appearance_slots(slot_targets ?? DEFAULT_APPEARANCE_SLOT_TARGET_MASK);
+    const next_slots = clone_appearance_slot_assignments(next.appearance_slots) ?? {};
+    for (const slot of slots) {
+      const value = brush.appearance_slots?.[slot];
+      if (!value) continue;
+      next_slots[slot] = value.kind === 'material'
+        ? { kind: 'material', material_id: value.material_id }
+        : { kind: 'flat_rgb', rgb: { ...value.rgb } };
+    }
+    next.appearance_slots = Object.keys(next_slots).length > 0 ? next_slots : undefined;
+    if (next.materials) {
+      const next_materials = { ...next.materials };
+      for (const slot of slots) delete next_materials[slot];
+      next.materials = Object.keys(next_materials).length > 0 ? next_materials : undefined;
+    }
+    return next;
+  }
+
+  function applyPainterBrushEditToCell(cell: GridCell, brush: Brush, channels: EditChannels, slot_targets?: AppearanceSlotTargetMask): GridCell {
+    const next = clonePainterGridCell(cell);
+    if (channels.char && channels.color && channels.weight) {
+      return makePainterCellFromBrush(brush);
+    }
+    if (channels.char) {
+      next.char = brush.char;
+      next.graphic = brush.graphic ? { ...brush.graphic } : undefined;
+      next.appearance_slots = clone_appearance_slot_assignments(brush.appearance_slots);
+      next.materials = brush.materials ? { ...brush.materials } : undefined;
+    }
+    if (channels.color) {
+      next.rgb = { ...brush.rgb };
+      if (!channels.char) {
+        const color_merged = mergePainterBrushColorIntoSlots(next, brush, slot_targets);
+        next.appearance_slots = color_merged.appearance_slots;
+        next.materials = color_merged.materials;
+      }
+    }
+    if (channels.weight) {
+      next.weight_index = brush.weight_index;
+      if (next.graphic) next.graphic = { ...next.graphic, weight_index: brush.weight_index as 0 | 1 | 2 | 3 };
+    }
+    return next;
+  }
+
+  function sync_shape_session_live_preview(): void {
+    if (!active_shape_session) {
+      live_stroke_preview_changes = [];
+      syncDOMRenderer();
+      return;
+    }
+    applyLiveStrokePreview({
+      changes: get_shape_session_preview_cell_changes(),
+      anchor_world: active_shape_session.drag_world ?? active_shape_session.origin_world,
+      plane: active_shape_session.origin_world.z,
+    });
+  }
+
+  function begin_shape_session(anchor_world: { x: number; y: number; z: number }, side: 'left' | 'right' = active_property_side, current_view_state: PlaceViewState = getPainterDisplayViewState()): PainterShapeSession {
+    const seed_world = clone_world_point3(anchor_world);
+    active_property_side = side;
+    active_shape_session = {
+      primitive: shape_primitive,
+      render_mode: shape_render_mode,
+      origin_world: seed_world,
+      seed_world,
+      drag_world: seed_world,
+      size: { x: 1, y: 1, z: 1 },
+      orientation_mode: 'view_basis',
+      view_state: make_place_view_state(current_view_state.principal_view, current_view_state.roll_quarter_turn),
+      side,
+      active: true,
+    };
+    sync_shape_session_live_preview();
+    painterDiag('shape session started', {
+      primitive: active_shape_session.primitive,
+      render_mode: active_shape_session.render_mode,
+      origin_world: active_shape_session.origin_world,
+      side,
+    });
+    return active_shape_session;
+  }
+
+  function update_shape_session_drag(target_world: { x: number; y: number; z: number }): PainterShapeSession | null {
+    if (!active_shape_session) return null;
+    active_shape_session = rebuild_shape_session_box_from_drag(active_shape_session, target_world);
+    sync_shape_session_live_preview();
+    return active_shape_session;
+  }
+
+  function set_shape_primitive(primitive: PainterShapePrimitive): void {
+    shape_primitive = primitive === 'sphere'
+      ? 'sphere'
+      : primitive === 'cylinder'
+        ? 'cylinder'
+        : primitive === 'cone'
+          ? 'cone'
+          : 'box';
+    saveToolProperties({ shape_primitive });
+    if (active_shape_session) active_shape_session = { ...active_shape_session, primitive: shape_primitive };
+    sync_shape_session_live_preview();
+  }
+
+  function set_shape_render_mode(render_mode: PainterShapeRenderMode): void {
+    shape_render_mode = render_mode === 'fill' ? 'fill' : 'outline';
+    saveToolProperties({ shape_render_mode });
+    if (active_shape_session) active_shape_session = { ...active_shape_session, render_mode: shape_render_mode };
+    sync_shape_session_live_preview();
+  }
+
+  function step_shape_size(axis: 'x' | 'y' | 'z', dir: -1 | 1): PainterShapeSession | null {
+    if (!active_shape_session) return null;
+    active_shape_session = {
+      ...active_shape_session,
+      size: {
+        ...active_shape_session.size,
+        [axis]: normalize_shape_size_step(active_shape_session.size[axis] + dir),
+      },
+    };
+    sync_shape_session_live_preview();
+    return active_shape_session;
+  }
+
+  function nudge_shape_session(delta_world: { x: number; y: number; z: number }): PainterShapeSession | null {
+    if (!active_shape_session) return null;
+    const delta = clone_world_point3(delta_world);
+    active_shape_session = {
+      ...active_shape_session,
+      origin_world: add_world_point3(active_shape_session.origin_world, delta),
+      seed_world: add_world_point3(active_shape_session.seed_world, delta),
+      drag_world: add_world_point3(active_shape_session.drag_world, delta),
+    };
+    sync_shape_session_live_preview();
+    return active_shape_session;
+  }
+
+  function step_shape_view_action(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): PainterShapeSession | null {
+    if (!active_shape_session) return null;
+    active_shape_session = {
+      ...active_shape_session,
+      view_state: step_place_view_action(active_shape_session.view_state, action),
+    };
+    sync_shape_session_live_preview();
+    return active_shape_session;
+  }
+
+  function get_shape_session_preview_world_cells(): Array<{ x: number; y: number; z: number }> {
+    if (!active_shape_session) return [];
+    const basis = get_shape_session_basis_for_view(active_shape_session.view_state);
+    const mode = active_shape_session.render_mode === 'fill' ? 'volume' : 'outline';
+    const worlds = active_shape_session.primitive === 'sphere'
+      ? rasterize_sphere3_session_to_voxels({
+        anchor: active_shape_session.origin_world,
+        size: active_shape_session.size,
+        basis,
+      }, mode)
+      : active_shape_session.primitive === 'cylinder'
+        ? rasterize_cylinder3_session_to_voxels({
+          anchor: active_shape_session.origin_world,
+          size: active_shape_session.size,
+          basis,
+        }, mode)
+        : active_shape_session.primitive === 'cone'
+          ? rasterize_cone3_session_to_voxels({
+            anchor: active_shape_session.origin_world,
+            size: active_shape_session.size,
+            basis,
+          }, mode)
+          : rasterize_box3_session_to_voxels({
+            anchor: active_shape_session.origin_world,
+            size: active_shape_session.size,
+            basis,
+          }, mode);
+    return worlds.map((world) => ({
+      x: world.x,
+      y: world.y,
+      z: world.z,
+    }));
+  }
+
+  function get_shape_session_preview_cell_changes(): Array<{ worldX: number; worldY: number; worldZ: number; newCell: GridCell }> {
+    if (!active_shape_session) return [];
+    const brush = getBrushForSide(active_shape_session.side);
+    const edit_channels = getEditChannelsForSide(active_shape_session.side);
+    const slot_targets = getBrushSlotTargetsForSide(active_shape_session.side);
+    const changes: Array<{ worldX: number; worldY: number; worldZ: number; newCell: GridCell }> = [];
+    for (const world of get_shape_session_preview_world_cells()) {
+      const oldCell = getActiveGroupWorldCell(world);
+      const newCell = applyPainterBrushEditToCell(oldCell, brush, edit_channels, slot_targets);
+      if (JSON.stringify(oldCell) === JSON.stringify(newCell)) continue;
+      changes.push({
+        worldX: world.x,
+        worldY: world.y,
+        worldZ: world.z,
+        newCell,
+      });
+    }
+    return changes;
+  }
+
+  function commit_shape_session(): boolean {
+    if (!active_shape_session) return false;
+    const changes = get_shape_session_preview_cell_changes();
+    if (changes.length < 1) {
+      active_shape_session = null;
+      sync_shape_session_live_preview();
+      return false;
+    }
+    const applied = apply_authored_group_cell_changes(changes);
+    if (applied) {
+      refreshPainterProjectionPreservingCameraFrame();
+      schedule_auto_save();
+      if (can_submit_to_authoritative_document()) {
+        const active_group_id = resolve_current_runtime_group_id();
+        if (active_group_id) {
+          void painter_sync.submit_cell_changes(active_group_id, painter_current_breath, painter_groups_auto_key_enabled, changes.map((change) => ({
+            x: change.worldX,
+            y: change.worldY,
+            z: change.worldZ,
+            cell: change.newCell,
+          }))).catch((error) => {
+            diag_log('painter', 'important', 'PAINTER', 'failed to submit committed shape cell changes', {
+              error: error instanceof Error ? error.message : String(error),
+              change_count: changes.length,
+            }, { sink: 'warn' });
+          });
+        }
+      }
+    }
+    active_shape_session = null;
+    sync_shape_session_live_preview();
+    return applied;
+  }
+
+  function cancel_shape_session(): boolean {
+    if (!active_shape_session) return false;
+    active_shape_session = null;
+    sync_shape_session_live_preview();
+    return true;
   }
 
   function getSelectedAppearanceForSide(side: 'left' | 'right'): AppearanceSlotValue {
@@ -4347,6 +4737,21 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     const resolvedTool = tool ?? (side === 'right' ? right_click_tool : left_click_tool);
     const base = getToolTargetForSide(side);
     return tool_target_invert_held && tool_supports_selection_target(resolvedTool) ? invertToolTarget(base) : base;
+  }
+
+  function isRectTool(tool: ToolType): boolean {
+    return tool === 'rect_stroke' || tool === 'rect_fill';
+  }
+
+  function isRectSelectionToolForSide(side: 'left' | 'right'): boolean {
+    const button = side === 'right' ? 2 : 0;
+    const tool = side === 'right' ? right_click_tool : left_click_tool;
+    return isRectTool(tool) && getEffectiveToolTargetForButton(button, tool) === 'selection';
+  }
+
+  function isSelectionTransformToolForSide(side: 'left' | 'right'): boolean {
+    const tool = side === 'right' ? right_click_tool : left_click_tool;
+    return tool === 'lassoselect' || tool === 'copy' || isRectSelectionToolForSide(side);
   }
 
   function set_user_selection_color(rgb: Rgb): void {
@@ -4908,6 +5313,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         viewport_height: painter_display_projection.projected_bounds.height,
         render_distance_planes: getEffectivePainterCameraForProjection().render_distance_planes,
         center_target_in_view: painter_display_projection.scene.camera.center_target_in_view,
+        focus_world_plane: painter_display_projection.focus_world_plane ?? getPainterFocusWorldPlane(),
       });
       const slotIndexes = fullFile
         ? Array.from(onionProjection.scene.slots.keys())
@@ -5587,6 +5993,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       return applyPainterGroupLocationDelta(group_id, delta, 'drag');
     },
     get_current_tool: () => current_tool,
+    has_active_shape_session: () => !!active_shape_session,
+    get_active_shape_preview_world_cells: () => get_shape_session_preview_world_cells(),
+    on_shape_session_start: (world, button) => {
+      begin_shape_session(world, button === 2 ? 'right' : 'left', getPainterDisplayViewState());
+    },
+    on_shape_session_update: (world) => {
+      update_shape_session_drag(world);
+    },
+    on_shape_session_commit: () => commit_shape_session(),
+    on_shape_session_cancel: () => cancel_shape_session(),
     get_preview_brush: () => getPreviewBrush(),
     get_brush_for_button: (button) => getBrushForButton(button),
     get_tool_target_for_button: (button, tool) => getEffectiveToolTargetForButton(button, tool),
@@ -6365,7 +6781,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     x0: canvas_rect.x1 + 2,  // Right of canvas
     y0: canvas_rect.y0,
     x1: canvas_rect.x1 + 22, // 20 chars wide
-    y1: canvas_rect.y0 + 20  // Show up to ~17 layers
+    y1: canvas_rect.y0 + 20  // Compact default; module can still be resized for deeper layer windows
   });
 
   // Camera Control - positioned below layer palette
@@ -6598,8 +7014,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         case 'line': return 'LINE';
         case 'rect_stroke': return 'RECT';
         case 'rect_fill': return 'FILL';
+        case 'shape': return 'SHAPE';
         case 'text': return 'TEXT';
-        case 'selectangle': return 'RECTSEL';
         case 'lassoselect': return 'LASSO';
         case 'copy': return 'COPY';
         case 'paste': return 'PASTE';
@@ -6841,6 +7257,159 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     }
 
     function append_tool_specific_rows(rows: ToolPropertyRow[], left_tool: ToolType, right_tool: ToolType): void {
+      if (left_tool === 'shape' || right_tool === 'shape') {
+        const hasShapeSession = !!active_shape_session;
+        rows.push({
+          type: 'single_cycle',
+          id: 'shape_primitive',
+          label: 'PRIM',
+          value: shape_primitive === 'sphere' ? 'SPHR' : shape_primitive === 'cylinder' ? 'CYLN' : shape_primitive === 'cone' ? 'CONE' : 'BOX',
+          options: ['BOX', 'SPHR', 'CYLN', 'CONE'],
+          on_cycle: () => {
+            set_shape_primitive(
+              shape_primitive === 'box'
+                ? 'sphere'
+                : shape_primitive === 'sphere'
+                  ? 'cylinder'
+                  : shape_primitive === 'cylinder'
+                    ? 'cone'
+                    : 'box'
+            );
+          },
+        });
+        rows.push({
+          type: 'single_cycle',
+          id: 'shape_render_mode',
+          label: 'MODE',
+          value: shape_render_mode === 'fill' ? 'FILL' : 'OUTL',
+          options: ['OUTL', 'FILL'],
+          on_cycle: () => {
+            set_shape_render_mode(shape_render_mode === 'fill' ? 'outline' : 'fill');
+          },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'shape_size_x',
+          label: 'SIZE X',
+          value: `${active_shape_session?.size.x ?? 1}`,
+          enabled: hasShapeSession,
+          on_decrement: () => { step_shape_size('x', -1); },
+          on_increment: () => { step_shape_size('x', 1); },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'shape_size_y',
+          label: 'SIZE Y',
+          value: `${active_shape_session?.size.y ?? 1}`,
+          enabled: hasShapeSession,
+          on_decrement: () => { step_shape_size('y', -1); },
+          on_increment: () => { step_shape_size('y', 1); },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'shape_size_z',
+          label: 'SIZE Z',
+          value: `${active_shape_session?.size.z ?? 1}`,
+          enabled: hasShapeSession,
+          on_decrement: () => { step_shape_size('z', -1); },
+          on_increment: () => { step_shape_size('z', 1); },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'shape_nudge_x',
+          label: 'NUDGE X',
+          value: 'SCR',
+          enabled: hasShapeSession,
+          on_decrement: () => {
+            const delta = map_screen_direction_to_world_delta(getPainterViewState(), 'left');
+            if (delta) nudge_shape_session(delta);
+          },
+          on_increment: () => {
+            const delta = map_screen_direction_to_world_delta(getPainterViewState(), 'right');
+            if (delta) nudge_shape_session(delta);
+          },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'shape_nudge_y',
+          label: 'NUDGE Y',
+          value: 'SCR',
+          enabled: hasShapeSession,
+          on_decrement: () => {
+            const delta = map_screen_direction_to_world_delta(getPainterViewState(), 'down');
+            if (delta) nudge_shape_session(delta);
+          },
+          on_increment: () => {
+            const delta = map_screen_direction_to_world_delta(getPainterViewState(), 'up');
+            if (delta) nudge_shape_session(delta);
+          },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'shape_nudge_z',
+          label: 'NUDGE Z',
+          value: 'DEP',
+          enabled: hasShapeSession,
+          on_decrement: () => {
+            const basis = get_view_basis_for_state(getPainterViewState());
+            nudge_shape_session({ x: -basis.forward.x, y: -basis.forward.y, z: -basis.forward.z });
+          },
+          on_increment: () => {
+            const basis = get_view_basis_for_state(getPainterViewState());
+            nudge_shape_session({ x: basis.forward.x, y: basis.forward.y, z: basis.forward.z });
+          },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'shape_swing',
+          label: 'SWING',
+          value: 'VIEW',
+          enabled: hasShapeSession,
+          on_decrement: () => { step_shape_view_action('swing_left'); },
+          on_increment: () => { step_shape_view_action('swing_right'); },
+        });
+        rows.push({
+          type: 'single_stepper',
+          id: 'shape_roll',
+          label: 'ROLL',
+          value: 'VIEW',
+          enabled: hasShapeSession,
+          on_decrement: () => { step_shape_view_action('roll_left'); },
+          on_increment: () => { step_shape_view_action('roll_right'); },
+        });
+        rows.push({
+          type: 'single_cycle',
+          id: 'shape_commit',
+          label: 'COMMIT',
+          value: '[ENTER]',
+          enabled: hasShapeSession,
+          on_cycle: () => { commit_shape_session(); },
+        });
+        rows.push({
+          type: 'single_cycle',
+          id: 'shape_cancel',
+          label: 'CANCEL',
+          value: '[ESC]',
+          enabled: hasShapeSession,
+          on_cycle: () => { cancel_shape_session(); },
+        });
+        if (!hasShapeSession) {
+          rows.push({
+            type: 'info',
+            id: 'shape_help',
+            text: 'Click-drag canvas to preview',
+            rgb: get_ui_semantic_rgb('medium'),
+          });
+        } else {
+          rows.push({
+            type: 'info',
+            id: 'shape_preview_local',
+            text: 'Preview is local/user-only',
+            rgb: get_ui_semantic_rgb('vivid'),
+          });
+        }
+      }
+
       if (left_tool === 'bucket' || right_tool === 'bucket') {
         rows.push({
           type: 'single_toggle',
@@ -6875,8 +7444,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         });
       }
 
-      if (left_tool === 'selectangle' || right_tool === 'selectangle' || left_tool === 'lassoselect' || right_tool === 'lassoselect') {
-        if (left_tool === 'selectangle' || right_tool === 'selectangle') {
+      if (isRectSelectionToolForSide('left') || isRectSelectionToolForSide('right') || left_tool === 'lassoselect' || right_tool === 'lassoselect') {
+        if (isRectSelectionToolForSide('left') || isRectSelectionToolForSide('right')) {
           rows.push({
             type: 'single_toggle',
             id: 'rect_select_all_depths',
@@ -7056,6 +7625,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       id: 'tool_properties',
       rect: tool_properties_rect,
       get_current_tool: () => current_tool,
+      get_current_tool_target: () => getToolTargetForSide(active_property_side),
       get_brush_size: () => getBrushSizeForSide(active_property_side),
       get_left_brush_size: () => left_brush_size,
       get_right_brush_size: () => right_brush_size,
@@ -7922,7 +8492,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         }
       },
       onRenderDistancePlanesChange: (value) => {
-        const nextValue = sanitizePainterCameraConfig({ render_distance_planes: value }).render_distance_planes ?? 2;
+        const nextValue = sanitizePainterCameraConfig({ render_distance_planes: value }).render_distance_planes ?? DEFAULT_CAMERA_VALUES.render_distance_planes;
         painter_camera_state.render_distance_planes = nextValue;
         syncVoxelSpaceCameraFromPainterCamera();
         syncPainterDocumentCameraFromPainterCamera();
@@ -8100,6 +8670,16 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function tryHandlePainterDefaultKeydown(e: KeyboardEvent): boolean {
+    if (!isPainterTextCaptureActive() && active_shape_session && e.code === 'Enter') {
+      e.preventDefault();
+      commit_shape_session();
+      return true;
+    }
+    if (!isPainterTextCaptureActive() && active_shape_session && e.code === 'Escape') {
+      e.preventDefault();
+      cancel_shape_session();
+      return true;
+    }
     maybeEarlyCommitPendingPainterPositionalTapForKeydown(e);
     const transportTapAction = getPainterTransportTapActionForEvent(e);
     if (transportTapAction && !isPainterTextCaptureActive()) {

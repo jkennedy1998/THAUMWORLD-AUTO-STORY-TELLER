@@ -1,7 +1,7 @@
 import { clone_appearance_slot_assignments, type GridCell } from './types.js';
 import type { Grid } from './types.js';
 import type { PainterDocumentRuntime } from './painter_document_runtime.js';
-import { createVoxelSpace, getVoxel, type CameraConfig, type VoxelLayer, type VoxelSpace } from './voxel_space.js';
+import { DEFAULT_CAMERA_VALUES, createVoxelSpace, getVoxel, type CameraConfig, type VoxelLayer, type VoxelSpace } from './voxel_space.js';
 import {
   build_visible_plane_coordinates,
   get_principal_view_plane_axis,
@@ -12,7 +12,7 @@ import {
   type PlaceViewState,
 } from '../mono_ui/runtime/place_view_projection.js';
 
-const PAINTER_DEPTH_MARGIN = 2;
+const PAINTER_DEPTH_MARGIN = DEFAULT_CAMERA_VALUES.render_distance_planes;
 
 export type PainterDisplayProjection = {
   scene: PainterProjectedScene;
@@ -105,16 +105,21 @@ function build_plane_to_slot_map(visible_planes: readonly number[]): ReadonlyMap
   return new Map(visible_planes.map((plane, index) => [Math.floor(plane), index]));
 }
 
-function build_camera_centered_visible_planes(view_state: PlaceViewState, target_world: { x: number; y: number; z: number }, margin: number = PAINTER_DEPTH_MARGIN): number[] {
+function build_focus_centered_visible_planes(view_state: PlaceViewState, focus_world_plane: number, margin: number = PAINTER_DEPTH_MARGIN): number[] {
   const radius = Math.max(0, Math.floor(margin));
+  const centerPlane = Math.floor(focus_world_plane);
+  const planes = Array.from({ length: radius * 2 + 1 }, (_, index) => centerPlane - radius + index);
+  return sort_plane_coordinates_for_view(planes.length > 0 ? planes : [centerPlane], view_state.principal_view);
+}
+
+function build_camera_centered_visible_planes(view_state: PlaceViewState, target_world: { x: number; y: number; z: number }, margin: number = PAINTER_DEPTH_MARGIN): number[] {
   const axis = get_principal_view_plane_axis(view_state.principal_view);
   const targetPlane = axis === 'x'
     ? Math.floor(target_world.x)
     : axis === 'y'
       ? Math.floor(target_world.y)
       : Math.floor(target_world.z);
-  const planes = Array.from({ length: radius * 2 + 1 }, (_, index) => targetPlane - radius + index);
-  return sort_plane_coordinates_for_view(planes.length > 0 ? planes : [targetPlane], view_state.principal_view);
+  return build_focus_centered_visible_planes(view_state, targetPlane, margin);
 }
 
 export function get_painter_focus_slot_for_anchor(args: {
@@ -309,6 +314,7 @@ export function project_painter_runtime_display_space(args: {
   viewport_height: number;
   center_target_in_view?: boolean;
   render_distance_planes?: number;
+  focus_world_plane?: number;
 }): PainterDisplayProjection {
   const runtime = args.runtime;
   const bounds = {
@@ -319,7 +325,9 @@ export function project_painter_runtime_display_space(args: {
     height: runtime.document.bounds.height,
     depth: runtime.document.bounds.maxZ - runtime.document.bounds.minZ + 1,
   };
-  const visible_planes = build_camera_centered_visible_planes(args.view_state, args.target_world, args.render_distance_planes ?? PAINTER_DEPTH_MARGIN);
+  const visible_planes = typeof args.focus_world_plane === 'number'
+    ? build_focus_centered_visible_planes(args.view_state, args.focus_world_plane, args.render_distance_planes ?? PAINTER_DEPTH_MARGIN)
+    : build_camera_centered_visible_planes(args.view_state, args.target_world, args.render_distance_planes ?? PAINTER_DEPTH_MARGIN);
   const viewportWidth = Math.max(1, Math.floor(args.viewport_width));
   const viewportHeight = Math.max(1, Math.floor(args.viewport_height));
   const targetProjected = project_world_point_with_roll(args.target_world, args.view_state);

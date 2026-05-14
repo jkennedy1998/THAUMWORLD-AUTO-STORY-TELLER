@@ -5,14 +5,14 @@
  * For brush tools, shows brush tip size slider (1x1 to 5x5).
  */
 
-import type { Canvas, Module, Rect, PointerEvent, DragEvent } from '../types.js';
+import type { Canvas, Module, Rect, PointerEvent, DragEvent, WheelEvent } from '../types.js';
 import { get_color_by_name } from '../colors.js';
 import { PANEL_BORDER_PRESETS } from '../module_borders.js';
 import type { ModuleGizmosConfig } from '../module_gizmos.js';
 import { make_floating_panel_module } from './floating_panel_module.js';
 import { get_ui_semantic_rgb } from '../runtime/ui_customization_store.js';
 import { clamp_numeric_slider_value, draw_numeric_dual_slider_markers, draw_numeric_single_slider_markers, draw_numeric_slider_track, get_numeric_slider_layout, get_numeric_slider_marker_x, get_numeric_slider_nudge_hit, get_numeric_slider_value_from_x } from '../runtime/slider_primitives.js';
-import type { ToolType } from '../../ascii_painter/types.js';
+import type { ToolEditTarget, ToolType } from '../../ascii_painter/types.js';
 import type { SelectionMode } from '../../ascii_painter/selection.js';
 
 type ToolPropertiesCustomPanel = {
@@ -114,6 +114,7 @@ export type ToolPropertiesOptions = {
   id: string;
   rect: Rect;
   get_current_tool: () => ToolType | string;
+  get_current_tool_target?: () => ToolEditTarget;
   get_brush_size: () => number; // 1-5
   get_left_brush_size?: () => number;
   get_right_brush_size?: () => number;
@@ -167,12 +168,19 @@ const SIZE_LABELS = ['1x1', '2x2', '3x3', '4x4', '5x5'];
 
 // Size constraints
 const MIN_WIDTH = 16;
-const MAX_WIDTH = 25;
+const MAX_WIDTH = 40;
 const MIN_HEIGHT = 8;
-const MAX_HEIGHT = 24;
+const MAX_HEIGHT = 40;
+const PROPERTY_WHEEL_STEP = 3;
 
 export function make_tool_properties_module(opts: ToolPropertiesOptions): Module {
+  function is_current_rect_selection_tool(): boolean {
+    const tool = opts.get_current_tool();
+    return (tool === 'rect_stroke' || tool === 'rect_fill') && opts.get_current_tool_target?.() === 'selection';
+  }
+
   let rect = opts.rect;
+  let property_scroll_offset = 0;
   
   const gizmo_config: ModuleGizmosConfig = {
     enabled: ['move', 'resize', 'close', 'seamless'],
@@ -359,9 +367,26 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     return get_property_rows().length > 0;
   }
 
+  function get_property_rows_total_height(): number {
+    return get_property_rows().reduce((sum, row) => sum + get_property_row_height(row), 0);
+  }
+
+  function get_property_rows_visible_height(): number {
+    return Math.max(0, rect.y1 - rect.y0 - 2);
+  }
+
+  function get_property_rows_max_scroll(): number {
+    return Math.max(0, get_property_rows_total_height() - get_property_rows_visible_height());
+  }
+
+  function clamp_property_scroll(): void {
+    property_scroll_offset = Math.max(0, Math.min(get_property_rows_max_scroll(), property_scroll_offset));
+  }
+
   function get_property_row_index_at(y: number): number | null {
     const rows = get_property_rows();
-    let cursor_y = rect.y1 - 3;
+    clamp_property_scroll();
+    let cursor_y = rect.y1 - 3 + property_scroll_offset;
     for (let i = 0; i < rows.length; i++) {
       const height = get_property_row_height(rows[i]!);
       if (y <= cursor_y && y > cursor_y - height) return i;
@@ -442,7 +467,8 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
       if (should_render_property_rows()) {
         const rows = get_property_rows();
         const active_side = opts.get_active_side?.() ?? 'left';
-        let cursor_y = rect.y1 - 3;
+        clamp_property_scroll();
+        let cursor_y = rect.y1 - 3 + property_scroll_offset;
         for (let i = 0; i < rows.length; i++) {
           const row = rows[i]!;
           const y = cursor_y;
@@ -630,6 +656,15 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
           }
           cursor_y -= get_property_row_height(row);
         }
+        const max_scroll = get_property_rows_max_scroll();
+        if (max_scroll > 0) {
+          if (property_scroll_offset > 0) {
+            c.set(rect.x1 - 2, rect.y0 + 1, { char: '^', rgb: vivid_color, style: 'regular', weight_index: 2 });
+          }
+          if (property_scroll_offset < max_scroll) {
+            c.set(rect.x1 - 2, rect.y1 - 1, { char: 'v', rgb: vivid_color, style: 'regular', weight_index: 2 });
+          }
+        }
       }
       // Show brush size slider only for brush tools
       else if (opts.get_current_tool() === 'pencil' || opts.get_current_tool() === 'eraser') {
@@ -778,7 +813,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
         }
         c.set(rect.x1 - 3, y_pos, { char: '-', rgb: slider_fg, style: 'regular', weight_index: 2 });
         c.set(rect.x1 - 1, y_pos, { char: '+', rgb: slider_fg, style: 'regular', weight_index: 2 });
-      } else if (opts.get_current_tool() === 'selectangle' || opts.get_current_tool() === 'lassoselect') {
+      } else if (is_current_rect_selection_tool() || opts.get_current_tool() === 'lassoselect') {
         const current_mode = opts.get_selection_mode();
         const selectionLayout = get_selection_controls_layout();
 
@@ -1035,7 +1070,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
         const row_index = get_property_row_index_at(e.y);
         if (row_index !== null) {
           const row = rows[row_index];
-          let row_top_y = rect.y1 - 3;
+          let row_top_y = rect.y1 - 3 + property_scroll_offset;
           for (let i = 0; i < row_index; i += 1) {
             row_top_y -= get_property_row_height(rows[i]!);
           }
@@ -1151,7 +1186,7 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
       }
       
       // Handle selection mode change
-      if (opts.get_current_tool() === 'selectangle' || opts.get_current_tool() === 'lassoselect') {
+      if (is_current_rect_selection_tool() || opts.get_current_tool() === 'lassoselect') {
         const mode = is_on_selection_mode(e.x, e.y);
         if (mode) {
           opts.on_selection_mode_change(mode);
@@ -1237,6 +1272,13 @@ export function make_tool_properties_module(opts: ToolPropertiesOptions): Module
     on_pointer_up_content(): void {
       is_dragging_scale = false;
       opts.custom_panel?.on_pointer_up?.();
+    },
+    on_wheel_content(e: WheelEvent): void {
+      if (should_render_property_rows()) {
+        property_scroll_offset += e.delta_y > 0 ? PROPERTY_WHEEL_STEP : e.delta_y < 0 ? -PROPERTY_WHEEL_STEP : 0;
+        clamp_property_scroll();
+        return;
+      }
     },
   });
 }

@@ -162,7 +162,7 @@ set_group_voxel(runtime, runtimeTopGroup.id, create_painter_voxel_record({
 const runtimeTopProjection = project_painter_runtime_display_space({
   runtime,
   view_state: make_place_view_state('top', 0),
-  focus_slot: 2,
+  focus_slot: 4,
   target_world: { x: 2, y: 2, z: 1 },
   projection_anchor_world: { x: 2, y: 2, z: 1 },
   viewport_width: 5,
@@ -180,7 +180,7 @@ assert(runtimeTopProjection.scene.slots.get(runtimeTopProjection.focus_slot)?.ce
 const runtimeSouthProjection = project_painter_runtime_display_space({
   runtime,
   view_state: make_place_view_state('south', 0),
-  focus_slot: 2,
+  focus_slot: 4,
   target_world: { x: 2, y: 1, z: 1 },
   projection_anchor_world: { x: 2, y: 1, z: 1 },
   viewport_width: 7,
@@ -212,7 +212,7 @@ const singlePlaneProjection = project_painter_runtime_display_space({
   viewport_height: 5,
   center_target_in_view: true,
 });
-assert(JSON.stringify(singlePlaneProjection.visible_planes) === JSON.stringify([-2, -1, 0, 1, 2]), 'runtime top projection should expose nearby empty depth planes for one-layer drawings');
+assert(JSON.stringify(singlePlaneProjection.visible_planes) === JSON.stringify([-4, -3, -2, -1, 0, 1, 2, 3, 4]), 'runtime top projection should expose nearby empty depth planes for one-layer drawings');
 
 const farPlaneProjection = project_painter_runtime_display_space({
   runtime: singlePlaneRuntime,
@@ -224,7 +224,7 @@ const farPlaneProjection = project_painter_runtime_display_space({
   viewport_height: 5,
   center_target_in_view: true,
 });
-assert(JSON.stringify(farPlaneProjection.visible_planes) === JSON.stringify([13, 14, 15, 16, 17]), 'runtime top projection should stay camera-centered at far depth instead of collapsing to authored bounds');
+assert(JSON.stringify(farPlaneProjection.visible_planes) === JSON.stringify([11, 12, 13, 14, 15, 16, 17, 18, 19]), 'runtime top projection should stay camera-centered at far depth instead of collapsing to authored bounds');
 assert(project_world_to_painter_display_cell({ projection: farPlaneProjection, world: { x: 1, y: 1, z: 0 } }) === null, 'off-window world planes should not collapse into visible slot 0');
 
 const southCameraCenteredProjection = project_painter_runtime_display_space({
@@ -237,7 +237,7 @@ const southCameraCenteredProjection = project_painter_runtime_display_space({
   viewport_height: 5,
   center_target_in_view: true,
 });
-assert(JSON.stringify(southCameraCenteredProjection.visible_planes) === JSON.stringify([14, 13, 12, 11, 10]), 'runtime side projection should use the same camera-centered margin on the current depth axis');
+assert(JSON.stringify(southCameraCenteredProjection.visible_planes) === JSON.stringify([16, 15, 14, 13, 12, 11, 10, 9, 8]), 'runtime side projection should use the same camera-centered margin on the current depth axis');
 
 const eastCameraCenteredProjection = project_painter_runtime_display_space({
   runtime: singlePlaneRuntime,
@@ -249,7 +249,7 @@ const eastCameraCenteredProjection = project_painter_runtime_display_space({
   viewport_height: 5,
   center_target_in_view: true,
 });
-assert(JSON.stringify(eastCameraCenteredProjection.visible_planes) === JSON.stringify([10, 11, 12, 13, 14]), 'runtime east projection should expose empty camera-centered planes on x just like top exposes them on z');
+assert(JSON.stringify(eastCameraCenteredProjection.visible_planes) === JSON.stringify([8, 9, 10, 11, 12, 13, 14, 15, 16]), 'runtime east projection should expose empty camera-centered planes on x just like top exposes them on z');
 
 const eastEmptyPlaneFocus = get_painter_focus_slot_for_anchor({
   anchor_world: { x: 12, y: 1, z: 0 },
@@ -257,7 +257,35 @@ const eastEmptyPlaneFocus = get_painter_focus_slot_for_anchor({
   visible_planes: eastCameraCenteredProjection.visible_planes,
   fallback_world_plane: 12,
 });
-assert(eastEmptyPlaneFocus.focus_world_plane === 12 && eastEmptyPlaneFocus.focus_slot === 2, 'focus lookup should track empty camera-centered planes on side views');
+assert(eastEmptyPlaneFocus.focus_world_plane === 12 && eastEmptyPlaneFocus.focus_slot === 4, 'focus lookup should track empty camera-centered planes on side views');
+
+const explicitTopFocusProjection = project_painter_runtime_display_space({
+  runtime: singlePlaneRuntime,
+  view_state: make_place_view_state('top', 0),
+  focus_slot: 4,
+  focus_world_plane: 12,
+  target_world: { x: 1, y: 1, z: 0 },
+  projection_anchor_world: { x: 1, y: 1, z: 0 },
+  viewport_width: 5,
+  viewport_height: 5,
+  center_target_in_view: true,
+});
+assert(JSON.stringify(explicitTopFocusProjection.visible_planes) === JSON.stringify([8, 9, 10, 11, 12, 13, 14, 15, 16]), 'runtime top projection should center visible depth planes on explicit focus plane rather than target world depth');
+assert(explicitTopFocusProjection.focus_world_plane === 12, 'runtime top projection should preserve explicit focus plane inside the visible window');
+
+const explicitSouthFocusProjection = project_painter_runtime_display_space({
+  runtime: singlePlaneRuntime,
+  view_state: make_place_view_state('south', 0),
+  focus_slot: 4,
+  focus_world_plane: 12,
+  target_world: { x: 1, y: 0, z: 0 },
+  projection_anchor_world: { x: 1, y: 0, z: 0 },
+  viewport_width: 5,
+  viewport_height: 5,
+  center_target_in_view: true,
+});
+assert(JSON.stringify(explicitSouthFocusProjection.visible_planes) === JSON.stringify([16, 15, 14, 13, 12, 11, 10, 9, 8]), 'runtime side projection should center visible depth planes on explicit focus plane for the active axis');
+assert(explicitSouthFocusProjection.focus_world_plane === 12, 'runtime side projection should preserve explicit focus plane inside the visible window');
 
 const graphicOnlySpace = createVoxelSpace(4, 4, { minZ: 0, maxZ: 2, defaultZ: 0 });
 addLayer(graphicOnlySpace, 1, 'Mid');

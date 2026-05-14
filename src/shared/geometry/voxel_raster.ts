@@ -1,6 +1,6 @@
-import { trace_line_3d } from '../math3d.js';
 import type { Voxel3 } from '../coords.js';
 import { key_voxel3, trunc_voxel3, voxel3 } from '../coords.js';
+import { rasterize_line3_to_voxels } from './shape_rasterize3.js';
 
 export type VoxelLineRenderMethod = 'voxel_dda';
 
@@ -11,20 +11,17 @@ export function get_line_voxels_3d(
 ): Voxel3[] {
   const normalizedStart = trunc_voxel3(start);
   const normalizedEnd = trunc_voxel3(end);
-  const voxels: Voxel3[] = [];
-  const seen = new Set<string>();
-
   switch (method) {
     case 'voxel_dda':
     default:
-      trace_line_3d(normalizedStart, normalizedEnd, (point) => {
-        const voxel = voxel3(point.x, point.y, point.z);
-        const key = key_voxel3(voxel);
-        if (seen.has(key)) return;
-        seen.add(key);
-        voxels.push(voxel);
+      return rasterize_line3_to_voxels({
+        x0: normalizedStart.x,
+        y0: normalizedStart.y,
+        z0: normalizedStart.z,
+        x1: normalizedEnd.x,
+        y1: normalizedEnd.y,
+        z1: normalizedEnd.z,
       });
-      return voxels;
   }
 }
 

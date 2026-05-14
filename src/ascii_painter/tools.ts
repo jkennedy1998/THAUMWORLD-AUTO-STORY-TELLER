@@ -8,11 +8,9 @@ import type { Grid, GridCell, GridPoint, Brush, ToolType, AppearanceSlotTargetMa
 import { clone_appearance_slot_assignments, DEFAULT_APPEARANCE_SLOT_TARGET_MASK, get_enabled_appearance_slots, getCell, setCell } from './types.js';
 import type { EditChannels } from './edit_mask.js';
 import { get_flood_fill_points } from '../shared/painter_tools.js';
-import {
-  get_line_points,
-  get_rect_fill_points,
-  get_rect_stroke_points,
-} from '../shared/geometry/plane_raster.js';
+import { get_line_points } from '../shared/geometry/plane_raster.js';
+import { rasterize_rect2_to_points } from '../shared/geometry/shape_rasterize2.js';
+import type { ShapeRenderMode2 } from '../shared/geometry/shape_specs.js';
 
 /**
  * Draw a single cell with the brush
@@ -130,6 +128,16 @@ export function drawLine(
   }
 }
 
+function getRectPoints(
+  x0: number,
+  y0: number,
+  x1: number,
+  y1: number,
+  mode: ShapeRenderMode2,
+): GridPoint[] {
+  return rasterize_rect2_to_points({ x0, y0, x1, y1 }, mode);
+}
+
 /**
  * Draw a rectangle outline
  */
@@ -141,7 +149,7 @@ export function drawRectStroke(
   y1: number,
   brush: Brush
 ): void {
-  for (const point of get_rect_stroke_points(x0, y0, x1, y1)) {
+  for (const point of getRectPoints(x0, y0, x1, y1, 'edge')) {
     drawCell(grid, point.x, point.y, brush);
   }
 }
@@ -157,7 +165,7 @@ export function drawRectFill(
   y1: number,
   brush: Brush
 ): void {
-  for (const point of get_rect_fill_points(x0, y0, x1, y1)) {
+  for (const point of getRectPoints(x0, y0, x1, y1, 'fill')) {
     drawCell(grid, point.x, point.y, brush);
   }
 }
@@ -263,7 +271,7 @@ export function previewRectStroke(
   x1: number,
   y1: number
 ): GridPoint[] {
-  return get_rect_stroke_points(x0, y0, x1, y1);
+  return getRectPoints(x0, y0, x1, y1, 'edge');
 }
 
 /**
@@ -276,5 +284,5 @@ export function previewRectFill(
   x1: number,
   y1: number
 ): GridPoint[] {
-  return get_rect_fill_points(x0, y0, x1, y1);
+  return getRectPoints(x0, y0, x1, y1, 'fill');
 }

@@ -7,6 +7,7 @@ import {
   make_place_view_state,
   project_world_point_with_roll,
   rotate_place_view_roll,
+  unproject_plane_point_with_roll,
   swing_place_view,
   type PlacePrincipalView,
   type PlaceViewRollQuarterTurn,
@@ -24,6 +25,11 @@ function key(state: { principal_view: PlacePrincipalView; roll_quarter_turn: Pla
 
 const VIEWS: readonly PlacePrincipalView[] = ['top', 'bottom', 'north', 'east', 'south', 'west'];
 const ROLLS: readonly PlaceViewRollQuarterTurn[] = [0, 1, 2, 3];
+const ROUND_TRIP_POINTS = [
+  { x: 0, y: 0, z: 0 },
+  { x: 2, y: -3, z: 1 },
+  { x: -4, y: 5, z: -2 },
+] as const;
 
 for (const principal_view of VIEWS) {
   for (const roll_quarter_turn of ROLLS) {
@@ -53,6 +59,12 @@ for (const principal_view of VIEWS) {
     assert(swingRightTilt.x === 0 && swingRightTilt.y === -40 && swingRightTilt.z === 0, `swing right tilt should be screen-space invariant for ${stateKey}`);
     assert(swingUpTilt.x === -40 && swingUpTilt.y === 0 && swingUpTilt.z === 0, `swing up tilt should be screen-space invariant for ${stateKey}`);
     assert(swingDownTilt.x === 40 && swingDownTilt.y === 0 && swingDownTilt.z === 0, `swing down tilt should be screen-space invariant for ${stateKey}`);
+
+    for (const point of ROUND_TRIP_POINTS) {
+      const projected = project_world_point_with_roll(point, state);
+      const unprojected = unproject_plane_point_with_roll(projected, state);
+      assert(JSON.stringify(unprojected) === JSON.stringify(point), `project/unproject should agree for ${stateKey} at ${JSON.stringify(point)}, got ${JSON.stringify(unprojected)}`);
+    }
 
     const origin = project_world_point_with_roll({ x: 0, y: 0, z: 0 }, state);
     const basis = get_view_basis_for_state(state);
