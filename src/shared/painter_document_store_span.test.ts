@@ -127,6 +127,7 @@ runtime = normalize_painter_document_runtime(relengthed.snapshot);
 assert(runtime.document.groups[base_group_id]!.properties[rasterPropertyId]!.blocks[0]?.end === 8, 'set_group_property_block_length should persist raster duration changes');
 assert(runtime.document.groups[base_group_id]?.cropped_start === runtime.document.groups[base_group_id]?.start, 'raster duration changes should sync crop start to property bounds');
 assert(runtime.document.groups[base_group_id]?.cropped_end === 8, 'raster duration changes should sync crop end to property bounds');
+assert(get_painter_group_raster_state_at_breath(runtime.document.groups[base_group_id]!, 7)?.content[0]?.char === 'A', 'raster duration changes should not hide authored content beyond the crop window');
 
 const split = apply_painter_group_structure_change(slot, document_id, {
   kind: 'split_group_property_block',

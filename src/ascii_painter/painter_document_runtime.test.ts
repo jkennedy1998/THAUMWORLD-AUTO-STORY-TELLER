@@ -119,7 +119,7 @@ set_painter_group_breath_span(runtime, baseGroupId, 0, 9);
 assert(runtime.document.groups[baseGroupId]?.breath_start === 0 && runtime.document.groups[baseGroupId]?.breath_end === 9, 'set_painter_group_breath_span should update authored group span');
 assert(get_painter_group_raster_state_at_breath(runtime.document.groups[baseGroupId]!, 4)?.content.length === get_painter_group_raster_state_at_breath(beforeSpanState, 0)?.content.length, 'set_painter_group_breath_span should preserve raster content payload');
 assert(is_painter_group_active_at_breath(runtime.document.groups[baseGroupId]!, 4) === true, 'group should be active at updated span interior breath');
-assert(is_painter_group_active_at_breath(runtime.document.groups[baseGroupId]!, 10) === false, 'group should be inactive outside updated span');
+assert(is_painter_group_active_at_breath(runtime.document.groups[baseGroupId]!, 10) === false, 'group should be inactive when no authored raster content exists');
 
 set_painter_document_loop_window(runtime, { breath_start: 10, breath_end: 16 });
 assert(runtime.document.breath.cropped_start === 10 && runtime.document.breath.cropped_end === 16, 'document loop window should extend beyond stored file timing bounds');

@@ -82,7 +82,7 @@ export function import_legacy_voxel_space_as_painter_document(legacy: VoxelSpace
     if (!document.group_order.includes(entry.group_id)) document.group_order.push(entry.group_id);
   }
   document.camera = structuredClone(legacy.camera);
-  document.metadata = legacy.metadata ? { ...legacy.metadata } : document.metadata;
+  document.metadata = legacy.metadata ? structuredClone(legacy.metadata) : document.metadata;
   return normalize_painter_document_runtime(document).document;
 }
 
@@ -113,7 +113,7 @@ export function build_legacy_voxel_space_from_painter_runtime(runtime: PainterDo
     });
   }
   legacy.camera = document.camera ? structuredClone(document.camera) : legacy.camera;
-  legacy.metadata = document.metadata ? { ...document.metadata } : legacy.metadata;
+  legacy.metadata = document.metadata ? structuredClone(document.metadata) : legacy.metadata;
   return legacy;
 }
 

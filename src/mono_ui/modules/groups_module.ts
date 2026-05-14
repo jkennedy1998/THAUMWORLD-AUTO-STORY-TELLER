@@ -56,7 +56,7 @@ export type GroupsModuleOptions = {
   on_reorder_group_properties?: (groupId: string, next_property_order: string[]) => void;
   on_remove_group_property?: (groupId: string, propertyId: string) => void;
   on_offset_group_in_time?: (groupId: string, deltaBreaths: number) => void;
-  on_set_group_timing?: (groupId: string, start: number, cropped_start: number, cropped_end: number) => void;
+  on_set_group_timing?: (groupId: string, start: number, window_start: number, window_end: number) => void;
   on_set_group_property_block_length?: (groupId: string, propertyId: string, blockId: string, lengthBreaths: number) => void;
   on_split_group_property_block?: (groupId: string, propertyId: string, blockId: string, splitBreath: number) => void;
   on_swap_group_property_blocks?: (groupId: string, propertyId: string, sourceBlockId: string, targetBlockId: string) => void;
@@ -997,21 +997,20 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
   }
 
   function getVisibleContentSpans(group: GroupListItem): Array<{ start: number; end: number }> {
-    const rasterRows = Array.isArray(group.property_rows)
-      ? group.property_rows.filter((row) => row.kind === 'raster')
-      : [];
-    if (rasterRows.length > 0) {
-      return rasterRows.flatMap((rasterRow) => rasterRow.blocks.map((block) => ({ start: Math.floor(block.start), end: Math.max(Math.floor(block.start), Math.floor(block.end)) })));
-    }
+    const rows = Array.isArray(group.property_rows) ? group.property_rows : [];
+    const spans = rows.flatMap((row) => row.blocks.map((block) => ({ start: Math.floor(block.start), end: Math.max(Math.floor(block.start), Math.floor(block.end)) })));
+    if (spans.length > 0) return spans;
     const groupBreathStart = Math.floor(group.breath_start ?? 0);
     const groupBreathEnd = Math.max(groupBreathStart, Math.floor(group.breath_end ?? groupBreathStart));
     return [{ start: groupBreathStart, end: groupBreathEnd }];
   }
 
-  function isBreathInsideGroupCrop(group: GroupListItem, breath: number): boolean {
-    const croppedStart = Math.floor(group.cropped_start ?? group.breath_start ?? 0);
-    const croppedEnd = Math.max(croppedStart, Math.floor(group.cropped_end ?? group.breath_end ?? croppedStart));
-    return breath >= croppedStart && breath <= croppedEnd;
+  function isBreathInsideGroupWindow(group: GroupListItem, breath: number): boolean {
+    return getVisibleContentSpans(group).some((span) => breath >= Math.floor(span.start) && breath <= Math.max(Math.floor(span.start), Math.floor(span.end)));
+  }
+
+  function isBreathInsideGroupTimingWindow(group: GroupListItem, breath: number): boolean {
+    return isBreathInsideGroupWindow(group, breath);
   }
 
   function getRasterCellChar(args: {
@@ -1951,7 +1950,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
           segments: getPreviewPropertyRowSegments(group, descriptor.property_id),
           cellForBreath: (segment, breath) => {
             const localIndex = breath - segment.start;
-            const visible = isBreathInsideGroupCrop(layout.item, breath);
+            const visible = isBreathInsideGroupTimingWindow(layout.item, breath);
             const isSingle = segment.start === segment.end;
             const isFirst = localIndex === 0;
             const isLast = breath === segment.end;
@@ -1992,7 +1991,7 @@ export function makeGroupsModule(opts: GroupsModuleOptions): Module {
         segments: movePreviewSegments,
         cellForBreath: (segment, breath) => {
           const localIndex = breath - segment.start;
-          const visible = isBreathInsideGroupCrop(layout.item, breath);
+          const visible = isBreathInsideGroupTimingWindow(layout.item, breath);
           const isSingle = segment.start === segment.end;
           const isFirst = localIndex === 0;
           const isLast = breath === segment.end;

@@ -171,17 +171,58 @@ Notes:
 
 ## Render Modes
 
-Volume shapes should support at least:
+The painter UI should stay simple across both 2D and 3D authoring.
 
-- `outline`
-- `fill`
+### Unified user-facing render modes
 
-Semantically:
+- `filled`
+- `surfaces`
+- `wireframe`
 
-- `fill` = all occupied voxels
-- `outline` = surface voxels / shell voxels
+### Dimensional mapping
 
-Important: `outline` should be understood as a **3D surface shell**, not just a 2D edge.
+When a shape collapses to a 2D footprint because one authored size axis is `1`:
+
+- `filled` = 2D fill
+- `surfaces` = 2D outline
+- `wireframe` = 2D outline
+
+When a shape is truly 3D:
+
+- `filled` = all occupied voxels
+- `surfaces` = outer shell / exposed faces
+- `wireframe` = structural edge set
+
+### Primitive expectations
+
+- `box`
+  - 2D: `filled` = rect fill, `surfaces`/`wireframe` = rect outline
+  - 3D: all three modes are distinct and should be supported
+- `sphere`
+  - 2D: `filled` = disk fill, `surfaces`/`wireframe` = disk outline
+  - 3D: `wireframe` should increasingly come from explicit UV-style segment structure rather than dense shell extraction
+- `cylinder`
+  - 2D: `filled` = ellipse fill, `surfaces`/`wireframe` = ellipse outline
+  - 3D: `wireframe` should increasingly come from explicit polygon vertices/rails rather than dense shell extraction
+- `cone`
+  - 2D: `filled` = footprint fill, `surfaces`/`wireframe` = footprint outline
+  - 3D: `wireframe` should increasingly come from explicit polygon vertices/rails rather than dense shell extraction
+
+### Curved-shape segment controls
+
+Curved primitives should expose retained per-user detail controls in the shape tool properties panel.
+
+Defaults for the first pass:
+
+- `sphere.u_segments = 5`
+- `sphere.v_segments = 5`
+- `cylinder.sides = 5`
+- `cone.sides = 5`
+
+These are tool properties, not shared document/session authority.
+They should persist per user just like the other painter tool properties.
+
+Important: the UI stays unified even though `wireframe` and `surfaces` intentionally collapse to the same 2D result.
 
 ## Shape Editing Model
 
@@ -192,7 +233,7 @@ Use a temporary **shape session** instead of immediately baking the operation be
 ```ts
 type ActiveShapeSession = {
   primitive: 'box' | 'sphere' | 'cylinder' | 'cone';
-  render_mode: 'outline' | 'fill';
+  render_mode: 'filled' | 'surfaces' | 'wireframe';
   transform: Transform3Like;
   params: ShapeParams;
   editing_state: {
@@ -656,7 +697,7 @@ Track these as the active task list and check them off as implementation progres
 ### Phase 4 — ASCII painter properties
 
 - [x] Add shape property rows
-- [x] Add `outline/fill` controls
+- [x] Add unified `filled/surfaces/wireframe` controls
 - [x] Add size step controls
 - [x] Add commit/cancel controls in properties
 - [x] Add nudge/swing/roll controls targeting the active shape session
@@ -672,7 +713,16 @@ Track these as the active task list and check them off as implementation progres
 - [x] Add `sphere`
 - [x] Add `cylinder`
 - [x] Add `cone`
-- [ ] Validate each primitive in both `outline` and `fill`
+- [x] Unify painter shape render mode UI to `filled` / `surfaces` / `wireframe`
+- [x] Make 2D shape sessions collapse to `filled` vs 2D outline semantics
+- [x] Add true 3D `surface` vs `wireframe` separation for boxes
+- [x] For non-box 3D primitives, map temporary `wireframe` behavior to `surfaces`
+- [x] Validate each primitive in `filled`, `surfaces`, and `wireframe` according to the support matrix
+- [x] Add retained per-user curved-shape segment properties with default `5`
+- [x] Expose primitive-specific curved-shape segment rows in shape properties
+- [x] Route curved-shape segment values into shared geometry session specs
+- [x] Replace dense curved `wireframe` extraction with segment/vertex-driven cylinder/cone rails and sphere UV wireframe
+- [x] Route curved `surfaces` through segment-driven faceted slice generation
 
 ### Phase 7 — later adoption after ASCII painter parity
 
@@ -959,7 +1009,7 @@ Avoid making `tool_properties_module.ts` understand too much domain-specific sha
 #### For v1, expose
 
 - primitive info row: `BOX`
-- render mode cycle: `OUTLINE` / `FILL`
+- render mode cycle: `FILLED` / `SURFACES` / `WIREFRAME`
 - size steppers:
   - `SIZE X`
   - `SIZE Y`
@@ -1002,8 +1052,9 @@ Reuse existing:
 
 #### Recommended v1 behavior
 
-- `outline` applies brush/material payload to shell voxels
-- `fill` applies brush/material payload to all occupied voxels
+- `filled` applies brush/material payload to all occupied voxels
+- `surfaces` applies brush/material payload to outer shell / 2D outline voxels
+- `wireframe` applies brush/material payload to structural edge voxels in 3D and 2D outline voxels in collapsed 2D cases
 
 This lets shape behave like a geometry-driven paint operation rather than a special-case editor object.
 

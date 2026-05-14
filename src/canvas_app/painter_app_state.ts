@@ -123,6 +123,10 @@ function add_world_point3(a: { x: number; y: number; z: number }, b: { x: number
   return { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
 }
 
+function subtract_world_point3(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
 function scale_axis_vector3(axis: AxisVector3, amount: number): { x: number; y: number; z: number } {
   return {
     x: axis.x * amount,
@@ -262,11 +266,15 @@ const CANVAS_WIDTH = 80;
 const CANVAS_HEIGHT = 40;
 
 type PainterShapePrimitive = 'box' | 'sphere' | 'cylinder' | 'cone';
-type PainterShapeRenderMode = 'outline' | 'fill';
+type PainterShapeRenderMode = 'filled' | 'surfaces' | 'wireframe';
 
 type PainterShapeSession = {
   primitive: PainterShapePrimitive;
   render_mode: PainterShapeRenderMode;
+  cylinder_sides: number;
+  cone_sides: number;
+  sphere_u_segments: number;
+  sphere_v_segments: number;
   origin_world: { x: number; y: number; z: number };
   seed_world: { x: number; y: number; z: number };
   drag_world: { x: number; y: number; z: number };
@@ -2171,14 +2179,55 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     };
   }
 
+  function get_shape_session_far_corner_world(origin_world: { x: number; y: number; z: number }, size: { x: number; y: number; z: number }, basis: OrthoBasis3): { x: number; y: number; z: number } {
+    return add_world_point3(
+      add_world_point3(
+        add_world_point3(origin_world, scale_axis_vector3(basis.right, Math.max(0, size.x - 1))),
+        scale_axis_vector3(basis.up, Math.max(0, size.y - 1)),
+      ),
+      scale_axis_vector3(basis.forward, Math.max(0, size.z - 1)),
+    );
+  }
+
+  function get_shape_session_center2x(origin_world: { x: number; y: number; z: number }, size: { x: number; y: number; z: number }, basis: OrthoBasis3): { x: number; y: number; z: number } {
+    const rightSpan = scale_axis_vector3(basis.right, Math.max(0, size.x - 1));
+    const upSpan = scale_axis_vector3(basis.up, Math.max(0, size.y - 1));
+    const forwardSpan = scale_axis_vector3(basis.forward, Math.max(0, size.z - 1));
+    return {
+      x: (origin_world.x * 2) + rightSpan.x + upSpan.x + forwardSpan.x,
+      y: (origin_world.y * 2) + rightSpan.y + upSpan.y + forwardSpan.y,
+      z: (origin_world.z * 2) + rightSpan.z + upSpan.z + forwardSpan.z,
+    };
+  }
+
+  function build_shape_session_from_center_preserving_rotation(session: PainterShapeSession, next_view_state: PlaceViewState): PainterShapeSession {
+    const current_basis = get_shape_session_basis_for_view(session.view_state);
+    const next_basis = get_shape_session_basis_for_view(next_view_state);
+    const center2x = get_shape_session_center2x(session.origin_world, session.size, current_basis);
+    const next_origin2x = {
+      x: center2x.x - (next_basis.right.x * Math.max(0, session.size.x - 1)) - (next_basis.up.x * Math.max(0, session.size.y - 1)) - (next_basis.forward.x * Math.max(0, session.size.z - 1)),
+      y: center2x.y - (next_basis.right.y * Math.max(0, session.size.x - 1)) - (next_basis.up.y * Math.max(0, session.size.y - 1)) - (next_basis.forward.y * Math.max(0, session.size.z - 1)),
+      z: center2x.z - (next_basis.right.z * Math.max(0, session.size.x - 1)) - (next_basis.up.z * Math.max(0, session.size.y - 1)) - (next_basis.forward.z * Math.max(0, session.size.z - 1)),
+    };
+    const next_origin_world = {
+      x: Math.round(next_origin2x.x / 2),
+      y: Math.round(next_origin2x.y / 2),
+      z: Math.round(next_origin2x.z / 2),
+    };
+    const next_drag_world = get_shape_session_far_corner_world(next_origin_world, session.size, next_basis);
+    return {
+      ...session,
+      view_state: make_place_view_state(next_view_state.principal_view, next_view_state.roll_quarter_turn),
+      origin_world: next_origin_world,
+      seed_world: next_origin_world,
+      drag_world: next_drag_world,
+    };
+  }
+
   function rebuild_shape_session_box_from_drag(session: PainterShapeSession, target_world: { x: number; y: number; z: number }): PainterShapeSession {
     const basis = get_shape_session_basis_for_view(session.view_state);
     const next_drag_world = clone_world_point3(target_world);
-    const delta = {
-      x: next_drag_world.x - session.seed_world.x,
-      y: next_drag_world.y - session.seed_world.y,
-      z: next_drag_world.z - session.seed_world.z,
-    };
+    const delta = subtract_world_point3(next_drag_world, session.seed_world);
     const delta_right = dot_world_axis3(delta, basis.right);
     const delta_up = dot_world_axis3(delta, basis.up);
     const delta_forward = dot_world_axis3(delta, basis.forward);
@@ -2942,24 +2991,24 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
-    painterDiag('group breath span changed', {
+    painterDiag('group timing window changed', {
       group_id,
       breath_start: newGroupData?.breath_start ?? null,
       breath_end: newGroupData?.breath_end ?? null,
     });
   }
 
-  function setPainterGroupTiming(group_id: string, args: { start: number; cropped_start: number; cropped_end: number }): void {
+  function setPainterGroupTiming(group_id: string, args: { start: number; window_start: number; window_end: number }): void {
     finalizePendingPainterCanvasChanges();
     commitProjectedGridToWorld();
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
     const oldGroupData = structuredClone(group);
-    painter_session_core.apply_group_command({ kind: 'set_group_timing', group_id, ...args });
+    painter_session_core.apply_group_command({ kind: 'set_group_timing', group_id, start: args.start, cropped_start: args.window_start, cropped_end: args.window_end });
     sync_local_session_state_from_core();
     sync_lineage_state_from_core();
     const newGroupData = painter_document_runtime.document.groups[group_id] ? structuredClone(painter_document_runtime.document.groups[group_id]!) : undefined;
-    logGroupAction(history, 'set_group_timing', `Set Group Timing ${group.name}`, {
+    logGroupAction(history, 'set_group_timing', `Set Group Window ${group.name}`, {
       groupId: group_id,
       oldGroupData,
       newGroupData,
@@ -2968,8 +3017,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       kind: 'set_group_timing',
       group_id,
       start: Math.max(0, Math.floor(newGroupData?.start ?? args.start)),
-      cropped_start: Math.max(0, Math.floor(newGroupData?.cropped_start ?? args.cropped_start)),
-      cropped_end: Math.max(0, Math.floor(newGroupData?.cropped_end ?? args.cropped_end)),
+      cropped_start: Math.max(0, Math.floor(newGroupData?.cropped_start ?? args.window_start)),
+      cropped_end: Math.max(0, Math.floor(newGroupData?.cropped_end ?? args.window_end)),
     });
     sync_painter_runtime_after_mutation({ preserve_group_order: true, focus_active_group: true });
     schedule_auto_save();
@@ -3809,7 +3858,15 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   resetPainterHistoryState('initial painter state');
   
   let shape_primitive: PainterShapePrimitive = saved_tool_props.shape_primitive ?? 'box';
-  let shape_render_mode: PainterShapeRenderMode = saved_tool_props.shape_render_mode === 'fill' ? 'fill' : 'outline';
+  let shape_render_mode: PainterShapeRenderMode = saved_tool_props.shape_render_mode === 'filled'
+    ? 'filled'
+    : saved_tool_props.shape_render_mode === 'wireframe'
+      ? 'wireframe'
+      : 'surfaces';
+  let shape_cylinder_sides = Math.max(3, Math.trunc(saved_tool_props.shape_cylinder_sides ?? 5));
+  let shape_cone_sides = Math.max(3, Math.trunc(saved_tool_props.shape_cone_sides ?? 5));
+  let shape_sphere_u_segments = Math.max(3, Math.trunc(saved_tool_props.shape_sphere_u_segments ?? 5));
+  let shape_sphere_v_segments = Math.max(3, Math.trunc(saved_tool_props.shape_sphere_v_segments ?? 5));
   let active_shape_session: PainterShapeSession | null = null;
 
   // Current tool state
@@ -3952,8 +4009,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     if (!group_id) return;
     const group = painter_document_runtime.document.groups[group_id];
     if (!group) return;
-    const range = derive_group_breath_range(group);
-    setCurrentPainterBreath(edge === 'start' ? range.cropped_start : range.cropped_end);
+    const timingWindow = derive_group_breath_range(group);
+    const windowStart = timingWindow.cropped_start;
+    const windowEnd = timingWindow.cropped_end;
+    setCurrentPainterBreath(edge === 'start' ? windowStart : windowEnd);
   }
 
   function performPainterUndoShortcut(): boolean {
@@ -4375,6 +4434,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     active_shape_session = {
       primitive: shape_primitive,
       render_mode: shape_render_mode,
+      cylinder_sides: shape_cylinder_sides,
+      cone_sides: shape_cone_sides,
+      sphere_u_segments: shape_sphere_u_segments,
+      sphere_v_segments: shape_sphere_v_segments,
       origin_world: seed_world,
       seed_world,
       drag_world: seed_world,
@@ -4415,9 +4478,41 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   }
 
   function set_shape_render_mode(render_mode: PainterShapeRenderMode): void {
-    shape_render_mode = render_mode === 'fill' ? 'fill' : 'outline';
+    shape_render_mode = render_mode === 'filled'
+      ? 'filled'
+      : render_mode === 'wireframe'
+        ? 'wireframe'
+        : 'surfaces';
     saveToolProperties({ shape_render_mode });
     if (active_shape_session) active_shape_session = { ...active_shape_session, render_mode: shape_render_mode };
+    sync_shape_session_live_preview();
+  }
+
+  function set_shape_cylinder_sides(value: number): void {
+    shape_cylinder_sides = Math.max(3, Math.trunc(value));
+    saveToolProperties({ shape_cylinder_sides });
+    if (active_shape_session) active_shape_session = { ...active_shape_session, cylinder_sides: shape_cylinder_sides };
+    sync_shape_session_live_preview();
+  }
+
+  function set_shape_cone_sides(value: number): void {
+    shape_cone_sides = Math.max(3, Math.trunc(value));
+    saveToolProperties({ shape_cone_sides });
+    if (active_shape_session) active_shape_session = { ...active_shape_session, cone_sides: shape_cone_sides };
+    sync_shape_session_live_preview();
+  }
+
+  function set_shape_sphere_u_segments(value: number): void {
+    shape_sphere_u_segments = Math.max(3, Math.trunc(value));
+    saveToolProperties({ shape_sphere_u_segments });
+    if (active_shape_session) active_shape_session = { ...active_shape_session, sphere_u_segments: shape_sphere_u_segments };
+    sync_shape_session_live_preview();
+  }
+
+  function set_shape_sphere_v_segments(value: number): void {
+    shape_sphere_v_segments = Math.max(3, Math.trunc(value));
+    saveToolProperties({ shape_sphere_v_segments });
+    if (active_shape_session) active_shape_session = { ...active_shape_session, sphere_v_segments: shape_sphere_v_segments };
     sync_shape_session_live_preview();
   }
 
@@ -4449,10 +4544,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
 
   function step_shape_view_action(action: 'swing_left' | 'swing_right' | 'swing_up' | 'swing_down' | 'roll_left' | 'roll_right'): PainterShapeSession | null {
     if (!active_shape_session) return null;
-    active_shape_session = {
-      ...active_shape_session,
-      view_state: step_place_view_action(active_shape_session.view_state, action),
-    };
+    const next_view_state = step_place_view_action(active_shape_session.view_state, action);
+    active_shape_session = build_shape_session_from_center_preserving_rotation(active_shape_session, next_view_state);
     sync_shape_session_live_preview();
     return active_shape_session;
   }
@@ -4460,24 +4553,32 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function get_shape_session_preview_world_cells(): Array<{ x: number; y: number; z: number }> {
     if (!active_shape_session) return [];
     const basis = get_shape_session_basis_for_view(active_shape_session.view_state);
-    const mode = active_shape_session.render_mode === 'fill' ? 'volume' : 'outline';
+    const mode = active_shape_session.render_mode === 'filled'
+      ? 'filled'
+      : active_shape_session.render_mode === 'wireframe'
+        ? 'wireframe'
+        : 'surfaces';
     const worlds = active_shape_session.primitive === 'sphere'
       ? rasterize_sphere3_session_to_voxels({
         anchor: active_shape_session.origin_world,
         size: active_shape_session.size,
         basis,
+        u_segments: active_shape_session.sphere_u_segments,
+        v_segments: active_shape_session.sphere_v_segments,
       }, mode)
       : active_shape_session.primitive === 'cylinder'
         ? rasterize_cylinder3_session_to_voxels({
           anchor: active_shape_session.origin_world,
           size: active_shape_session.size,
           basis,
+          radial_segments: active_shape_session.cylinder_sides,
         }, mode)
         : active_shape_session.primitive === 'cone'
           ? rasterize_cone3_session_to_voxels({
             anchor: active_shape_session.origin_world,
             size: active_shape_session.size,
             basis,
+            radial_segments: active_shape_session.cone_sides,
           }, mode)
           : rasterize_box3_session_to_voxels({
             anchor: active_shape_session.origin_world,
@@ -4786,19 +4887,20 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
         brush_size: left_brush_size,
         active_property_side: side,
       });
-      return;
+    } else {
+      saveToolProperties({
+        right_brush_char: brush.char,
+        right_brush_rgb: { ...brush.rgb },
+        right_brush_graphic: brush.graphic ? { ...brush.graphic } : undefined,
+        right_brush_appearance_slots: clone_appearance_slot_assignments(brush.appearance_slots),
+        right_brush_materials: brush.materials ? { ...brush.materials } : undefined,
+        right_selected_appearance: cloneAppearanceValue(right_selected_appearance),
+        right_brush_weight_index: brush.weight_index,
+        right_brush_size,
+        active_property_side: side,
+      });
     }
-    saveToolProperties({
-      right_brush_char: brush.char,
-      right_brush_rgb: { ...brush.rgb },
-      right_brush_graphic: brush.graphic ? { ...brush.graphic } : undefined,
-      right_brush_appearance_slots: clone_appearance_slot_assignments(brush.appearance_slots),
-      right_brush_materials: brush.materials ? { ...brush.materials } : undefined,
-      right_selected_appearance: cloneAppearanceValue(right_selected_appearance),
-      right_brush_weight_index: brush.weight_index,
-      right_brush_size,
-      active_property_side: side,
-    });
+    if (active_shape_session?.side === side) sync_shape_session_live_preview();
   }
   
   // Text tool: space replaces character or preserves it
@@ -7281,12 +7383,54 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
           type: 'single_cycle',
           id: 'shape_render_mode',
           label: 'MODE',
-          value: shape_render_mode === 'fill' ? 'FILL' : 'OUTL',
-          options: ['OUTL', 'FILL'],
+          value: shape_render_mode === 'filled' ? 'FILL' : shape_render_mode === 'wireframe' ? 'WIRE' : 'SURF',
+          options: ['SURF', 'FILL', 'WIRE'],
           on_cycle: () => {
-            set_shape_render_mode(shape_render_mode === 'fill' ? 'outline' : 'fill');
+            set_shape_render_mode(
+              shape_render_mode === 'surfaces'
+                ? 'filled'
+                : shape_render_mode === 'filled'
+                  ? 'wireframe'
+                  : 'surfaces'
+            );
           },
         });
+        if (shape_primitive === 'sphere') {
+          rows.push({
+            type: 'single_stepper',
+            id: 'shape_sphere_u_segments',
+            label: 'U SEG',
+            value: `${active_shape_session?.sphere_u_segments ?? shape_sphere_u_segments}`,
+            on_decrement: () => { set_shape_sphere_u_segments((active_shape_session?.sphere_u_segments ?? shape_sphere_u_segments) - 1); },
+            on_increment: () => { set_shape_sphere_u_segments((active_shape_session?.sphere_u_segments ?? shape_sphere_u_segments) + 1); },
+          });
+          rows.push({
+            type: 'single_stepper',
+            id: 'shape_sphere_v_segments',
+            label: 'V SEG',
+            value: `${active_shape_session?.sphere_v_segments ?? shape_sphere_v_segments}`,
+            on_decrement: () => { set_shape_sphere_v_segments((active_shape_session?.sphere_v_segments ?? shape_sphere_v_segments) - 1); },
+            on_increment: () => { set_shape_sphere_v_segments((active_shape_session?.sphere_v_segments ?? shape_sphere_v_segments) + 1); },
+          });
+        } else if (shape_primitive === 'cylinder') {
+          rows.push({
+            type: 'single_stepper',
+            id: 'shape_cylinder_sides',
+            label: 'SIDES',
+            value: `${active_shape_session?.cylinder_sides ?? shape_cylinder_sides}`,
+            on_decrement: () => { set_shape_cylinder_sides((active_shape_session?.cylinder_sides ?? shape_cylinder_sides) - 1); },
+            on_increment: () => { set_shape_cylinder_sides((active_shape_session?.cylinder_sides ?? shape_cylinder_sides) + 1); },
+          });
+        } else if (shape_primitive === 'cone') {
+          rows.push({
+            type: 'single_stepper',
+            id: 'shape_cone_sides',
+            label: 'SIDES',
+            value: `${active_shape_session?.cone_sides ?? shape_cone_sides}`,
+            on_decrement: () => { set_shape_cone_sides((active_shape_session?.cone_sides ?? shape_cone_sides) - 1); },
+            on_increment: () => { set_shape_cone_sides((active_shape_session?.cone_sides ?? shape_cone_sides) + 1); },
+          });
+        }
         rows.push({
           type: 'single_stepper',
           id: 'shape_size_x',
@@ -8274,8 +8418,8 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       on_offset_group_in_time: (group_id: string, delta_breaths: number) => {
         offsetPainterGroupInTime(group_id, delta_breaths);
       },
-      on_set_group_timing: (group_id: string, start: number, cropped_start: number, cropped_end: number) => {
-        setPainterGroupTiming(group_id, { start, cropped_start, cropped_end });
+      on_set_group_timing: (group_id: string, start: number, window_start: number, window_end: number) => {
+        setPainterGroupTiming(group_id, { start, window_start, window_end });
       },
       on_set_group_property_block_length: (group_id: string, property_id: string, block_id: string, length_breaths: number) => {
         setPainterGroupPropertyBlockLength(group_id, property_id, block_id, length_breaths);

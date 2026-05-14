@@ -1,7 +1,7 @@
 import type { Size3, Voxel3 } from '../coords.js';
 
 export type ShapeRenderMode2 = 'edge' | 'fill';
-export type ShapeRenderMode3 = 'outline' | 'volume';
+export type ShapeRenderMode3 = 'filled' | 'surfaces' | 'wireframe';
 
 export type SignedAxis3 = -1 | 0 | 1;
 
@@ -65,16 +65,20 @@ export type Sphere3SessionSpec = {
   anchor: Voxel3;
   size: Size3;
   basis?: OrthoBasis3;
+  u_segments?: number;
+  v_segments?: number;
 };
 
 export type Cylinder3SessionSpec = {
   anchor: Voxel3;
   size: Size3;
   basis?: OrthoBasis3;
+  radial_segments?: number;
 };
 
 export type Cone3SessionSpec = {
   anchor: Voxel3;
   size: Size3;
   basis?: OrthoBasis3;
+  radial_segments?: number;
 };

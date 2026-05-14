@@ -55,8 +55,8 @@ export type ResolveVoxelWinnerResult = {
 type PainterTimelineSummary = {
   group_id: string;
   start: number;
-  cropped_start: number;
-  cropped_end: number;
+  window_start: number;
+  window_end: number;
   derivative_end: number;
   raster_segments: Array<{ id: string; start: number; end: number; length_breaths: number; is_blank: boolean }>;
   move_blocks: Array<{ property_id: string; block_id: string; start: number; end: number; breath: number; is_blank: boolean }>;
@@ -75,8 +75,8 @@ function summarize_painter_group_timeline(group: PainterGroup): PainterTimelineS
   return {
     group_id: group.id,
     start: Math.max(0, Math.floor(group.start ?? 0)),
-    cropped_start: range.cropped_start,
-    cropped_end: range.cropped_end,
+    window_start: range.cropped_start,
+    window_end: range.cropped_end,
     derivative_end: range.derivative_end,
     raster_segments: derive_group_raster_segment_ranges(group).map((segment) => ({
       id: segment.segment_id,
@@ -314,13 +314,15 @@ function get_primary_property(group: PainterGroup, kind: PainterProperty['kind']
   if (existing) return group.properties[existing.id] ?? existing;
   if (!createIfMissing) return null;
   const propertyId = make_runtime_property_id(kind);
+  const windowStart = Math.floor(group.start ?? group.breath_start ?? 0);
+  const windowEnd = Math.max(windowStart, Math.floor(group.breath_end ?? group.cropped_end ?? group.start ?? 0));
   const property = clone_painter_property({
     id: propertyId,
     kind,
     label: kind === 'raster' ? 'content' : kind,
     process_mode: 'add',
     blocks: kind === 'raster'
-      ? [create_blank_property_block(Math.floor(group.start ?? group.breath_start ?? 0), Math.max(Math.floor(group.start ?? group.breath_start ?? 0), Math.floor(group.breath_end ?? group.cropped_end ?? group.start ?? 0)))]
+      ? [create_blank_property_block(windowStart, windowEnd)]
       : [],
   });
   group.properties[propertyId] = property;
@@ -333,11 +335,11 @@ function sync_group_timing_from_properties(group: PainterGroup): void {
     .map((id) => group.properties?.[id] ?? null)
     .filter((property): property is PainterProperty => !!property)
     .flatMap((property) => property.blocks);
-  const minStart = blocks.length > 0 ? blocks.reduce((min, block) => Math.min(min, Math.floor(block.start)), Math.floor(blocks[0]!.start)) : Math.max(0, Math.floor(group.start ?? 0));
-  const maxEnd = blocks.length > 0 ? blocks.reduce((max, block) => Math.max(max, Math.floor(block.end)), minStart) : Math.max(minStart, Math.floor(group.breath_end ?? group.cropped_end ?? minStart));
-  group.start = minStart;
-  group.cropped_start = minStart;
-  group.cropped_end = maxEnd;
+  const windowStart = blocks.length > 0 ? blocks.reduce((min, block) => Math.min(min, Math.floor(block.start)), Math.floor(blocks[0]!.start)) : Math.max(0, Math.floor(group.start ?? 0));
+  const windowEnd = blocks.length > 0 ? blocks.reduce((max, block) => Math.max(max, Math.floor(block.end)), windowStart) : Math.max(windowStart, Math.floor(group.breath_end ?? group.cropped_end ?? windowStart));
+  group.start = windowStart;
+  group.cropped_start = windowStart;
+  group.cropped_end = windowEnd;
   group.breath_start = group.cropped_start;
   group.breath_end = group.cropped_end;
 }
@@ -436,9 +438,7 @@ function refresh_document_extents(runtime: PainterDocumentRuntime): void {
 }
 
 export function is_painter_group_active_at_breath(group: PainterGroup, breath: number): boolean {
-  const targetBreath = Math.floor(breath);
-  const range = derive_group_breath_range(group);
-  return targetBreath >= range.cropped_start && targetBreath <= range.cropped_end;
+  return get_painter_group_raster_state_at_breath(group, breath) !== null;
 }
 
 export function resolve_painter_group_location_at_breath(group: PainterGroup, breath: number): PainterGroupLocationOffset {
@@ -560,13 +560,13 @@ export function move_painter_group_property_block(runtime: PainterDocumentRuntim
 export function set_painter_group_breath_span(runtime: PainterDocumentRuntime, groupId: string, breathStart: number, breathEnd: number): void {
   const group = runtime.document.groups[groupId];
   if (!group) throw new Error(`painter_group_not_found:${groupId}`);
-  const nextStart = Math.max(0, Math.floor(breathStart));
-  const nextEnd = Math.max(nextStart, Math.floor(breathEnd));
-  group.start = nextStart;
-  group.cropped_start = nextStart;
-  group.cropped_end = nextEnd;
-  group.breath_start = nextStart;
-  group.breath_end = nextEnd;
+  const windowStart = Math.max(0, Math.floor(breathStart));
+  const windowEnd = Math.max(windowStart, Math.floor(breathEnd));
+  group.start = windowStart;
+  group.cropped_start = windowStart;
+  group.cropped_end = windowEnd;
+  group.breath_start = windowStart;
+  group.breath_end = windowEnd;
   if (group.metadata) group.metadata.modified_at = new Date().toISOString();
   touch_modified_at(runtime.document);
   rebuild_runtime_indices(runtime);
@@ -1212,7 +1212,7 @@ function rebuild_runtime_indices(runtime: PainterDocumentRuntime): void {
   for (const groupId of Object.keys(runtime.document.groups)) {
     const group = runtime.document.groups[groupId]!;
     const voxelMap = new Map<string, PainterVoxelRecord>();
-    if (group.visible && is_painter_group_active_at_breath(group, runtime.active_breath)) {
+    if (group.visible) {
       const offset = resolve_painter_group_location_at_breath(group, runtime.active_breath);
       for (const localVoxel of resolve_group_raster_property_voxels_at_breath(group, runtime.active_breath)) {
         const worldVoxel = project_painter_group_local_voxel_to_world(localVoxel, offset);
@@ -1246,7 +1246,6 @@ export function resolve_painter_voxel_winner(runtime: PainterDocumentRuntime, co
     if (!contributors.includes(groupId)) continue;
     const group = runtime.document.groups[groupId];
     if (!group?.visible) continue;
-    if (!is_painter_group_active_at_breath(group, runtime.active_breath)) continue;
     const voxel = runtime.group_voxel_index.get(groupId)?.get(coordKey) ?? null;
     if (voxel) {
       return { winning_group_id: groupId, cell: clone_painter_voxel_record(voxel) };
@@ -1267,7 +1266,7 @@ export function resolve_painter_group_preview_winner(runtime: PainterDocumentRun
     const candidateGroupId = runtime.document.group_order[i]!;
     if (!contributors.has(candidateGroupId)) continue;
     const group = runtime.document.groups[candidateGroupId];
-    if (!group?.visible || !is_painter_group_active_at_breath(group, runtime.active_breath)) continue;
+    if (!group?.visible) continue;
     if (candidateGroupId === groupId) {
       if (previewClearsCell) continue;
       return {

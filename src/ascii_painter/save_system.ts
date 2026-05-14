@@ -125,8 +125,14 @@ function sanitize_shape_primitive(value: unknown, fallback: 'box' | 'sphere' | '
   return value === 'sphere' || value === 'cylinder' || value === 'cone' || value === 'box' ? value : fallback;
 }
 
-function sanitize_shape_render_mode(value: unknown, fallback: 'outline' | 'fill'): 'outline' | 'fill' {
-  return value === 'outline' || value === 'fill' ? value : fallback;
+function sanitize_shape_render_mode(value: unknown, fallback: 'filled' | 'surfaces' | 'wireframe'): 'filled' | 'surfaces' | 'wireframe' {
+  if (value === 'fill') return 'filled';
+  if (value === 'outline') return 'surfaces';
+  return value === 'filled' || value === 'surfaces' || value === 'wireframe' ? value : fallback;
+}
+
+function sanitize_shape_segment_count(value: unknown, fallback: number, min: number = 3, max: number = 24): number {
+  return clamp_integer(value, fallback, min, max);
 }
 
 function sanitize_boolean(value: unknown, fallback: boolean): boolean {
@@ -497,7 +503,11 @@ export interface ToolProperties {
   left_rect_target: ToolEditTarget;
   right_rect_target: ToolEditTarget;
   shape_primitive: 'box' | 'sphere' | 'cylinder' | 'cone';
-  shape_render_mode: 'outline' | 'fill';
+  shape_render_mode: 'filled' | 'surfaces' | 'wireframe';
+  shape_cylinder_sides: number;
+  shape_cone_sides: number;
+  shape_sphere_u_segments: number;
+  shape_sphere_v_segments: number;
   
   // Text tool settings
   text_spacing: number;
@@ -570,7 +580,11 @@ const DEFAULT_TOOL_PROPERTIES: ToolProperties = {
   left_rect_target: 'content',
   right_rect_target: 'content',
   shape_primitive: 'box',
-  shape_render_mode: 'outline',
+  shape_render_mode: 'surfaces',
+  shape_cylinder_sides: 5,
+  shape_cone_sides: 5,
+  shape_sphere_u_segments: 5,
+  shape_sphere_v_segments: 5,
   text_spacing: 1,
   text_charlead: 0,
   text_enterlead: 1,
@@ -663,6 +677,10 @@ export function loadToolProperties(): ToolProperties {
       right_rect_target: legacy_right_selectangle ? 'selection' : sanitize_tool_target(parsed.right_rect_target, DEFAULT_TOOL_PROPERTIES.right_rect_target),
       shape_primitive: sanitize_shape_primitive(parsed.shape_primitive, DEFAULT_TOOL_PROPERTIES.shape_primitive),
       shape_render_mode: sanitize_shape_render_mode(parsed.shape_render_mode, DEFAULT_TOOL_PROPERTIES.shape_render_mode),
+      shape_cylinder_sides: sanitize_shape_segment_count(parsed.shape_cylinder_sides, DEFAULT_TOOL_PROPERTIES.shape_cylinder_sides),
+      shape_cone_sides: sanitize_shape_segment_count(parsed.shape_cone_sides, DEFAULT_TOOL_PROPERTIES.shape_cone_sides),
+      shape_sphere_u_segments: sanitize_shape_segment_count(parsed.shape_sphere_u_segments, DEFAULT_TOOL_PROPERTIES.shape_sphere_u_segments),
+      shape_sphere_v_segments: sanitize_shape_segment_count(parsed.shape_sphere_v_segments, DEFAULT_TOOL_PROPERTIES.shape_sphere_v_segments),
       text_spacing: clamp_integer(parsed.text_spacing, DEFAULT_TOOL_PROPERTIES.text_spacing, -16, 16),
       text_charlead: clamp_integer(parsed.text_charlead, DEFAULT_TOOL_PROPERTIES.text_charlead, -16, 16),
       text_enterlead: clamp_integer(parsed.text_enterlead, DEFAULT_TOOL_PROPERTIES.text_enterlead, -16, 16),

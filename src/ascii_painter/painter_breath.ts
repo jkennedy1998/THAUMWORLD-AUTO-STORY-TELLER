@@ -135,12 +135,12 @@ export function derive_group_breath_range(group: PainterGroup): PainterGroupBrea
   const derivativeEnd = blocks.length > 0
     ? blocks.reduce((max, block) => Math.max(max, Math.floor(block.end)), start)
     : Math.max(start, Math.floor(group.breath_end ?? group.cropped_end ?? start));
-  const croppedStart = Math.max(start, Math.floor(group.breath_start ?? group.cropped_start ?? start));
-  const croppedEnd = Math.max(croppedStart, Math.min(Math.floor(group.breath_end ?? group.cropped_end ?? derivativeEnd), derivativeEnd));
+  const windowStart = Math.max(start, Math.floor(group.breath_start ?? group.cropped_start ?? start));
+  const windowEnd = Math.max(windowStart, Math.min(Math.floor(group.breath_end ?? group.cropped_end ?? derivativeEnd), derivativeEnd));
   return {
     start,
-    cropped_start: croppedStart,
-    cropped_end: croppedEnd,
+    cropped_start: windowStart,
+    cropped_end: windowEnd,
     derivative_end: derivativeEnd,
     derivative_length: Math.max(1, derivativeEnd - start + 1),
   };
@@ -148,8 +148,6 @@ export function derive_group_breath_range(group: PainterGroup): PainterGroupBrea
 
 export function get_group_raster_segment_at_breath(group: PainterGroup, breath: number): PainterGroupRasterSegmentRange | null {
   const target = Math.floor(breath);
-  const groupRange = derive_group_breath_range(group);
-  if (target < groupRange.cropped_start || target > groupRange.cropped_end) return null;
   for (const segment of derive_group_raster_segment_ranges(group)) {
     if (target >= segment.start && target <= segment.end) return segment;
   }

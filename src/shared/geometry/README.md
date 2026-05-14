@@ -15,7 +15,7 @@ It exists to prevent duplicate shape logic from spreading across painter code, d
 - shared analytic shape helpers
 - shared raster geometry helpers
 - shape slicing/projection helpers
-- shared outline/fill/shell/volume generation rules
+- shared filled/surfaces/wireframe and 2D outline generation rules
 - canonical geometry-oriented result forms used by multiple consumers
 - compatibility migration targets for geometry logic currently living outside this seam
 
@@ -59,7 +59,7 @@ Expected usage style:
 - `geometry` may depend on `coords`, `plane_coords`, and `math3d`
 - `math3d` should not depend on `geometry`
 - result shapes should stay consumer-neutral and side-effect free
-- outline/fill/shell/volume semantics belong here when they are reusable geometry behavior rather than UI/gameplay policy
+- filled/surfaces/wireframe and 2D outline semantics belong here when they are reusable geometry behavior rather than UI/gameplay policy
 
 ## Dependencies
 
@@ -91,5 +91,5 @@ The current next steps add a minimal raster core and thin utility layer:
 - `./raster_ops3.ts` for thin 3D extract helpers
 - `./shape_specs.ts` for small shared shape specs and render-mode vocabulary
 - `./shape_rasterize2.ts` for first 2D shape-spec rasterizers, now including shared line/rect/polygon generation
-- `./shape_rasterize3.ts` for first 3D shape-spec rasterizers, now including shared line/box generation, editor-facing box-session rasterization, first sphere/cylinder/cone session rasterization, and used by painter rect-selection volume generation
+- `./shape_rasterize3.ts` for first 3D shape-spec rasterizers, now including shared line/box generation, editor-facing box-session rasterization, segment-aware curved session rasterization, sphere segmented-model `filled`/`surfaces` for larger true-3D cases, and used by painter rect-selection volume generation
 - `./selection_bridge.ts` for shared selection/world conversion helpers such as bitmap/depth expansion and brush/box selection world-cell generation

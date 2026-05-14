@@ -3,6 +3,7 @@ import type { InlineMaterialAssignments, RenderGraphicRef } from '../render_shad
 import type { AppearanceSlotAssignments } from './types.js';
 import { clone_appearance_slot_assignments } from './types.js';
 import type { CameraConfig } from './voxel_space.js';
+import type { PainterTimeAssetBundle } from './painter_time_assets.js';
 
 export type PainterCoordKey = string;
 
@@ -20,6 +21,7 @@ export type PainterDocumentMetadata = {
   description?: string;
   created_at: string;
   modified_at: string;
+  time_assets?: PainterTimeAssetBundle;
 };
 
 export type PainterDocumentBreath = {
@@ -168,12 +170,12 @@ function normalize_document_breath(breath: any): PainterDocumentBreath {
   const start = 0;
   const rangeStart = Math.max(0, clamp_int(breath?.range_start, 0));
   const rangeEnd = Math.max(rangeStart, clamp_int(breath?.range_end, rangeStart));
-  const croppedStart = Math.max(0, clamp_int(breath?.cropped_start, rangeStart));
-  const croppedEnd = Math.max(croppedStart, clamp_int(breath?.cropped_end, Math.max(rangeEnd, croppedStart)));
+  const windowStart = Math.max(0, clamp_int(breath?.cropped_start, rangeStart));
+  const windowEnd = Math.max(windowStart, clamp_int(breath?.cropped_end, Math.max(rangeEnd, windowStart)));
   return {
     start,
-    cropped_start: croppedStart,
-    cropped_end: croppedEnd,
+    cropped_start: windowStart,
+    cropped_end: windowEnd,
     range_start: rangeStart,
     range_end: rangeEnd,
   };
@@ -421,10 +423,6 @@ export function clone_painter_voxel_record(voxel: PainterVoxelRecord): PainterVo
 
 export function get_painter_group_raster_state_at_breath(group: PainterGroup, breath: number): PainterGroupRasterState | null {
   const targetBreath = Math.floor(breath);
-  const baseStart = Math.max(0, Math.floor(group.start ?? group.breath_start ?? 0));
-  const croppedStart = Math.max(baseStart, Math.floor(group.breath_start ?? group.cropped_start ?? baseStart));
-  const croppedEnd = Math.max(croppedStart, Math.floor(group.breath_end ?? group.cropped_end ?? croppedStart));
-  if (targetBreath < croppedStart || targetBreath > croppedEnd) return null;
   const orderedIds = Array.isArray(group.property_ids) ? group.property_ids : [];
   for (const propertyId of orderedIds) {
     const property = group.properties?.[propertyId];
@@ -449,7 +447,16 @@ export function get_painter_group_raster_state_at_breath(group: PainterGroup, br
       content: block.value.voxels.map(clone_painter_voxel_record),
     };
   }
-  return null;
+  const baseStart = Math.max(0, Math.floor(group.start ?? group.breath_start ?? 0));
+  const baseEnd = Math.max(baseStart, Math.floor(group.breath_end ?? group.cropped_end ?? baseStart));
+  if (targetBreath < baseStart || targetBreath > baseEnd) return null;
+  return {
+    id: `blank_${group.id}`,
+    label: 'content',
+    index: 0,
+    length_breaths: Math.max(1, baseEnd - baseStart + 1),
+    content: [],
+  };
 }
 
 export function get_painter_group_initial_raster_state(group: PainterGroup): PainterGroupRasterState {
@@ -466,9 +473,9 @@ export function create_painter_group(name: string = 'Group', opts?: {
 }): PainterGroup {
   const now = new Date().toISOString();
   const start = Math.max(0, Math.floor(opts?.start ?? opts?.breath_start ?? 0));
-  const croppedStart = Math.max(start, Math.floor(opts?.cropped_start ?? opts?.breath_start ?? start));
-  const croppedEnd = Math.max(croppedStart, Math.floor(opts?.cropped_end ?? opts?.breath_end ?? croppedStart));
-  const rasterProperty = create_default_raster_property(start, croppedEnd);
+  const windowStart = Math.max(start, Math.floor(opts?.cropped_start ?? opts?.breath_start ?? start));
+  const windowEnd = Math.max(windowStart, Math.floor(opts?.cropped_end ?? opts?.breath_end ?? windowStart));
+  const rasterProperty = create_default_raster_property(start, windowEnd);
   return {
     id: make_random_id('group'),
     name,
@@ -476,10 +483,10 @@ export function create_painter_group(name: string = 'Group', opts?: {
     locked: false,
     opacity: 1,
     start,
-    cropped_start: croppedStart,
-    cropped_end: croppedEnd,
-    breath_start: croppedStart,
-    breath_end: croppedEnd,
+    cropped_start: windowStart,
+    cropped_end: windowEnd,
+    breath_start: windowStart,
+    breath_end: windowEnd,
     property_ids: [rasterProperty.id],
     properties: { [rasterProperty.id]: rasterProperty },
     metadata: {
@@ -492,9 +499,9 @@ export function create_painter_group(name: string = 'Group', opts?: {
 export function clone_painter_group(group: PainterGroup): PainterGroup {
   const groupLike = group as PainterGroup;
   const start = Math.max(0, clamp_int((groupLike as any).start, clamp_int((groupLike as any).breath_start, 0)));
-  const croppedStart = Math.max(start, clamp_int((groupLike as any).cropped_start, clamp_int((groupLike as any).breath_start, start)));
-  const croppedEnd = Math.max(croppedStart, clamp_int((groupLike as any).cropped_end, clamp_int((groupLike as any).breath_end, croppedStart)));
-  const normalizedProperties = normalize_painter_group_properties((groupLike as any).properties, (groupLike as any).property_ids, { start, end: croppedEnd });
+  const windowStart = Math.max(start, clamp_int((groupLike as any).cropped_start, clamp_int((groupLike as any).breath_start, start)));
+  const windowEnd = Math.max(windowStart, clamp_int((groupLike as any).cropped_end, clamp_int((groupLike as any).breath_end, windowStart)));
+  const normalizedProperties = normalize_painter_group_properties((groupLike as any).properties, (groupLike as any).property_ids, { start, end: windowEnd });
   return {
     id: String(groupLike.id ?? '').trim() || make_random_id('group'),
     name: String(groupLike.name ?? '').trim() || 'Group',
@@ -502,10 +509,10 @@ export function clone_painter_group(group: PainterGroup): PainterGroup {
     locked: groupLike.locked === true,
     opacity: typeof groupLike.opacity === 'number' ? groupLike.opacity : 1,
     start,
-    cropped_start: croppedStart,
-    cropped_end: croppedEnd,
-    breath_start: croppedStart,
-    breath_end: croppedEnd,
+    cropped_start: windowStart,
+    cropped_end: windowEnd,
+    breath_start: windowStart,
+    breath_end: windowEnd,
     property_ids: normalizedProperties.property_ids,
     properties: normalizedProperties.properties,
     metadata: groupLike.metadata ? {
@@ -591,7 +598,7 @@ export function clone_painter_document(document: PainterDocument): PainterDocume
     breath: normalize_document_breath((document as any).breath),
     playback: normalize_document_playback((document as any).playback),
     camera: document.camera ? structuredClone(document.camera) : undefined,
-    metadata: document.metadata ? { ...document.metadata } : undefined,
+    metadata: document.metadata ? structuredClone(document.metadata) : undefined,
   };
 }
 

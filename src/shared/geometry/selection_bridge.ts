@@ -144,5 +144,5 @@ export function box_selection_to_world_cells(
     x1: maxX,
     y1: maxY,
     z1: maxZ,
-  }, 'volume');
+  }, 'filled');
 }

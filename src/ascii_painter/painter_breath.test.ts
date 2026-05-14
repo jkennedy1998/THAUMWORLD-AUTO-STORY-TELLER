@@ -1,9 +1,10 @@
-import { create_painter_document, create_painter_group, create_painter_voxel_record } from './painter_document.js';
+import { create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath } from './painter_document.js';
 import {
   clamp_breath_to_painter_document_range,
   derive_group_breath_range,
   derive_painter_document_authored_breath_bounds,
   derive_painter_document_suggested_breath_range,
+  get_group_raster_segment_at_breath,
   get_painter_document_breath_range,
   get_painter_document_file_breath_range,
   get_painter_document_playback,
@@ -45,7 +46,7 @@ document.groups[baseGroupId]!.properties.move_1 = {
 const laterGroup = create_painter_group('Later', { breath_start: 9, breath_end: 12 });
 laterGroup.start = 9;
 laterGroup.cropped_start = 9;
-laterGroup.cropped_end = 12;
+laterGroup.cropped_end = 10;
 laterGroup.properties.raster_1!.blocks = [{ id: 'later_hold', type: 'content', start: 9, end: 12, value: { kind: 'raster', voxels: [] } }];
 laterGroup.property_ids.push('move_1');
 laterGroup.properties.move_1 = {
@@ -69,7 +70,11 @@ const playback = get_painter_document_playback(document);
 assert(playback.frames_per_breath === 3 && playback.loop_enabled === false, 'document playback should expose file-owned cadence settings');
 
 const groupRange = derive_group_breath_range(document.groups[baseGroupId]!);
-assert(groupRange.start === 2 && groupRange.cropped_start === 2 && groupRange.cropped_end === 6 && groupRange.derivative_end === 6, 'group breath range should expose start, crop, and derivative bounds from property block timing');
+assert(groupRange.start === 2 && groupRange.cropped_start === 2 && groupRange.cropped_end === 6 && groupRange.derivative_end === 6, 'group breath range should expose start, timing window, and derivative bounds from property block timing');
+assert(get_group_raster_segment_at_breath(document.groups[baseGroupId]!, 6)?.end === 6, 'raster segments should resolve inside authored content');
+assert(get_group_raster_segment_at_breath(laterGroup, 11)?.end === 12, 'raster segments should resolve beyond the group timing window');
+assert(get_painter_group_raster_state_at_breath(laterGroup, 11)?.content.length === 0, 'raster state should still resolve beyond the group timing window');
+assert(get_group_raster_segment_at_breath(document.groups[baseGroupId]!, 12) === null, 'raster segments should stop after authored content');
 
 const bounds = derive_painter_document_authored_breath_bounds(document);
 assert(bounds?.min_breath === 2 && bounds?.max_breath === 12, 'authored breath bounds should include group spans and property block starts');
