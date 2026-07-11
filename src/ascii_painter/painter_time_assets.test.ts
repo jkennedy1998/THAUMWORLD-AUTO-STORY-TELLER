@@ -3,8 +3,11 @@ import {
   clone_painter_time_asset_bundle,
   create_painter_single_play_particle_effect,
   create_painter_time_asset_bundle,
+  export_painter_time_asset_bundle,
+  get_painter_single_play_particle_effect_playback_state,
   normalize_painter_single_play_particle_effect,
   normalize_painter_time_asset_bundle,
+  resolve_painter_time_asset_bundle_preview,
 } from './painter_time_assets.js';
 
 function assert(condition: unknown, message: string): void {
@@ -25,6 +28,9 @@ assert(effect.spawn_breath === 12 && effect.window_start === 12 && effect.window
 assert(effect.processed_breaths === 3, 'particle effect should preserve runtime processed breath count');
 assert(effect.is_complete === false && effect.is_deleted === false, 'particle effect should default to active state');
 assert(effect.visual.char === '*' && effect.visual.display_color === '#ffcc00', 'particle effect should preserve visual payload');
+assert(get_painter_single_play_particle_effect_playback_state(effect, 11) === 'pending', 'particle effect should be pending before spawn');
+assert(get_painter_single_play_particle_effect_playback_state(effect, 12) === 'active', 'particle effect should become active inside its window');
+assert(get_painter_single_play_particle_effect_playback_state(effect, 19) === 'complete', 'particle effect should complete after its window');
 
 const normalized = normalize_painter_single_play_particle_effect({
   id: '  ',
@@ -48,9 +54,19 @@ const bundle = create_painter_time_asset_bundle({ particle_effects: [effect, nor
 assert(bundle.schema_version === 1, 'time asset bundle should be versioned');
 assert(bundle.particle_effects.length === 2, 'time asset bundle should contain authored effects');
 
+const exportedBundle = export_painter_time_asset_bundle(bundle);
+assert(exportedBundle !== bundle, 'exported bundle should be a new object');
+assert(exportedBundle.particle_effects[0]!.spawn_breath <= exportedBundle.particle_effects[1]!.spawn_breath, 'exported bundle should be deterministically sorted');
+
+const preview = resolve_painter_time_asset_bundle_preview(bundle, 12);
+assert(preview.active_particle_effect_ids.includes(effect.id), 'preview should expose active effect ids');
+assert(preview.particle_effects.find((entry) => entry.id === effect.id)?.state === 'active', 'preview should resolve active effect state');
+
 const clonedBundle = clone_painter_time_asset_bundle(bundle);
-clonedBundle.particle_effects[0]!.visual.char = '!';
-assert(bundle.particle_effects[0]!.visual.char === '*', 'cloned bundle should not alias nested visual state');
+const clonedEffect = clonedBundle.particle_effects.find((entry) => entry.id === effect.id);
+if (!clonedEffect) throw new Error('missing cloned effect');
+clonedEffect.visual.char = '!';
+assert(bundle.particle_effects.find((entry) => entry.id === effect.id)?.visual.char === '*', 'cloned bundle should not alias nested visual state');
 
 const normalizedBundle = normalize_painter_time_asset_bundle({ particle_effects: [{ spawn_breath: 2, window_end: 5 }] });
 assert(normalizedBundle.particle_effects[0]!.window_start === 2 && normalizedBundle.particle_effects[0]!.window_end === 5, 'normalized bundle should infer a window start from spawn breath');
@@ -58,7 +74,9 @@ assert(normalizedBundle.particle_effects[0]!.window_start === 2 && normalizedBun
 const document = create_painter_document(4, 4, { default_group_name: 'Base' });
 document.metadata!.time_assets = bundle;
 const clonedDocument = clone_painter_document(document);
-clonedDocument.metadata!.time_assets!.particle_effects[0]!.name = 'Changed';
-assert(document.metadata!.time_assets!.particle_effects[0]!.name === 'Spark', 'cloned painter documents should deep-clone time assets in metadata');
+const clonedDocumentEffect = clonedDocument.metadata!.time_assets!.particle_effects.find((entry) => entry.id === effect.id);
+if (!clonedDocumentEffect) throw new Error('missing cloned document effect');
+clonedDocumentEffect.name = 'Changed';
+assert(document.metadata!.time_assets!.particle_effects.find((entry) => entry.id === effect.id)?.name === 'Spark', 'cloned painter documents should deep-clone time assets in metadata');
 
 console.log('painter_time_assets tests passed');

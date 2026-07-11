@@ -9,9 +9,11 @@ import { initWebSocketClient, type WebSocketClient } from "../websocket_client.j
 import type { TagInstance } from "../../tag_system/registry.js";
 import {
   DEBUG_VISION,
+  enqueue_sense_broadcast_highlight,
+  get_active_sense_broadcast_highlights,
+  get_entity_debug_sense_highlights,
   register_particle_spawner,
-  update_npc_debug_visuals,
-  spawn_sense_broadcast_particles,
+  update_entity_debug_visuals,
 } from "../vision_debugger.js";
 import { get_sense_profile } from "../../action_system/sense_broadcast.js";
 import { get_facing } from "../../npc_ai/facing_system.js";
@@ -957,18 +959,16 @@ export function make_place_module(config: PlaceModuleConfig): Module {
 
       const place = config.get_place();
       const center_world_z = get_world_z_center_for_place(place);
-      const visible_planes_z = get_defined_scene_world_zs(place);
       const origin_z = Number.isFinite(z_raw) ? Math.floor(z_raw) : center_world_z;
 
       const sense = d.sense;
       const range = Number(d.range);
       if (typeof sense !== 'string' || !Number.isFinite(range)) return;
 
-      spawn_sense_broadcast_particles({
+      enqueue_sense_broadcast_highlight({
         origin: { x: Math.floor(x), y: Math.floor(y), z: origin_z },
         sense: sense as any,
         range,
-        visible_planes_z,
         source_ref: typeof d.source_ref === 'string' ? d.source_ref : undefined,
       });
     });
@@ -2754,7 +2754,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const pressure = profile?.broadcasts.find(b => b.sense === "pressure");
           const range = pressure?.range_tiles ?? 5;
           const sense_broadcast_started_at_ms = performance.now();
-          spawn_sense_broadcast_particles({
+          enqueue_sense_broadcast_highlight({
             origin: {
               x: actor.tile_position.x,
               y: actor.tile_position.y,
@@ -2762,7 +2762,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             },
             sense: "pressure",
             range,
-            visible_planes_z,
             source_ref: actor.actor_ref,
           });
           sense_broadcast_ms += performance.now() - sense_broadcast_started_at_ms;
@@ -2802,7 +2801,7 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           const pressure = profile?.broadcasts.find(b => b.sense === "pressure");
           const range = pressure?.range_tiles ?? 5;
           const sense_broadcast_started_at_ms = performance.now();
-          spawn_sense_broadcast_particles({
+          enqueue_sense_broadcast_highlight({
             origin: {
               x: npc.tile_position.x,
               y: npc.tile_position.y,
@@ -2810,7 +2809,6 @@ export function make_place_module(config: PlaceModuleConfig): Module {
             },
             sense: "pressure",
             range,
-            visible_planes_z,
             source_ref: npc.npc_ref,
           });
           sense_broadcast_ms += performance.now() - sense_broadcast_started_at_ms;
@@ -3406,7 +3404,28 @@ export function make_place_module(config: PlaceModuleConfig): Module {
         const npc_facing = get_facing(npc.npc_ref);
         const npc_visual_status = get_npc_visual_status(npc.npc_ref) ?? npc.status;
         const npc_conversation_visual = npc_visual_status === "busy";
-        update_npc_debug_visuals(npc.npc_ref, npc_position, npc_facing, npc_conversation_visual, visible_planes_z, blocks_los_at, (npc as any).tags);
+        update_entity_debug_visuals(npc.npc_ref, npc_position, npc_facing, npc_conversation_visual, visible_planes_z, blocks_los_at, (npc as any).tags);
+        for (const overlay of get_entity_debug_sense_highlights(npc.npc_ref, npc_position, npc_facing, visible_planes_z, blocks_los_at, (npc as any).tags)) {
+          const plane_z = Number(visible_planes_z[overlay.plane_index]);
+          for (const key of overlay.keys) {
+            const [xs, ys] = key.split(',');
+            const wx = Number(xs);
+            const wy = Number(ys);
+            const projected = scene_to_screen(place, wx, wy, plane_z, inner);
+            const slot = slot_for_world_z(projected.plane, visible_planes_z);
+            if (slot === null) continue;
+            if (projected.x < inner.x0 || projected.x > inner.x1 || projected.y < inner.y0 || projected.y > inner.y1) continue;
+            q_for_slot(slot).push({
+              pass: 'ui',
+              x: projected.x,
+              y: projected.y,
+              order: overlay.kind === 'vision' ? 0 : 1,
+              key: `ui:sense:${overlay.kind}:${npc.npc_ref}:${overlay.plane_index}:${wx},${wy}`,
+              op: 'tint_fg',
+              cell: { char: ' ', rgb: overlay.rgb, style: 'regular', weight_index: 2, render_index: 5 },
+            });
+          }
+        }
       }
       for (const actor of scene_place.contents.actors_present) {
         const actor_position = {
@@ -3415,7 +3434,28 @@ export function make_place_module(config: PlaceModuleConfig): Module {
           z: get_entity_world_z(actor as any, scene_base_z),
         };
         const actor_facing = get_facing(actor.actor_ref);
-        update_npc_debug_visuals(actor.actor_ref, actor_position, actor_facing, false, visible_planes_z, blocks_los_at, (actor as any).tags);
+        update_entity_debug_visuals(actor.actor_ref, actor_position, actor_facing, false, visible_planes_z, blocks_los_at, (actor as any).tags);
+        for (const overlay of get_entity_debug_sense_highlights(actor.actor_ref, actor_position, actor_facing, visible_planes_z, blocks_los_at, (actor as any).tags)) {
+          const plane_z = Number(visible_planes_z[overlay.plane_index]);
+          for (const key of overlay.keys) {
+            const [xs, ys] = key.split(',');
+            const wx = Number(xs);
+            const wy = Number(ys);
+            const projected = scene_to_screen(place, wx, wy, plane_z, inner);
+            const slot = slot_for_world_z(projected.plane, visible_planes_z);
+            if (slot === null) continue;
+            if (projected.x < inner.x0 || projected.x > inner.x1 || projected.y < inner.y0 || projected.y > inner.y1) continue;
+            q_for_slot(slot).push({
+              pass: 'ui',
+              x: projected.x,
+              y: projected.y,
+              order: overlay.kind === 'vision' ? 0 : 1,
+              key: `ui:sense:${overlay.kind}:${actor.actor_ref}:${overlay.plane_index}:${wx},${wy}`,
+              op: 'tint_fg',
+              cell: { char: ' ', rgb: overlay.rgb, style: 'regular', weight_index: 2, render_index: 5 },
+            });
+          }
+        }
       }
     }
     record_place_render_perf_phase(render_perf_frame, 'debug_visuals_ms', performance.now() - debug_visuals_started_at_ms);
@@ -3900,6 +3940,27 @@ export function make_place_module(config: PlaceModuleConfig): Module {
     // System/UI overlays are queued as the final pass.
 
     const ui_pass_started_at_ms = performance.now();
+    for (const overlay of get_active_sense_broadcast_highlights(visible_planes_z)) {
+      const plane_z = Number(visible_planes_z[overlay.plane_index]);
+      for (const key of overlay.keys) {
+        const [xs, ys] = key.split(',');
+        const wx = Number(xs);
+        const wy = Number(ys);
+        const projected = scene_to_screen(place, wx, wy, plane_z, inner);
+        const slot = slot_for_world_z(projected.plane, visible_planes_z);
+        if (slot === null) continue;
+        if (projected.x < inner.x0 || projected.x > inner.x1 || projected.y < inner.y0 || projected.y > inner.y1) continue;
+        q_for_slot(slot).push({
+          pass: 'ui',
+          x: projected.x,
+          y: projected.y,
+          order: 0,
+          key: `ui:broadcast:${overlay.sense ?? 'sense'}:${overlay.source_ref ?? 'broadcast'}:${overlay.plane_index}:${wx},${wy}`,
+          op: 'tint_fg',
+          cell: { char: ' ', rgb: overlay.rgb, style: 'regular', weight_index: 2, render_index: 5 },
+        });
+      }
+    }
     // Target highlight (follows entity movement).
     const target_pos = get_target_current_position(place);
     if (target_pos && targeted) {

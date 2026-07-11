@@ -53,8 +53,8 @@ function tile_blocks_los_runtime(tile: any): boolean {
 }
 
 export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
-  const w = Math.max(1, Math.floor(place.tile_grid.width));
-  const h = Math.max(1, Math.floor(place.tile_grid.height));
+  const w = Math.max(1, Math.floor(Number((place as any)?.tile_grid?.width ?? 1)));
+  const h = Math.max(1, Math.floor(Number((place as any)?.tile_grid?.height ?? 1)));
 
   const blocks_z1 = make_bool_grid(w, h, false);
   const blocks_los_z1 = make_bool_grid(w, h, false);
@@ -126,11 +126,11 @@ export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
       }
     };
 
-    for (const npc of (place as any)?.contents?.npcs_present ?? []) {
+    for (const npc of Array.isArray((place as any)?.contents?.npcs_present) ? (place as any).contents.npcs_present : []) {
       const ref = String((npc as any)?.npc_ref ?? '');
       if (ref) add_entity(npc, 'npc', ref);
     }
-    for (const actor of (place as any)?.contents?.actors_present ?? []) {
+    for (const actor of Array.isArray((place as any)?.contents?.actors_present) ? (place as any).contents.actors_present : []) {
       const ref = String((actor as any)?.actor_ref ?? '');
       if (ref) add_entity(actor, 'actor', ref);
     }
@@ -140,7 +140,7 @@ export function get_place_occupancy_index(place: Place): PlaceOccupancyIndex {
 
   // Multi-voxel structure instances (from place.structures snapshot).
   try {
-    for (const s of (place as any)?.structures ?? []) {
+    for (const s of Array.isArray((place as any)?.structures) ? (place as any).structures : []) {
       const id = String((s as any)?.id ?? '');
       if (!id) continue;
       const origin = (s as any)?.origin;

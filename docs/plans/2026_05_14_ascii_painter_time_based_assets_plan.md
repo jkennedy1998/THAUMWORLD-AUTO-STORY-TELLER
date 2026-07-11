@@ -10,14 +10,16 @@ This plan focuses on aligning the ASCII painter and Thaumworld around a shared b
 
 ## Goal
 
-Turn the painter into a clean authoring system for time-based visual assets that Thaumworld can consume at runtime.
+Turn the painter into a clean authoring system for reusable modular assets that Thaumworld can consume from a compact export artifact.
 
 The core intent is:
 - one shared breath clock
 - authored clips/loops/state on that clock
 - optional playback and baking
 - no hidden group-content gating behavior
-- runtime game systems consume exported assets, not painter UI semantics
+- source documents stay painter-owned
+- place painter remains the world sculpting/tuning tool
+- game runtime consumes compact exports, not painter UI semantics
 
 ## Scope boundary
 
@@ -28,11 +30,15 @@ It applies to:
 - preview/playback behavior
 - export/import into Thaumworld
 - future effect/clip authoring
+- export-file layout and compact runtime profiles
+- modular asset authoring for procedural consumption
 
 It does not yet define:
-- a full replacement for the current place painter workflow
+- a replacement for the current place painter workflow
 - painter UI redesign beyond what the bridge needs
 - gameplay mechanics for the runtime assets
+- a new long-term source schema if the current document can remain canonical
+- a full game-object authoring system
 
 ## Step 0: Remove group content gating
 
@@ -61,10 +67,50 @@ What still needs adapters:
 - a clean separation between editor state and runtime state
 - removal of hidden group-content gating
 - a minimal way for painter-authored content to reach the current game runtime
+- a compact export profile that can sit beside the source document
+
+## UX-first authoring model
+
+### Core workflow
+1. Open a new painter file.
+2. Author the asset on the same canvas with the same tools.
+3. Export a compact runtime artifact.
+4. Save the export as a sibling file next to the open painter save file.
+5. Reference the source/export pair from code or agentic workflows.
+
+### Folder layout
+- `assets/<asset_name>.json`
+- `assets/<asset_name>_asset.json`
+
+### Export strata
+The export keeps three strata together and does not cull them:
+- `glyph` — visual-only, non-interactable by default
+- `sprite` — visual/material-rich, still mostly non-interactable
+- `game_object` — explicit Thaumworld thing with footprint/interaction
+
+### Export rule
+The export is one compact artifact that preserves all authored strata; compaction normalizes data, it does not discard it.
+
+### Anchor / footprint UX
+- default anchor: volumetric center + offset
+- user can click into anchor mode
+- anchor can be nudged/dragged as a highlighted cell
+- use selection-style highlighting
+- hidden tiles do not affect bounds; visible frames do
+
+### Thaumworld palette module
+- add a Thaumworld-specific palette module for game assets
+- keep it separate from generic swatches
+- use it for placing game-oriented objects and reusable pieces
+
+### Validation UX
+- unsupported schema: reject with message
+- incomplete asset: warn unless it cannot be exported safely
+- avoid overengineering extra failure states
 
 ## First concrete asset
 
-Start with a single-play particle effect.
+Start with a single-play modular piece.
 
 Why this first:
 - small enough to test end-to-end
@@ -83,7 +129,7 @@ Suggested minimal behavior:
 ## Scalability constraints
 
 Keep the first bridge intentionally small:
-- one particle type only
+- one canonical compact export only
 - one-way flow first (author in painter, consume in game)
 - no generalized import system yet
 - no physics payloads yet
@@ -92,6 +138,7 @@ Keep the first bridge intentionally small:
 - keep reads/writes sparse and cheap
 - keep cleanup deterministic
 - keep the asset format versionable from day one
+- preserve all strata through compaction
 
 ## Architectural direction
 
@@ -105,7 +152,7 @@ Use breaths as the shared unit of time across:
 
 The difference is not separate clocks; the difference is which system consumes the clock.
 
-### 2) Painter is an authoring tool
+### 2) Painter is a modular asset authoring tool
 
 Painter should primarily author:
 - clips
@@ -114,15 +161,16 @@ Painter should primarily author:
 - emitters
 - shape sources
 - baked outputs
+- reusable modular pieces for procedural placement
 
 Painter should preview content, but it should not be the game runtime.
 
+Place painter remains the higher-level world sculpting and tuning tool.
 ### 3) Thaumworld is the runtime consumer
 
-Thaumworld should load exported painter assets as runtime content.
+Thaumworld should load compact exported painter assets as runtime content and procedural building blocks.
 
 It should not need painter-only concepts like UI groups, timeline editing controls, or temporary editing focus state.
-
 ### 4) Groups evolve into tracks/layers
 
 The current `groups` module should eventually behave more like a timeline/layer authoring surface than a generic group editor.
@@ -134,6 +182,7 @@ Good future language:
 - emitter
 - layer
 - baked state
+- modular piece
 
 ## Core asset primitives
 
@@ -196,16 +245,34 @@ type PainterBakedState = {
 - Preview should use the same sampling rules that runtime export expects.
 - Keyframes are authored anchor points, not hidden derived data.
 
+## Source/export layout
+
+Recommended near-term storage pattern:
+- painter source document stays canonical
+- compact export sits beside it as a sibling file
+- source + export share the same asset id and version lineage
+- export schema version should match the painter save version while they evolve together
+- no competing long-term schemas unless required by runtime
+
+Suggested shape:
+- `assets/<asset_id>.json`
+- `assets/<asset_id>_asset.json`
+
+If one file is preferred later, keep the export profile derivable from the same source schema.
+
 ## Runtime bridge contract
 
-- Painter source content and runtime-baked content should be separable.
+- Painter source content and runtime-exported content should be separable.
 - The canonical save should stay as close to the current schema as practical.
 - Keep the format small, sparse, and fast to read in the game.
 - Thaumworld does not yet have a general import boundary; this first bridge should be minimal and carefully introduced.
 - Prefer writing into the current place schema / particles layer if it can host the data cleanly.
-- Exported assets should preserve loop bounds, keyframes, and emitter/shape metadata when those exist.
-- Baked outputs should be clearly labeled as runtime-ready, not source-authoring truth.
+- Exported assets should preserve loop bounds, keyframes, target kind, and emitter/shape metadata when those exist.
+- Exported assets should preserve all glyph/sprite/game-object strata; compaction must not cull them.
+- Exported outputs should be clearly labeled as runtime-ready, not source-authoring truth.
 - Round-tripping can wait until a runtime import path exists.
+- Procedural consumers may treat exports as reusable modular pieces, not just decorative playback.
+- A downstream interpretation layer decides how to use the retained strata.
 
 ## Authoring UI transition
 
@@ -240,6 +307,7 @@ This plan should support:
 - cutscene animation
 - looped visual clips
 - plant growth style animation
+- reusable modular pieces for procedural placement
 - hybrid authored + simulated motion later
 
 ## Phased plan
@@ -311,9 +379,9 @@ This is the cleanup pass before any new asset work.
    - add or preserve diagnostics that make removal visible during dev logs if needed
    - keep the cleanup easy to verify in a normal run
 
-### Phase 1: Define the first particle asset shape
+### Phase 1: Define the first modular asset shape
 
-- Pick the first asset as a single-play particle effect.
+- Pick the first asset as a single-play particle effect / reusable modular piece.
 - Define its minimal data fields:
   - spawn breath
   - active breath window
@@ -329,6 +397,12 @@ This is the cleanup pass before any new asset work.
 - Use breaths as the clip range.
 - Make keyframes the authored states inside the loop.
 - Support preview playback without changing the world/runtime model.
+- Implemented via:
+  - `src/ascii_painter/painter_time_assets.ts` playback/sample helpers
+  - `src/ascii_painter/painter_document.ts` metadata normalization
+  - `src/ascii_painter/painter_document_runtime.ts` preview resolution helper
+  - `src/canvas_app/painter_app_state.ts` breath-change and snapshot diagnostics
+  - regression coverage in `src/ascii_painter/painter_time_assets.test.ts`, `src/ascii_painter/save_system.test.ts`, and `src/ascii_painter/painter_document_runtime.test.ts`
 
 ### Phase 3: Lock the authoring contract
 
@@ -336,27 +410,42 @@ This is the cleanup pass before any new asset work.
 - Keep preview/playback semantics aligned with the shared breath clock.
 - Keep the groups module as a bridge surface for now.
 - Avoid committing to a final UI vocabulary yet.
+- Implemented via:
+  - `src/ascii_painter/painter_time_assets.ts` contract helpers + export helper
+  - `src/ascii_painter/painter_document.ts` metadata normalization boundary
+  - `src/ascii_painter/painter_document_runtime.ts` deterministic preview resolution
+  - `src/ascii_painter/save_system.ts` document round-trip preservation
+  - regression coverage in `src/ascii_painter/painter_time_assets.test.ts` and `src/ascii_painter/save_system.test.ts`
 
-### Phase 4: Add the minimal runtime bridge
+### Phase 4: Add the minimal export-and-runtime bridge
 
-- Add the smallest possible path from painter-authored particle output into the existing game runtime.
+- Add the smallest possible path from painter-authored content into a compact export artifact.
+- Keep the source document canonical and the export profile derived from it.
 - Prefer the current place schema / particles layer if it can carry the data cleanly.
 - Keep the runtime data model independent from painter editing state.
 - Keep this bridge one-way until the first asset proves stable.
+- Start with modular decorative assets that can feed procedural placement.
 
+#### Lean implementation order
+1. Define the export envelope and retained strata contract.
+2. Add a deterministic exporter that preserves all strata.
+3. Add the standard asset folder/file naming.
+4. Wire the painter export action to write the compact export.
+5. Add focused tests for preservation, determinism, and folder naming.
+6. Stop when Phase 4 is complete; do not start broader runtime interpretation work yet.
 ### Phase 5: Add baked playback paths
 
 - Support sparse baked outputs for decorative effects.
 - Allow playback by breath or by discrete state sampling.
 - Keep live simulation optional, not mandatory.
 - Start with precomputed frames only.
-
+- Make baked outputs usable as procedural building blocks.
 ### Phase 6: Add hybrid simulation later
 
 - Permit authored keyframes to act as simulation seeds.
 - Let runtime or offline baking evolve the state forward.
 - Store the result as replayable asset data.
-
+- Reuse the same modular asset contract where possible.
 ## Non-goals for now
 
 - No fire/water/sand mechanic implementation in the painter.
@@ -366,30 +455,38 @@ This is the cleanup pass before any new asset work.
 - No generalized runtime import system yet.
 - No dependence on hidden group-content filters or other painter-only runtime gates.
 - No painter/game UI fusion beyond the bridge requirements.
+- No replacement of the place painter workflow.
 
 ## Open questions / assumptions
 
+- Should the canonical source stay as the current painter document, with export as a derived profile only?
 - Does the first bridge target write into the existing place particles layer directly, or through a thin in-repo adapter?
 - Are current groups and game render layers the same long-term concept, or only partially aligned?
-- How much of the current schema can remain unchanged for the first particle asset?
+- How much of the current schema can remain unchanged for the first modular asset?
 - Is "baked" strictly sparse precomputed frames for now, with simulation deferred?
 - Should the first asset be authored as a one-shot clip with self-delete behavior only?
+- What interpretation layer should consume the retained glyph/sprite/game-object strata?
 
 Assumptions:
 - breaths remain the shared clock
 - the first bridge should stay minimal
 - the first asset should be sparse and cheap
 - hidden group-content filters are removed first
+- the export profile should stay close to the source document
 - generalized particle simulation can wait
+- place painter continues to own world sculpting and tuning
+- exports preserve all strata; downstream layers decide meaning
 
 ## Success criteria
 
 - The painter has a clean, understandable time-based authoring model.
-- Thaumworld can consume the first particle asset without painter-specific assumptions.
+- The source document and compact export artifact stay stable and side-by-side.
+- Thaumworld can consume the first modular asset without painter-specific assumptions.
 - Breath remains the shared clock across systems.
-- Decorative particles are a natural fit.
+- Decorative modular pieces are a natural fit.
 - Hidden group-content gating is gone from the timed content model.
 - The first bridge stays minimal, sparse, and scalable.
+- Place painter remains the world sculpting/tuning surface.
 
 ## Related docs
 

@@ -3,7 +3,6 @@ import { calculateDistance } from "../action_system/target_resolution.js";
 import type { PerceptionEvent, SenseType } from "../action_system/perception.js";
 import { evaluate_sense_detection, get_observer_sense_mag } from "./sense_mag.js";
 import { load_actor, save_actor } from "../actor_storage/store.js";
-import { get_vision_cone } from "../npc_ai/cone_of_vision.js";
 import { load_npc, save_npc } from "../npc_storage/store.js";
 import { get_npc_location } from "../npc_storage/location.js";
 import { has_awareness_evidence, prune_awareness_evidence, record_awareness_evidence } from "./awareness_round_state.js";

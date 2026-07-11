@@ -20,6 +20,7 @@ import {
   type PainterVoxelRecord,
 } from './painter_document.js';
 import { derive_group_breath_range, derive_group_raster_segment_ranges } from './painter_breath.js';
+import { resolve_painter_time_asset_bundle_preview, type PainterTimeAssetBundlePreview } from './painter_time_assets.js';
 
 export type ResolvedPainterVoxel = {
   x: number;
@@ -1547,4 +1548,10 @@ export function duplicate_painter_group(runtime: PainterDocumentRuntime, groupId
 export function export_painter_document(runtime: PainterDocumentRuntime): PainterDocument {
   refresh_document_extents(runtime);
   return clone_painter_document(runtime.document);
+}
+
+export function resolve_painter_time_asset_bundle_preview_at_breath(runtime: PainterDocumentRuntime, breath?: number): PainterTimeAssetBundlePreview | null {
+  const metadata = runtime.document.metadata;
+  if (!metadata?.time_assets) return null;
+  return resolve_painter_time_asset_bundle_preview(metadata.time_assets, breath ?? runtime.active_breath);
 }

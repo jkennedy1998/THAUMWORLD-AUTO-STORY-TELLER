@@ -17,6 +17,7 @@ export type FileMenuOptions = {
   on_load?: () => void;
   on_new?: () => void;
   on_export_text?: () => void;
+  on_export_asset?: () => void;
   on_clear: () => void;
   on_rename_painting?: () => void;
   on_quit_painting?: () => void;
@@ -64,6 +65,7 @@ export function make_file_menu_module(opts: FileMenuOptions): Module {
       const ascii_items: ProgramNavAction[] = [];
       if (is_host && opts.on_new) ascii_items.push(make_command_action({ id: 'new', label: 'NEW', shortcut: 'N', shortcut_ctrl: true, onPress: opts.on_new }));
       if (is_host && opts.on_save) ascii_items.push(make_command_action({ id: 'save', label: 'SAVE', shortcut: 'S', shortcut_ctrl: true, onPress: opts.on_save }));
+      if (is_host && opts.on_export_asset) ascii_items.push(make_command_action({ id: 'export_asset', label: 'ASSET', shortcut: 'E', shortcut_ctrl: true, onPress: opts.on_export_asset }));
       if (is_host && opts.on_load) ascii_items.push(make_command_action({ id: 'load', label: 'LOAD', shortcut: 'O', shortcut_ctrl: true, onPress: opts.on_load }));
       ascii_items.push(make_command_action({ id: 'clear', label: 'CLEAR', shortcut: 'C', shortcut_ctrl: true, onPress: opts.on_clear }));
 

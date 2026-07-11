@@ -83,7 +83,7 @@ import { get_damage_dice_from_mag } from '../mag/damage.js';
 import { is_tag_editor_visible } from '../tag_system/definitions.js';
 import type { EquipmentSlots } from '../types/body_slots.js';
 import { initWebSocketClient } from '../mono_ui/websocket_client.js';
-import { DEBUG_VISION, set_debug_bundle_enabled, spawn_sense_broadcast_particles } from '../mono_ui/vision_debugger.js';
+import { DEBUG_VISION, enqueue_sense_broadcast_highlight, set_debug_bundle_enabled } from '../mono_ui/vision_debugger.js';
 import { set_ui_debug_enabled, UI_DEBUG } from '../mono_ui/runtime/ui_debug.js';
 import { get_senses_for_action } from '../action_system/sense_broadcast.js';
 import { get_facing } from '../npc_ai/facing_system.js';
@@ -9562,13 +9562,10 @@ export function create_app_state(): AppState {
                         for (const b of broadcasts) {
                             const actor_z = Number((actor as any)?.elevation);
                             const origin_z = Number.isFinite(actor_z) ? Math.floor(actor_z) : ui_state.place.world_z_center;
-                            const c = ui_state.place.world_z_center;
-                            const visible_planes_z = [c - 1, c, c + 1] as const;
-                            spawn_sense_broadcast_particles({
+                            enqueue_sense_broadcast_highlight({
                                 origin: { x: pos.x, y: pos.y, z: origin_z },
                                 sense: b.sense,
                                 range: b.range_tiles,
-                                visible_planes_z,
                                 source_ref: actor_ref,
                             });
                         }

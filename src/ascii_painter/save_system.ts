@@ -10,8 +10,8 @@ import type { Grid, GridExport } from './types.js';
 import { exportGrid, importGrid } from './types.js';
 import type { VoxelSpace, VoxelSpaceExport } from './voxel_space.js';
 import { exportVoxelSpace, importVoxelSpace, gridToVoxelSpace, voxelSpaceToGrid } from './voxel_space.js';
-import type { PainterDocument } from './painter_document.js';
-import { clone_painter_document } from './painter_document.js';
+import type { PainterDocument, PainterGroup, PainterProperty, PainterVoxelRecord } from './painter_document.js';
+import { PAINTER_DOCUMENT_VERSION, clone_painter_document } from './painter_document.js';
 import type { AppearanceSlotTargetMask, ToolEditTarget, ToolType } from './types.js';
 import type { AppearanceSlotAssignments, AppearanceSlotValue, InlineMaterialAssignments, RenderGraphicRef, ViewDirection } from '../render_shaders/graphics_contract.js';
 import { clamp_weight_index } from '../mono_ui/weight_system.js';
@@ -317,8 +317,269 @@ export function exportPainterDocumentToJSON(document: PainterDocument): string {
   return JSON.stringify(clone_painter_document(document), null, 2);
 }
 
+type PainterAssetExportMode = 'glyph' | 'sprite' | 'game_object';
+
+type PainterAssetCell = {
+  x: number;
+  y: number;
+  z: number;
+  char: string;
+  rgb: { r: number; g: number; b: number };
+  weight_index: number;
+  graphic?: RenderGraphicRef;
+  appearance_slots?: AppearanceSlotAssignments;
+  materials?: InlineMaterialAssignments;
+};
+
+type PainterAssetGroupBounds = {
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+} | null;
+
+type PainterAssetGlyphGroup = {
+  id: string;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  opacity: number;
+  start: number;
+  cropped_start: number;
+  cropped_end: number;
+  breath_start: number;
+  breath_end: number;
+  bounds: PainterAssetGroupBounds;
+  cells: PainterAssetCell[];
+};
+
+type PainterAssetSpriteGroup = PainterAssetGlyphGroup;
+
+type PainterAssetGameObjectGroup = {
+  id: string;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  opacity: number;
+  start: number;
+  cropped_start: number;
+  cropped_end: number;
+  breath_start: number;
+  breath_end: number;
+  bounds: PainterAssetGroupBounds;
+  metadata?: PainterGroup['metadata'];
+  property_ids: string[];
+  properties: Record<string, PainterProperty>;
+};
+
+export type PainterAssetExport = {
+  schema_version: typeof PAINTER_DOCUMENT_VERSION;
+  kind: 'thaum_asset_export';
+  asset_id: string;
+  asset_name: string;
+  source: {
+    document_version: typeof PAINTER_DOCUMENT_VERSION;
+    source_file_name: string;
+    source_file_path?: string | null;
+  };
+  export: {
+    profile: 'thaumworld_compact';
+    preserves_strata: true;
+    created_at: string;
+  };
+  interpretation: {
+    default_mode: PainterAssetExportMode;
+    allowed_modes: PainterAssetExportMode[];
+  };
+  strata: {
+    glyph: { groups: PainterAssetGlyphGroup[] };
+    sprite: { groups: PainterAssetSpriteGroup[] };
+    game_object: { groups: PainterAssetGameObjectGroup[] };
+  };
+};
+
+function get_asset_stem(sourceFilenameOrPath: string | null | undefined, fallback: string): string {
+  const raw = String(sourceFilenameOrPath ?? '').trim();
+  if (!raw) return fallback;
+  const fileName = raw.slice(Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\')) + 1);
+  const stem = fileName.replace(/\.json$/i, '').replace(/_asset$/i, '').trim();
+  return stem || fallback;
+}
+
+function collect_group_raster_voxels(group: PainterGroup): PainterVoxelRecord[] {
+  const voxels: PainterVoxelRecord[] = [];
+  for (const propertyId of Array.isArray(group.property_ids) ? group.property_ids : []) {
+    const property = group.properties?.[propertyId];
+    if (!property) continue;
+    for (const block of property.blocks) {
+      if (block.type !== 'content' || block.value.kind !== 'raster') continue;
+      voxels.push(...block.value.voxels.map((voxel) => ({ ...voxel, rgb: { ...voxel.rgb }, graphic: voxel.graphic ? { ...voxel.graphic } : undefined, appearance_slots: voxel.appearance_slots ? { ...voxel.appearance_slots } : undefined, materials: voxel.materials ? { ...voxel.materials } : undefined })));
+    }
+  }
+  return voxels.sort((a, b) => a.z - b.z || a.y - b.y || a.x - b.x);
+}
+
+function derive_group_bounds(voxels: PainterVoxelRecord[]): PainterAssetGroupBounds {
+  if (voxels.length === 0) return null;
+  let minX = voxels[0]!.x;
+  let minY = voxels[0]!.y;
+  let minZ = voxels[0]!.z;
+  let maxX = voxels[0]!.x;
+  let maxY = voxels[0]!.y;
+  let maxZ = voxels[0]!.z;
+  for (const voxel of voxels) {
+    minX = Math.min(minX, voxel.x);
+    minY = Math.min(minY, voxel.y);
+    minZ = Math.min(minZ, voxel.z);
+    maxX = Math.max(maxX, voxel.x);
+    maxY = Math.max(maxY, voxel.y);
+    maxZ = Math.max(maxZ, voxel.z);
+  }
+  return { minX, minY, minZ, maxX, maxY, maxZ };
+}
+
+function pack_glyph_group(group: PainterGroup): PainterAssetGlyphGroup {
+  const voxels = collect_group_raster_voxels(group);
+  return {
+    id: group.id,
+    name: group.name,
+    visible: group.visible,
+    locked: group.locked,
+    opacity: group.opacity,
+    start: Math.floor(group.start ?? 0),
+    cropped_start: Math.floor(group.cropped_start ?? group.start ?? 0),
+    cropped_end: Math.floor(group.cropped_end ?? group.breath_end ?? group.start ?? 0),
+    breath_start: Math.floor(group.breath_start ?? group.start ?? 0),
+    breath_end: Math.floor(group.breath_end ?? group.cropped_end ?? group.start ?? 0),
+    bounds: derive_group_bounds(voxels),
+    cells: voxels.map((voxel) => ({
+      x: voxel.x,
+      y: voxel.y,
+      z: voxel.z,
+      char: voxel.char,
+      rgb: { ...voxel.rgb },
+      weight_index: voxel.weight_index,
+    })),
+  };
+}
+
+function pack_sprite_group(group: PainterGroup): PainterAssetSpriteGroup {
+  const voxels = collect_group_raster_voxels(group);
+  return {
+    id: group.id,
+    name: group.name,
+    visible: group.visible,
+    locked: group.locked,
+    opacity: group.opacity,
+    start: Math.floor(group.start ?? 0),
+    cropped_start: Math.floor(group.cropped_start ?? group.start ?? 0),
+    cropped_end: Math.floor(group.cropped_end ?? group.breath_end ?? group.start ?? 0),
+    breath_start: Math.floor(group.breath_start ?? group.start ?? 0),
+    breath_end: Math.floor(group.breath_end ?? group.cropped_end ?? group.start ?? 0),
+    bounds: derive_group_bounds(voxels),
+    cells: voxels.map((voxel) => ({
+      x: voxel.x,
+      y: voxel.y,
+      z: voxel.z,
+      char: voxel.char,
+      rgb: { ...voxel.rgb },
+      weight_index: voxel.weight_index,
+      graphic: voxel.graphic ? { ...voxel.graphic } : undefined,
+      appearance_slots: voxel.appearance_slots ? { ...voxel.appearance_slots } : undefined,
+      materials: voxel.materials ? { ...voxel.materials } : undefined,
+    })),
+  };
+}
+
+function pack_game_object_group(group: PainterGroup): PainterAssetGameObjectGroup {
+  const voxels = collect_group_raster_voxels(group);
+  return {
+    id: group.id,
+    name: group.name,
+    visible: group.visible,
+    locked: group.locked,
+    opacity: group.opacity,
+    start: Math.floor(group.start ?? 0),
+    cropped_start: Math.floor(group.cropped_start ?? group.start ?? 0),
+    cropped_end: Math.floor(group.cropped_end ?? group.breath_end ?? group.start ?? 0),
+    breath_start: Math.floor(group.breath_start ?? group.start ?? 0),
+    breath_end: Math.floor(group.breath_end ?? group.cropped_end ?? group.start ?? 0),
+    bounds: derive_group_bounds(voxels),
+    metadata: group.metadata ? structuredClone(group.metadata) : undefined,
+    property_ids: Array.isArray(group.property_ids) ? [...group.property_ids] : [],
+    properties: Object.fromEntries(
+      (Array.isArray(group.property_ids) ? group.property_ids : [])
+        .map((propertyId) => [propertyId, group.properties?.[propertyId]] as const)
+        .filter((entry): entry is readonly [string, PainterProperty] => !!entry[1])
+        .map(([propertyId, property]) => [propertyId, structuredClone(property)])
+    ),
+  };
+}
+
+function build_painter_asset_export(document: PainterDocument, sourceFilenameOrPath?: string | null): PainterAssetExport {
+  const normalized = clone_painter_document(document);
+  const asset_name = get_asset_stem(sourceFilenameOrPath, String(normalized.metadata?.title ?? 'untitled').trim() || 'untitled');
+  const asset_id = asset_name;
+  const groups = normalized.group_order
+    .map((groupId) => normalized.groups[groupId]!)
+    .filter((group): group is PainterGroup => !!group);
+  return {
+    schema_version: PAINTER_DOCUMENT_VERSION,
+    kind: 'thaum_asset_export',
+    asset_id,
+    asset_name,
+    source: {
+      document_version: PAINTER_DOCUMENT_VERSION,
+      source_file_name: get_asset_stem(sourceFilenameOrPath, `${asset_name}.json`) + '.json',
+      source_file_path: sourceFilenameOrPath ?? null,
+    },
+    export: {
+      profile: 'thaumworld_compact',
+      preserves_strata: true,
+      created_at: new Date().toISOString(),
+    },
+    interpretation: {
+      default_mode: 'glyph',
+      allowed_modes: ['glyph', 'sprite', 'game_object'],
+    },
+    strata: {
+      glyph: { groups: groups.map((group) => pack_glyph_group(group)) },
+      sprite: { groups: groups.map((group) => pack_sprite_group(group)) },
+      game_object: { groups: groups.map((group) => pack_game_object_group(group)) },
+    },
+  };
+}
+
+export function exportPainterAssetToJSON(document: PainterDocument, sourceFilenameOrPath?: string | null): string {
+  return JSON.stringify(build_painter_asset_export(document, sourceFilenameOrPath), null, 2);
+}
+
+export function getPainterAssetExportFilename(sourceFilenameOrPath: string): string {
+  const raw = String(sourceFilenameOrPath ?? '').trim();
+  const fileName = raw.slice(Math.max(raw.lastIndexOf('/'), raw.lastIndexOf('\\')) + 1);
+  const withoutExtension = fileName.replace(/\.json$/i, '');
+  const withoutAssetSuffix = withoutExtension.replace(/_asset$/i, '');
+  const base = withoutAssetSuffix.trim() || 'untitled';
+  return `${base}_asset.json`;
+}
+
+export function getPainterAssetExportPath(sourceFilePath: string | null | undefined): string | null {
+  const raw = String(sourceFilePath ?? '').trim();
+  if (!raw) return null;
+  const slashIndex = raw.lastIndexOf('/');
+  const backslashIndex = raw.lastIndexOf('\\');
+  const separatorIndex = Math.max(slashIndex, backslashIndex);
+  const fileName = raw.slice(separatorIndex + 1);
+  const exportName = getPainterAssetExportFilename(fileName);
+  if (separatorIndex < 0) return exportName;
+  const separator = backslashIndex > slashIndex ? '\\' : '/';
+  return `${raw.slice(0, separatorIndex)}${separator}${exportName}`;
+}
+
 function is_supported_painter_document_version(version: unknown): boolean {
-  return version === 3 || version === 4 || version === 5 || version === 6;
+  return version === 3 || version === 4 || version === 5 || version === PAINTER_DOCUMENT_VERSION;
 }
 
 function is_painter_document_like(parsed: any): boolean {

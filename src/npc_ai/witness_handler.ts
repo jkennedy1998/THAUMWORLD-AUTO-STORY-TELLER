@@ -15,6 +15,7 @@ import { get_configured_data_slot } from "../shared/boot_env.js";
 import { debug_log } from "../shared/debug.js";
 import { debug_event } from "../shared/debug_event.js";
 import { get_senses_for_action } from "../action_system/sense_broadcast.js";
+import { evaluate_sense_detection, get_observer_sense_mag } from "../shared/sense_mag.js";
 
 import {
   end_conversation,
@@ -185,13 +186,13 @@ function set_conversation_visual_state(
 import { get_outbox_path } from "../engine/paths.js";
 
 import {
-  face_target
+  direction_to_angle,
+  face_target,
+  get_facing,
 } from "./facing_system.js";
 
-import {
-  can_see,
-  can_hear,
-} from "./cone_of_vision.js";
+import { get_vision_preset } from "./vision_presets.js";
+import { evaluate_visual_los } from "../shared/perception_los.js";
 
 import {
   enterEngagement,
@@ -223,6 +224,7 @@ import {
   load_place,
   save_place
 } from "../place_storage/store.js";
+import { place_voxel_blocks_los } from "../place_storage/occupancy_index.js";
 
 import {
   get_npc_location
@@ -386,6 +388,13 @@ function can_npc_perceive(observer_ref: string, event: PerceptionEvent): boolean
 
   let best_sense: string | null = null;
   let detectable = false;
+  const observer_place_id = typeof (details_pos as any)?.place_id === "string"
+    ? String((details_pos as any).place_id)
+    : get_observer_place_id(observer_ref) ?? undefined;
+  const actor_place_id = typeof (actor_world_pos as any)?.place_id === "string"
+    ? String((actor_world_pos as any).place_id)
+    : undefined;
+  let observer_place: any | null | undefined = undefined;
 
   // Prefer higher-intensity senses first so "pressure" can win over "light" for speech, etc.
   const candidates = broadcasts
@@ -397,11 +406,40 @@ function can_npc_perceive(observer_ref: string, event: PerceptionEvent): boolean
     // Directional constraints
     if (b.sense === "light") {
       if (observer_pos && actor_pos) {
-        if (!can_see(observer_ref, observer_pos, actor_pos)) {
+        if (observer_place_id && actor_place_id && observer_place_id !== actor_place_id) {
           debug_event("WITNESS", "perception.vision_blocked", {
             observer_ref,
             verb: event.verb,
             distance: event.distance,
+            reason: "different_place",
+            observer_place_id,
+            actor_place_id,
+          });
+          continue;
+        }
+
+        if (observer_place === undefined && observer_place_id) {
+          const place_result = load_place(data_slot, observer_place_id);
+          observer_place = place_result.ok ? place_result.place : null;
+        }
+
+        const vision = get_vision_preset("humanoid");
+        const visual_los = evaluate_visual_los({
+          observer: observer_pos,
+          target: actor_pos,
+          center_yaw_rad: direction_to_angle(get_facing(observer_ref)),
+          yaw_fov_deg: vision.angle_degrees,
+          range_tiles: vision.range_tiles,
+          blocks_los_at: observer_place
+            ? (x, y, world_z) => place_voxel_blocks_los(observer_place as any, x, y, world_z)
+            : undefined,
+        });
+        if (!visual_los.visible) {
+          debug_event("WITNESS", "perception.vision_blocked", {
+            observer_ref,
+            verb: event.verb,
+            distance: event.distance,
+            reason: visual_los.reason,
           });
           continue;
         }
@@ -409,16 +447,23 @@ function can_npc_perceive(observer_ref: string, event: PerceptionEvent): boolean
     }
 
     if (b.sense === "pressure") {
-      // Hearing is omnidirectional but limited by the observer's hearing capacity.
-      if (observer_pos && actor_pos) {
-        if (!can_hear(observer_ref, observer_pos, actor_pos)) {
-          debug_event("WITNESS", "perception.hearing_blocked", {
-            observer_ref,
-            verb: event.verb,
-            distance: event.distance,
-          });
-          continue;
-        }
+      // Hearing is omnidirectional but governed by the canonical sense MAG runtime.
+      const pressure_mag = get_observer_sense_mag(data_slot, observer_ref, "pressure");
+      const pressure_detection = evaluate_sense_detection(
+        "pressure",
+        pressure_mag,
+        Number(b.intensity ?? 0),
+        event.distance,
+      );
+      if (pressure_detection.clarity === "none") {
+        debug_event("WITNESS", "perception.hearing_blocked", {
+          observer_ref,
+          verb: event.verb,
+          distance: event.distance,
+          observer_pressure_mag: pressure_mag,
+          broadcast_intensity: Number(b.intensity ?? 0),
+        });
+        continue;
       }
     }
 

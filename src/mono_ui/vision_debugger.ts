@@ -1,19 +1,11 @@
 /**
- * Vision Debugger - ASCII Particle Visualization
- * 
- * Visualizes vision cones, hearing ranges, and sense broadcasts
- * using the existing particle system in the place module.
- * 
+ * Vision Debugger
+ *
+ * Sense geometry overlays now render through selection-style tint highlights
+ * in the place module. Small transient indicators like facing/conversation/
+ * perception flashes still use the lightweight particle path.
+ *
  * Debug overlays are toggled from UI (button) rather than hotkeys.
- * 
- * Visual Guide:
- * - Yellow ▲ = Vision cone tiles (light sense)
- * - Red ▲ = Occluded tiles inside cone (blocked by NPCs)
- * - Cyan ○ = Hearing range ring (pressure sense)  
- * - Orange ○ = Smell range (aroma sense)
- * - Magenta ✦ = Magic detection (thaumic sense)
- * - White arrows = Facing direction (↑↓←→↗↖↘↙)
- * - White ! = Perception event
  */
 
 import type { TilePosition } from "../types/place.js";
@@ -24,7 +16,7 @@ import {
   project_vision_cone_to_planes,
 } from "../shared/geometry/shape3d.js";
 
-/** Particle type matching the place module */
+/** Transient indicator payload matching the place module particle path */
 export type Particle = {
   x: number;
   y: number;
@@ -38,7 +30,7 @@ export type Particle = {
   op?: 'set' | 'tint_fg';
 };
 import { direction_to_angle, direction_to_arrow } from "../npc_ai/facing_system.js";
-import { get_vision_cone } from "../npc_ai/cone_of_vision.js";
+import { get_vision_preset } from "../npc_ai/vision_presets.js";
 import { debug_log } from "../shared/debug.js";
 
 /** Debug visualization state */
@@ -92,19 +84,31 @@ export function toggle_blocked_vision(): void {
   debug_log("VisionDebug", `Visible vision: ${DEBUG_VISION.show_visible_vision ? "ON" : "OFF"}`);
 }
 
-/** Particle spawn function - set by place module */
+/** Transient indicator emitter provided by place module */
 let spawn_particle_fn: ((particle: Particle) => void) | null = null;
 
-// Throttle maps (avoid spamming expensive particle fields)
-const last_hearing_spawn_by_ref = new Map<string, number>();
-const last_vision_spawn_by_ref = new Map<string, number>();
-const last_los_raycast_log_by_ref = new Map<string, number>();
 const last_broadcast3d_log_by_key = new Map<string, number>();
+const active_sense_broadcast_overlays: Array<{
+  origin: WorldPos;
+  sense: SenseType;
+  range: number;
+  source_ref?: string;
+  created_at: number;
+  expires_at: number;
+}> = [];
 
 export type BlocksLosAt = (x: number, y: number, world_z: number) => boolean;
 
 export type WorldPos = { x: number; y: number; z: number };
 export type VisiblePlanesZ = readonly number[];
+export type SenseHighlightPlaneSet = {
+  plane_index: number;
+  keys: Set<string>;
+  rgb: { r: number; g: number; b: number };
+  kind: 'vision' | 'hearing' | 'broadcast';
+  sense?: SenseType;
+  source_ref?: string;
+};
 
 function plane_index_for_world_z(world_z: number, planes: VisiblePlanesZ): number {
   const z = Number(world_z);
@@ -168,50 +172,24 @@ function vision_vertical_fov_deg_for_mag(mag: number): number {
   return Math.max(5, Math.min(120, out));
 }
 
-function spawn_ring_tint(opts: {
-  origin: WorldPos;
-  radius: number;
-  rgb: { r: number; g: number; b: number };
-  now: number;
-  lifespan_ms: number;
-  weight: number;
-  visible_planes_z: VisiblePlanesZ;
-}): number[] {
-  const slices = get_sphere_outline_plane_slices({
-    origin: opts.origin,
-    radius: opts.radius,
-    visible_planes_z: opts.visible_planes_z,
-  });
-  const counts = new Array<number>(opts.visible_planes_z.length).fill(0);
-  for (const slice of slices) {
-    counts[slice.plane_index] = slice.keys.size;
-    for (const key of slice.keys) {
-      const [xs, ys] = key.split(",");
-      spawn_debug_particle({
-        x: Number(xs),
-        y: Number(ys),
-        world_z: slice.plane_index,
-        char: "•",
-        rgb: opts.rgb,
-        created_at: opts.now,
-        lifespan_ms: opts.lifespan_ms,
-        weight: opts.weight,
-        op: 'tint_fg',
-      });
-    }
-  }
-  return counts;
+/*
+Legacy particle-overlay helper retired in favor of selection-style tint overlays.
+Keep this commented reference temporarily during migration cleanup.
+
+function spawn_ring_tint(...) {
+  ...old particle implementation...
 }
+*/
 
 /**
- * Register the particle spawn function from place module
+ * Register the transient indicator emitter from place module
  */
 export function register_particle_spawner(spawn_fn: (particle: Particle) => void): void {
   spawn_particle_fn = spawn_fn;
 }
 
 /**
- * Spawn a debug particle
+ * Emit a transient debug indicator
  */
 function spawn_debug_particle(particle: Particle): void {
   if (spawn_particle_fn) {
@@ -232,184 +210,69 @@ function get_sense_color(sense: SenseType): { r: number; g: number; b: number } 
   }
 }
 
-/**
- * Spawn vision cone particles
- */
-export function spawn_vision_cone_particles(
-  origin: WorldPos,
-  direction: Direction,
-  entity_ref: string,
-  visible_planes_z: VisiblePlanesZ,
-  blocks_los_at?: BlocksLosAt,
-  observer_tags?: any[]
-): void {
-  if (!DEBUG_VISION.enabled) return;
-  if (!DEBUG_VISION.show_vision_cones && !DEBUG_VISION.show_visible_vision) return;
+/*
+Legacy particle sense helpers retired in favor of selection-style tint overlays.
+Keep this commented reference temporarily during migration cleanup.
 
-  // Throttle: cone outlines are stable and expensive to respawn every frame.
-  const now = Date.now();
-  const last = last_vision_spawn_by_ref.get(entity_ref) ?? 0;
-  if (now - last < 400) return;
-  last_vision_spawn_by_ref.set(entity_ref, now);
-  
-  const cone = get_vision_cone(entity_ref);
-  const vision_mag = get_vision_mag_from_tags(observer_tags);
-  const vertical_fov_deg = vision_vertical_fov_deg_for_mag(vision_mag);
-  if (cone.range_tiles <= 0 || cone.angle_degrees <= 0 || vertical_fov_deg <= 0) return;
-
-  const center_angle = direction_to_angle(direction);
-  const projection = project_vision_cone_to_planes({
-    origin,
-    center_yaw_rad: center_angle,
-    yaw_fov_deg: cone.angle_degrees,
-    pitch_fov_deg: vertical_fov_deg,
-    range: cone.range_tiles,
-    visible_planes_z,
-    include_boundary: DEBUG_VISION.show_vision_cones,
-    blocks_los_at,
-  });
-  const vis_sets = projection.visible_by_plane;
-  const out_sets = projection.outline_by_plane;
-  const { rays_cast, rays_blocked, vox_steps } = projection.stats;
-
-  if (DEBUG_VISION.show_visible_vision) {
-    const spawn_set = (slot: number, set: Set<string>) => {
-      for (const key of set) {
-        const [xs, ys] = key.split(',');
-        spawn_debug_particle({
-          x: Number(xs),
-          y: Number(ys),
-          world_z: slot,
-          char: '•',
-          rgb: { r: 255, g: 230, b: 80 },
-          created_at: now,
-          lifespan_ms: 600,
-          weight: 7,
-          op: 'tint_fg',
-        });
-      }
-    };
-    vis_sets.forEach((set, slot) => spawn_set(slot, set));
-  }
-
-  if (DEBUG_VISION.show_vision_cones) {
-    const spawn_outline = (slot: number, set: Set<string>) => {
-      for (const key of set) {
-        const [xs, ys] = key.split(',');
-        spawn_debug_particle({
-          x: Number(xs),
-          y: Number(ys),
-          world_z: slot,
-          char: '▲',
-          rgb: { r: 200, g: 200, b: 0 },
-          created_at: now,
-          lifespan_ms: 900,
-          weight: 2,
-        });
-      }
-    };
-    out_sets.forEach((set, slot) => spawn_outline(slot, set));
-  }
-
-  if (blocks_los_at) {
-    const last_log = last_los_raycast_log_by_ref.get(entity_ref) ?? 0;
-    if (now - last_log > 1200) {
-      last_los_raycast_log_by_ref.set(entity_ref, now);
-      debug_log(
-        'VisionDebug',
-        `LOS3D ${entity_ref} mag=${vision_mag} vFov=${vertical_fov_deg} origin_z=${origin.z} planes=[${visible_planes_z.join(',')}] rays=${rays_cast} blocked=${rays_blocked} steps=${vox_steps} vis=[${vis_sets.map((s) => s.size).join(',')}]`
-      );
-    }
-  }
+export function spawn_vision_cone_particles(...) {
+  ...old particle implementation...
 }
 
-/**
- * Spawn hearing range particles (pressure sense)
- */
-export function spawn_hearing_range_particles(
-  origin: WorldPos,
-  entity_ref: string,
-  visible_planes_z: VisiblePlanesZ,
-  observer_tags?: any[]
-): void {
-  if (!DEBUG_VISION.enabled || !DEBUG_VISION.show_hearing_ranges) return;
-
-  // Throttle: a filled ring is expensive to spawn every frame.
-  const now = Date.now();
-  const last = last_hearing_spawn_by_ref.get(entity_ref) ?? 0;
-  if (now - last < 800) return;
-  last_hearing_spawn_by_ref.set(entity_ref, now);
-
-  const pressure_mag = get_pressure_mag_from_tags(observer_tags);
-  const hearing_range = hearing_range_tiles_for_mag(pressure_mag);
-  if (hearing_range <= 0) return;
-
-  const hearing_slices = get_sphere_outline_plane_slices({ origin, radius: hearing_range, visible_planes_z });
-  spawn_ring_tint({
-    origin,
-    radius: hearing_range,
-    rgb: { r: 0, g: 255, b: 255 },
-    now,
-    lifespan_ms: 900,
-    weight: 7,
-    visible_planes_z,
-  });
-
-  // Debug: show slice radii/quantization.
-  const dbg_key = `hearing:${entity_ref}`;
-  const last_dbg = last_broadcast3d_log_by_key.get(dbg_key) ?? 0;
-  if (now - last_dbg > 1200) {
-    last_broadcast3d_log_by_key.set(dbg_key, now);
-    const radii = hearing_slices.map((slice) => slice.radius);
-    const quant = hearing_slices.map((slice) => slice.quantized_radius);
-    debug_log(
-      'VisionDebug',
-      `Hearing3D ${entity_ref} mag=${pressure_mag} range=${hearing_range} origin_z=${origin.z} planes=[${visible_planes_z.join(',')}] radii=[${radii.map(r => (r === null ? 'x' : r.toFixed(2))).join(',')}] quant=[${quant.join(',')}]`
-    );
-  }
+export function spawn_hearing_range_particles(...) {
+  ...old particle implementation...
 }
+*/
 
-/**
- * Spawn sense broadcast particles
- */
-export function spawn_sense_broadcast_particles(opts: {
+export function enqueue_sense_broadcast_highlight(opts: {
   origin: WorldPos;
   sense: SenseType;
   range: number;
-  visible_planes_z: VisiblePlanesZ;
   source_ref?: string;
+  lifespan_ms?: number;
 }): void {
-  if (!DEBUG_VISION.enabled || !DEBUG_VISION.show_sense_broadcasts) return;
-
-  const origin = opts.origin;
   const range = Number(opts.range);
   if (!Number.isFinite(range) || range <= 0) return;
-  const color = get_sense_color(opts.sense);
   const now = Date.now();
-
-  const slices = get_sphere_outline_plane_slices({ origin, radius: range, visible_planes_z: opts.visible_planes_z });
-  const counts = spawn_ring_tint({
-    origin,
-    radius: range,
-    rgb: color,
-    now,
-    lifespan_ms: 900,
-    weight: 7,
-    visible_planes_z: opts.visible_planes_z,
+  active_sense_broadcast_overlays.push({
+    origin: { x: Math.floor(opts.origin.x), y: Math.floor(opts.origin.y), z: Math.floor(opts.origin.z) },
+    sense: opts.sense,
+    range,
+    source_ref: typeof opts.source_ref === 'string' && opts.source_ref.length > 0 ? opts.source_ref : undefined,
+    created_at: now,
+    expires_at: now + Math.max(1, Math.floor(opts.lifespan_ms ?? 900)),
   });
-  const radii = slices.map((slice) => slice.radius);
-  const quant = slices.map((slice) => slice.quantized_radius);
+}
 
-  const src = typeof opts.source_ref === 'string' && opts.source_ref.length > 0 ? opts.source_ref : 'broadcast';
-  const log_key = `${src}:${opts.sense}`;
-  const last = last_broadcast3d_log_by_key.get(log_key) ?? 0;
-  if (now - last > 900) {
-    last_broadcast3d_log_by_key.set(log_key, now);
-    debug_log(
-      'VisionDebug',
-      `Broadcast3D ${src} sense=${opts.sense} origin_z=${origin.z} planes=[${opts.visible_planes_z.join(',')}] radii=[${radii.map(r => (r === null ? 'x' : r.toFixed(2))).join(',')}] quant=[${quant.join(',')}] counts=[${counts.join(',')}]`
-    );
+export function get_active_sense_broadcast_highlights(visible_planes_z: VisiblePlanesZ, now: number = Date.now()): SenseHighlightPlaneSet[] {
+  for (let i = active_sense_broadcast_overlays.length - 1; i >= 0; i -= 1) {
+    if (active_sense_broadcast_overlays[i]!.expires_at <= now) active_sense_broadcast_overlays.splice(i, 1);
   }
+  if (!DEBUG_VISION.enabled || !DEBUG_VISION.show_sense_broadcasts) return [];
+
+  const overlays: SenseHighlightPlaneSet[] = [];
+  for (const entry of active_sense_broadcast_overlays) {
+    const slices = get_sphere_outline_plane_slices({ origin: entry.origin, radius: entry.range, visible_planes_z });
+    const radii = slices.map((slice) => slice.radius);
+    const quant = slices.map((slice) => slice.quantized_radius);
+    const counts = slices.map((slice) => slice.keys.size);
+    const src = entry.source_ref ?? 'broadcast';
+    const log_key = `${src}:${entry.sense}`;
+    const last = last_broadcast3d_log_by_key.get(log_key) ?? 0;
+    if (now - last > 900) {
+      last_broadcast3d_log_by_key.set(log_key, now);
+      debug_log(
+        'VisionDebug',
+        `Broadcast3D ${src} sense=${entry.sense} origin_z=${entry.origin.z} planes=[${visible_planes_z.join(',')}] radii=[${radii.map(r => (r === null ? 'x' : r.toFixed(2))).join(',')}] quant=[${quant.join(',')}] counts=[${counts.join(',')}]`
+      );
+    }
+    const rgb = get_sense_color(entry.sense);
+    for (const slice of slices) {
+      if (slice.keys.size > 0) {
+        overlays.push({ plane_index: slice.plane_index, keys: slice.keys, rgb, kind: 'broadcast', sense: entry.sense, source_ref: entry.source_ref });
+      }
+    }
+  }
+  return overlays;
 }
 
 /**
@@ -484,11 +347,61 @@ export function spawn_conversation_indicator(
 }
 
 /**
- * Update all debug visualizations for an NPC
+ * Update all debug visualizations for an entity
  * Call this periodically (e.g., every frame)
  */
-export function update_npc_debug_visuals(
-  npc_ref: string,
+export function get_entity_debug_sense_highlights(
+  entity_ref: string,
+  position: WorldPos,
+  direction: Direction,
+  visible_planes_z: VisiblePlanesZ,
+  blocks_los_at?: BlocksLosAt,
+  observer_tags?: any[]
+): SenseHighlightPlaneSet[] {
+  if (!DEBUG_VISION.enabled) return [];
+
+  const overlays: SenseHighlightPlaneSet[] = [];
+
+  if (DEBUG_VISION.show_vision_cones || DEBUG_VISION.show_visible_vision) {
+    const cone = get_vision_preset('humanoid');
+    const vision_mag = get_vision_mag_from_tags(observer_tags);
+    const vertical_fov_deg = vision_vertical_fov_deg_for_mag(vision_mag);
+    if (cone.range_tiles > 0 && cone.angle_degrees > 0 && vertical_fov_deg > 0) {
+      const projection = project_vision_cone_to_planes({
+        origin: position,
+        center_yaw_rad: direction_to_angle(direction),
+        yaw_fov_deg: cone.angle_degrees,
+        pitch_fov_deg: vertical_fov_deg,
+        range: cone.range_tiles,
+        visible_planes_z,
+        include_boundary: DEBUG_VISION.show_vision_cones,
+        blocks_los_at,
+      });
+      const plane_sets = DEBUG_VISION.show_visible_vision ? projection.visible_by_plane : projection.outline_by_plane;
+      const rgb = { r: 255, g: 230, b: 80 };
+      plane_sets.forEach((keys, plane_index) => {
+        if (keys.size > 0) overlays.push({ plane_index, keys, rgb, kind: 'vision' });
+      });
+    }
+  }
+
+  if (DEBUG_VISION.show_hearing_ranges) {
+    const pressure_mag = get_pressure_mag_from_tags(observer_tags);
+    const hearing_range = hearing_range_tiles_for_mag(pressure_mag);
+    if (hearing_range > 0) {
+      const hearing_slices = get_sphere_outline_plane_slices({ origin: position, radius: hearing_range, visible_planes_z });
+      const rgb = { r: 0, g: 255, b: 255 };
+      for (const slice of hearing_slices) {
+        if (slice.keys.size > 0) overlays.push({ plane_index: slice.plane_index, keys: slice.keys, rgb, kind: 'hearing' });
+      }
+    }
+  }
+
+  return overlays;
+}
+
+export function update_entity_debug_visuals(
+  entity_ref: string,
   position: WorldPos,
   direction: Direction,
   in_conversation: boolean,
@@ -502,16 +415,8 @@ export function update_npc_debug_visuals(
     spawn_facing_indicator(position, direction, visible_planes_z);
   }
   
-  if (DEBUG_VISION.show_vision_cones || DEBUG_VISION.show_visible_vision) {
-    spawn_vision_cone_particles(position, direction, npc_ref, visible_planes_z, blocks_los_at, observer_tags);
-  }
-  
-  if (DEBUG_VISION.show_hearing_ranges) {
-    spawn_hearing_range_particles(position, npc_ref, visible_planes_z, observer_tags);
-  }
-  
   if (DEBUG_VISION.show_conversation_state) {
-    spawn_conversation_indicator(position, in_conversation, npc_ref, visible_planes_z);
+    spawn_conversation_indicator(position, in_conversation, entity_ref, visible_planes_z);
   }
 }
 

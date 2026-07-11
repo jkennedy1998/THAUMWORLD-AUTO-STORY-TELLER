@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { create_raster3, raster3_get } from '../shared/geometry/raster3.js';
-import { box3_session_to_box3_spec, rasterize_box3_into_raster, rasterize_box3_session_into_raster, rasterize_box3_session_to_voxels, rasterize_box3_to_voxels, rasterize_cone3_session_into_raster, rasterize_cone3_session_to_voxels, rasterize_cylinder3_session_into_raster, rasterize_cylinder3_session_to_voxels, rasterize_line3_into_raster, rasterize_line3_to_voxels, rasterize_sphere3_session_into_raster, rasterize_sphere3_session_to_voxels } from '../shared/geometry/shape_rasterize3.js';
+import { box3_session_to_box3_spec, evaluate_box3_session_cell_sets, evaluate_cone3_session_cell_sets, evaluate_cylinder3_session_cell_sets, evaluate_sphere3_session_cell_sets, evaluated_shape_mode_to_world_voxels, rasterize_box3_into_raster, rasterize_box3_session_into_raster, rasterize_box3_session_to_voxels, rasterize_box3_to_voxels, rasterize_cone3_session_into_raster, rasterize_cone3_session_to_voxels, rasterize_cylinder3_session_into_raster, rasterize_cylinder3_session_to_voxels, rasterize_line3_into_raster, rasterize_line3_to_voxels, rasterize_sphere3_session_into_raster, rasterize_sphere3_session_to_voxels, select_evaluated_shape_mode_cell_keys } from '../shared/geometry/shape_rasterize3.js';
 
 function bounds_of(voxels: Array<{ x: number; y: number; z: number }>): { min_x: number; max_x: number; min_y: number; max_y: number; min_z: number; max_z: number } {
   assert.equal(voxels.length > 0, true);
@@ -16,6 +16,13 @@ function bounds_of(voxels: Array<{ x: number; y: number; z: number }>): { min_x:
 
 function assert_same_bounds(a: Array<{ x: number; y: number; z: number }>, b: Array<{ x: number; y: number; z: number }>): void {
   assert.deepEqual(bounds_of(a), bounds_of(b));
+}
+
+function assert_subset(subset: Array<{ x: number; y: number; z: number }>, superset: Array<{ x: number; y: number; z: number }>): void {
+  const keys = new Set(superset.map((voxel) => `${voxel.x},${voxel.y},${voxel.z}`));
+  for (const voxel of subset) {
+    assert.equal(keys.has(`${voxel.x},${voxel.y},${voxel.z}`), true);
+  }
 }
 
 function test_rasterize_line3_to_voxels(): void {
@@ -142,7 +149,7 @@ function test_rasterize_sphere3_session_to_voxels_filled(): void {
     anchor: { x: 0, y: 0, z: 0 },
     size: { x: 3, y: 3, z: 3 },
   }, 'filled');
-  assert.equal(voxels.length, 19);
+  assert.equal(voxels.length, 12);
   assert.equal(voxels.some((v) => v.x === 1 && v.y === 1 && v.z === 1), true);
   assert.equal(voxels.some((v) => v.x === 0 && v.y === 0 && v.z === 0), false);
 }
@@ -402,6 +409,96 @@ function test_curved_shape_modes_share_bounds(): void {
   assert_same_bounds(coneWire, coneFilled);
 }
 
+function test_curved_shape_mode_containment(): void {
+  const sphereWire = rasterize_sphere3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 9 },
+    u_segments: 7,
+    v_segments: 7,
+  }, 'wireframe');
+  const sphereSurface = rasterize_sphere3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 9 },
+    u_segments: 7,
+    v_segments: 7,
+  }, 'surfaces');
+  const sphereFilled = rasterize_sphere3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 9 },
+    u_segments: 7,
+    v_segments: 7,
+  }, 'filled');
+  assert_subset(sphereWire, sphereSurface);
+  assert_subset(sphereSurface, sphereFilled);
+
+  const cylinderWire = rasterize_cylinder3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 6 },
+    radial_segments: 7,
+  }, 'wireframe');
+  const cylinderSurface = rasterize_cylinder3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 6 },
+    radial_segments: 7,
+  }, 'surfaces');
+  const cylinderFilled = rasterize_cylinder3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 6 },
+    radial_segments: 7,
+  }, 'filled');
+  assert_subset(cylinderWire, cylinderSurface);
+  assert_subset(cylinderSurface, cylinderFilled);
+
+  const coneWire = rasterize_cone3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 6 },
+    radial_segments: 7,
+  }, 'wireframe');
+  const coneSurface = rasterize_cone3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 6 },
+    radial_segments: 7,
+  }, 'surfaces');
+  const coneFilled = rasterize_cone3_session_to_voxels({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: 9, y: 9, z: 6 },
+    radial_segments: 7,
+  }, 'filled');
+  assert_subset(coneWire, coneSurface);
+  assert_subset(coneSurface, coneFilled);
+}
+
+function key_voxels(keys: Set<string>): Array<{ x: number; y: number; z: number }> {
+  return Array.from(keys, (key) => {
+    const [x = 0, y = 0, z = 0] = key.split(',').map(Number);
+    return { x, y, z };
+  });
+}
+
+function test_evaluated_shape_cell_sets_and_mode_parity(): void {
+  const boxSpec = {
+    anchor: { x: 4, y: 5, z: 6 },
+    size: { x: 3, y: 3, z: 3 },
+  };
+  const box = evaluate_box3_session_cell_sets(boxSpec);
+  assert_subset(key_voxels(box.wireframeCellKeys), key_voxels(box.shellCellKeys));
+  assert_subset(key_voxels(box.shellCellKeys), key_voxels(box.bodyCellKeys));
+  assert.deepEqual(evaluated_shape_mode_to_world_voxels(box, 'wireframe'), rasterize_box3_session_to_voxels(boxSpec, 'wireframe'));
+
+  const sphereSpec = { anchor: { x: 0, y: 0, z: 0 }, size: { x: 5, y: 5, z: 5 }, u_segments: 5, v_segments: 5 };
+  const sphere = evaluate_sphere3_session_cell_sets(sphereSpec);
+  assert.deepEqual(evaluated_shape_mode_to_world_voxels(sphere, 'surfaces'), rasterize_sphere3_session_to_voxels(sphereSpec, 'surfaces'));
+  assert.equal(select_evaluated_shape_mode_cell_keys(sphere, 'filled').size, sphere.bodyCellKeys.size);
+
+  const cylinderSpec = { anchor: { x: 1, y: 2, z: 3 }, size: { x: 5, y: 5, z: 4 }, radial_segments: 5 };
+  const cylinder = evaluate_cylinder3_session_cell_sets(cylinderSpec);
+  assert.deepEqual(evaluated_shape_mode_to_world_voxels(cylinder, 'wireframe'), rasterize_cylinder3_session_to_voxels(cylinderSpec, 'wireframe'));
+
+  const coneSpec = { anchor: { x: 2, y: 3, z: 4 }, size: { x: 5, y: 5, z: 4 }, radial_segments: 5 };
+  const cone = evaluate_cone3_session_cell_sets(coneSpec);
+  assert.deepEqual(evaluated_shape_mode_to_world_voxels(cone, 'filled'), rasterize_cone3_session_to_voxels(coneSpec, 'filled'));
+}
+
 function test_box3_session_to_box3_spec(): void {
   assert.deepEqual(box3_session_to_box3_spec({
     anchor: { x: 4, y: 5, z: 6 },
@@ -453,6 +550,8 @@ function main(): void {
   test_rasterize_cone3_session_2d_outline_collapse();
   test_rasterize_cone3_session_wireframe_segments();
   test_curved_shape_modes_share_bounds();
+  test_curved_shape_mode_containment();
+  test_evaluated_shape_cell_sets_and_mode_parity();
   test_box3_session_to_box3_spec();
   console.log('geometry_shape_rasterize3 tests passed');
 }

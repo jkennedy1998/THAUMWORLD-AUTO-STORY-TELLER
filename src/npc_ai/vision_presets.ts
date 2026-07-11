@@ -5,7 +5,12 @@
  * These can be overridden per-entity or extended with custom types.
  */
 
-import type { VisionCone } from "./cone_of_vision.js";
+export interface VisionCone {
+  angle_degrees: number;
+  range_tiles: number;
+}
+
+export const DEFAULT_VISION_CONE: VisionCone = { angle_degrees: 120, range_tiles: 12 };
 
 /** Standard vision presets */
 export const VISION_PRESETS: Record<string, VisionCone> = {
@@ -33,7 +38,7 @@ export const VISION_PRESETS: Record<string, VisionCone> = {
  * Returns humanoid as fallback
  */
 export function get_vision_preset(name: string): VisionCone {
-  return VISION_PRESETS[name] ?? { angle_degrees: 120, range_tiles: 12 };
+  return VISION_PRESETS[name] ?? DEFAULT_VISION_CONE;
 }
 
 /**

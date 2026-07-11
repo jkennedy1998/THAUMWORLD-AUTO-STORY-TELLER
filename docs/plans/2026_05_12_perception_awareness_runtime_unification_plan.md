@@ -370,10 +370,142 @@ Secondary likely cleanup targets:
 - `src/integration/action_system_integration.ts`
 - `docs/guides/TROUBLESHOOTING.md`
 
+## LOS Audit And First Implementation Slice
+
+### Current audit result
+
+#### Keep as policy/config only
+
+- `src/npc_ai/vision_presets.ts`
+  - preset names
+  - `angle_degrees`
+  - `range_tiles`
+- hearing ratio policy currently expressed in `src/npc_ai/cone_of_vision.ts`
+- sense-range/detail policy in `src/shared/sense_mag.ts`
+
+These should survive only as tuning inputs, not as final LOS authority.
+
+#### Retire as LOS authority
+
+`src/npc_ai/cone_of_vision.ts` is not canonical 3D LOS.
+
+It currently provides:
+
+- yaw-only cone checks in XY
+- 3D distance
+- no shared voxel occlusion trace
+- ad hoc debug helpers like `get_cone_tiles(...)` / `get_hearing_tiles(...)`
+
+Live gameplay witness checks still depend on this here:
+
+- `src/npc_ai/witness_handler.ts`
+  - `can_see(...)`
+  - `can_hear(...)`
+
+This is the main remaining split-authority path.
+
+#### Existing stronger building blocks
+
+- geometry candidate generation:
+  - `src/shared/geometry/shape3d.ts`
+  - `project_vision_cone_to_planes(...)`
+- shared voxel tracing:
+  - `src/shared/math3d.ts`
+  - `trace_voxel_ray_3d(...)`
+- current blocker authority candidate:
+  - `src/place_storage/occupancy_index.ts`
+  - `place_voxel_blocks_los(...)`
+
+These are closer to the desired final architecture, but are currently mixed into debug-only usage and renderer-specific call sites.
+
+### Clean target
+
+One visual detection authority:
+
+1. policy/presets define range/FOV defaults
+2. shared LOS runtime evaluates candidate visibility
+3. world blocker adapter answers `blocks_los_at(x, y, z)`
+4. witness/debug/awareness consumers all use that same result
+
+### Exact smallest first implementation slice
+
+#### Slice 1 goal
+
+Create a shared LOS evaluator seam without changing all consumers at once.
+
+#### Slice 1 file targets
+
+New shared files:
+
+- `src/shared/perception_los.ts` or equivalent nearby shared runtime file
+
+Likely touched existing files:
+
+- `src/npc_ai/witness_handler.ts`
+- `src/mono_ui/vision_debugger.ts`
+- `src/shared/geometry/shape3d.ts`
+- `src/npc_ai/cone_of_vision.ts`
+- `src/npc_ai/vision_presets.ts`
+
+#### Slice 1 scope
+
+Add a minimal shared evaluator that can answer:
+
+- is target voxel/point visible from observer?
+- optionally: what cone candidate cells are visible under one blocker callback?
+
+The evaluator should own:
+
+- yaw/FOV directional gating
+- 3D voxel ray occlusion tracing
+- blocker-callback usage
+
+The evaluator should not own:
+
+- tile loading
+- renderer particles
+- witness reactions
+- awareness mutation
+
+#### Slice 1 migration use
+
+First consumer migration should be:
+
+- `src/npc_ai/witness_handler.ts`
+  - replace old `can_see(...)` authority with shared LOS evaluator
+
+Do not yet broaden to full hearing refactor or all debug consumers in the same first slice.
+
+That gives the first meaningful cleanup with the smallest gameplay-facing surface:
+
+- witness/gameplay visual detection stops using old cone authority
+- debug can continue temporarily as a consumer of the same lower-level tracing pieces
+
+#### Slice 1 non-goals
+
+- no broad sound-policy rewrite yet
+- no full cross-place pressure muffling model yet
+- no forced move of all geometry code out of `shape3d.ts` in one pass
+- no renderer-side blocker authority redesign in the same edit
+
+### Follow-up slices after Slice 1
+
+#### Slice 2
+
+Move debug cone evaluation to consume the same shared LOS evaluator rather than carrying a parallel trace path.
+
+#### Slice 3
+
+Demote `src/npc_ai/cone_of_vision.ts` to policy/debug helpers only, or retire it after presets are fully extracted.
+
+#### Slice 4
+
+Introduce canonical pressure/hearing occlusion policy using the same blocker seam.
+
 ## Open Questions To Refine Before Implementation
 
 - Should canonical LOS/occlusion live inside `src/shared/sense_mag.ts`, beside it, or above it in a richer shared perception runtime module?
-- Should `src/npc_ai/cone_of_vision.ts` be reused directly, partially extracted, or demoted to debug/fallback only?
+- Should `src/npc_ai/cone_of_vision.ts` be reduced to preset/policy-only helpers, or retired completely after migration?
 - What is the intended final policy for cross-place sound propagation through doors/walls/seams?
 - What is the intended first-pass muffling model for `pressure`?
 - Which explicit awareness effects should remain legal outside ordinary perception events?

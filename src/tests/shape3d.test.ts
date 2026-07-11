@@ -35,9 +35,37 @@ function test_cone_projection_blocks_los(): void {
   assert.ok(projection.stats.rays_blocked > 0);
 }
 
+function test_cone_projection_faces_forward_from_origin(): void {
+  const east = project_vision_cone_to_planes({
+    origin: { x: 10, y: 10, z: 0 },
+    center_yaw_rad: 0,
+    yaw_fov_deg: 50,
+    pitch_fov_deg: 30,
+    range: 5,
+    visible_planes_z: [0],
+  }).visible_by_plane[0] ?? new Set<string>();
+  assert.ok(east.has('10,10'));
+  assert.ok(east.has('11,10'));
+  assert.ok(east.has('14,10'));
+  assert.ok(!east.has('9,10'));
+
+  const north = project_vision_cone_to_planes({
+    origin: { x: 10, y: 10, z: 0 },
+    center_yaw_rad: Math.PI / 2,
+    yaw_fov_deg: 50,
+    pitch_fov_deg: 30,
+    range: 5,
+    visible_planes_z: [0],
+  }).visible_by_plane[0] ?? new Set<string>();
+  assert.ok(north.has('10,11'));
+  assert.ok(north.has('10,14'));
+  assert.ok(!north.has('10,9'));
+}
+
 function main(): void {
   test_sphere_slices();
   test_cone_projection_blocks_los();
+  test_cone_projection_faces_forward_from_origin();
   console.log('shape3d tests passed');
 }
 

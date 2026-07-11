@@ -3,6 +3,7 @@
 Colocated README for the encapsulated shared geometry seam.
 
 Shared spatial/shape seam for `shared`, gameplay/runtime, debug tools, and ASCII painter consumers.
+Lean by design: keep this folder pure, small, and reusable.
 
 ## Purpose
 
@@ -18,6 +19,7 @@ It exists to prevent duplicate shape logic from spreading across painter code, d
 - shared filled/surfaces/wireframe and 2D outline generation rules
 - canonical geometry-oriented result forms used by multiple consumers
 - compatibility migration targets for geometry logic currently living outside this seam
+- geometry used by perception/debug consumers without owning their policy
 
 ## Does not own
 
@@ -80,6 +82,7 @@ Current repo alignment:
 - `math3d` remains the low-level numeric/traversal substrate
 - `geometry` is the higher-level shared shape/projection/raster seam
 - domain systems should increasingly consume this folder rather than owning duplicate shape logic
+- perception/debug/witness code should treat geometry as math only, not policy
 
 The initial implementation starts by moving proto-geometry helpers out of `src/shared/shape3d.ts` and shared plane/voxel raster helpers out of `src/shared/painter_tools.ts` into this seam while preserving compatibility exports during migration.
 

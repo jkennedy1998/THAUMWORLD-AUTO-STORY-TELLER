@@ -1,4 +1,6 @@
-import { sphere_plane_intersection_radius, trace_voxel_ray_3d } from '../math3d.js';
+import { sphere_plane_intersection_radius } from '../math3d.js';
+import { evaluate_visual_los } from '../perception_los.js';
+import { evaluate_cone3_session_cell_sets, evaluate_sphere3_session_cell_sets, evaluated_shape_mode_to_world_voxels, local_cell_key_set_to_voxels, select_evaluated_shape_mode_cell_keys } from './shape_rasterize3.js';
 
 export type Shape3DWorldPos = { x: number; y: number; z: number };
 export type Shape3DPlaneSlice = {
@@ -67,6 +69,25 @@ export function get_sphere_outline_plane_slices(opts: {
     return [];
   }
 
+  const voxelRadius = Math.max(1, Math.floor(radius));
+  const sphere = evaluate_sphere3_session_cell_sets({
+    anchor: { x: origin_x - voxelRadius, y: origin_y - voxelRadius, z: Math.round(origin_z) - voxelRadius },
+    size: { x: (voxelRadius * 2) + 1, y: (voxelRadius * 2) + 1, z: (voxelRadius * 2) + 1 },
+    u_segments: Math.max(5, Math.min(24, voxelRadius * 2)),
+    v_segments: Math.max(5, Math.min(24, voxelRadius * 2)),
+  });
+  const shellWorldVoxels = evaluated_shape_mode_to_world_voxels(sphere, 'surfaces');
+  const keysByPlaneZ = new Map<number, Set<string>>();
+  for (const voxel of shellWorldVoxels) {
+    const planeZ = Math.floor(voxel.z);
+    let keys = keysByPlaneZ.get(planeZ);
+    if (!keys) {
+      keys = new Set<string>();
+      keysByPlaneZ.set(planeZ, keys);
+    }
+    keys.add(`${voxel.x},${voxel.y}`);
+  }
+
   return opts.visible_planes_z.map((plane_z_raw, plane_index) => {
     const plane_z = Number(plane_z_raw);
     const radius_on_plane = sphere_plane_intersection_radius(radius, plane_z - origin_z);
@@ -76,9 +97,7 @@ export function get_sphere_outline_plane_slices(opts: {
       plane_z,
       radius: radius_on_plane,
       quantized_radius,
-      keys: radius_on_plane === null || radius_on_plane <= 0
-        ? new Set<string>()
-        : get_circle_outline_keys(origin_x, origin_y, quantized_radius),
+      keys: keysByPlaneZ.get(Math.floor(plane_z)) ?? new Set<string>(),
     };
   });
 }
@@ -93,13 +112,12 @@ export function project_vision_cone_to_planes(opts: {
   include_boundary?: boolean;
   blocks_los_at?: Shape3DLosBlocker;
 }): VisionConePlaneProjection {
-  const range = Number(opts.range);
+  const range = Math.max(0, Math.floor(Number(opts.range)));
   const center_yaw = Number(opts.center_yaw_rad);
   const yaw_fov_deg = Number(opts.yaw_fov_deg);
   const pitch_fov_deg = Number(opts.pitch_fov_deg);
   const include_boundary = opts.include_boundary !== false;
 
-  const fallback_slot = Math.floor(opts.visible_planes_z.length / 2);
   const visible_by_plane = opts.visible_planes_z.map(() => new Set<string>());
   const outline_by_plane = opts.visible_planes_z.map(() => new Set<string>());
   if (!Number.isFinite(range) || range <= 0 || !Number.isFinite(center_yaw) || !Number.isFinite(yaw_fov_deg) || yaw_fov_deg <= 0 || !Number.isFinite(pitch_fov_deg) || pitch_fov_deg <= 0) {
@@ -112,61 +130,85 @@ export function project_vision_cone_to_planes(opts: {
     if (Number.isFinite(wz)) slot_by_world_z.set(Math.floor(wz), i);
   }
 
-  const sets_for_slot = (slot: number): Set<string> => visible_by_plane[slot] ?? visible_by_plane[fallback_slot] ?? new Set<string>();
-  const outline_for_slot = (slot: number): Set<string> => outline_by_plane[slot] ?? outline_by_plane[fallback_slot] ?? new Set<string>();
-
   const half_yaw = (yaw_fov_deg * Math.PI) / 180 / 2;
   const half_pitch = (pitch_fov_deg * Math.PI) / 180 / 2;
-  const yaw_steps = Math.max(30, Math.min(90, Math.floor(range * 6)));
-  let pitch_steps = Math.max(5, Math.min(13, Math.floor(pitch_fov_deg / 8)));
-  if (pitch_steps % 2 === 0) pitch_steps += 1;
-
-  const origin_cont = {
-    x: Number(opts.origin.x) + 0.5,
-    y: Number(opts.origin.y) + 0.5,
-    z: Number(opts.origin.z) + 0.5,
+  const radius_x = Math.max(0, Math.ceil(Math.tan(half_yaw) * range));
+  const radius_y = Math.max(0, Math.ceil(Math.tan(half_pitch) * range));
+  const size_x = (radius_x * 2) + 1;
+  const size_y = (radius_y * 2) + 1;
+  const size_z = range + 1;
+  const radial_segments = Math.max(5, Math.min(24, Math.floor(range * 2)));
+  const cone = evaluate_cone3_session_cell_sets({
+    anchor: { x: 0, y: 0, z: 0 },
+    size: { x: size_x, y: size_y, z: size_z },
+    radial_segments,
+  });
+  const bodyKeys = select_evaluated_shape_mode_cell_keys(cone, 'filled');
+  const boundaryKeys = include_boundary ? select_evaluated_shape_mode_cell_keys(cone, 'wireframe') : new Set<string>();
+  const center_x = (size_x - 1) / 2;
+  const center_y = (size_y - 1) / 2;
+  const max_local_z = size_z - 1;
+  const forward = { x: Math.cos(center_yaw), y: Math.sin(center_yaw) };
+  const right = { x: Math.cos(center_yaw + (Math.PI / 2)), y: Math.sin(center_yaw + (Math.PI / 2)) };
+  const world_origin = {
+    x: Math.round(Number(opts.origin.x)),
+    y: Math.round(Number(opts.origin.y)),
+    z: Math.round(Number(opts.origin.z)),
   };
-  const oxv = Math.floor(origin_cont.x);
-  const oyv = Math.floor(origin_cont.y);
-  const ozv = Math.floor(origin_cont.z);
+  const project_local_to_world = (local: { x: number; y: number; z: number }): Shape3DWorldPos => {
+    const forward_depth = max_local_z - local.z;
+    const lateral = local.x - center_x;
+    const vertical = local.y - center_y;
+    return {
+      x: Math.round(world_origin.x + (forward.x * forward_depth) + (right.x * lateral)),
+      y: Math.round(world_origin.y + (forward.y * forward_depth) + (right.y * lateral)),
+      z: Math.round(world_origin.z + vertical),
+    };
+  };
 
+  const visibleWorldKeys = new Set<string>();
   let rays_cast = 0;
   let rays_blocked = 0;
   let vox_steps = 0;
 
-  const cast_ray = (yaw: number, pitch: number, boundary: boolean) => {
-    const cp = Math.cos(pitch);
-    const dir = { x: cp * Math.cos(yaw), y: cp * Math.sin(yaw), z: Math.sin(pitch) };
-    let blocked = false;
-
-    trace_voxel_ray_3d(origin_cont, dir, range, (vx, vy, vz) => {
-      vox_steps++;
-      const slot = slot_by_world_z.get(vz);
-      if (slot !== undefined) {
-        const key = `${vx},${vy}`;
-        sets_for_slot(slot).add(key);
-        if (boundary) outline_for_slot(slot).add(key);
-      }
-      if (vx === oxv && vy === oyv && vz === ozv) return;
-      if (opts.blocks_los_at && opts.blocks_los_at(vx, vy, vz)) {
-        blocked = true;
-        return false;
-      }
+  const is_visible_world_voxel = (target: Shape3DWorldPos): boolean => {
+    const los = evaluate_visual_los({
+      observer: world_origin,
+      target,
+      center_yaw_rad: center_yaw,
+      yaw_fov_deg,
+      range_tiles: range,
+      blocks_los_at: opts.blocks_los_at,
     });
-
-    if (blocked) rays_blocked++;
+    vox_steps += los.vox_steps;
+    if (!los.visible && los.reason === 'blocked') {
+      rays_blocked++;
+    }
+    return los.visible;
   };
 
-  for (let iy = 0; iy <= yaw_steps; iy++) {
-    const ty = yaw_steps > 0 ? (iy / yaw_steps) : 0;
-    const yaw = center_yaw + (-half_yaw + (2 * half_yaw) * ty);
-    for (let ip = 0; ip <= pitch_steps; ip++) {
-      const tp = pitch_steps > 0 ? (ip / pitch_steps) : 0;
-      const pitch = -half_pitch + (2 * half_pitch) * tp;
-      const boundary = include_boundary && (iy === 0 || iy === yaw_steps || ip === 0 || ip === pitch_steps);
-      rays_cast++;
-      cast_ray(yaw, pitch, boundary);
+  for (const local of local_cell_key_set_to_voxels(bodyKeys)) {
+    const world = project_local_to_world(local);
+    rays_cast++;
+    if (!is_visible_world_voxel(world)) continue;
+    visibleWorldKeys.add(`${world.x},${world.y},${world.z}`);
+    const slot = slot_by_world_z.get(world.z);
+    if (slot !== undefined) visible_by_plane[slot]?.add(`${world.x},${world.y}`);
+  }
+
+  if (include_boundary) {
+    for (const local of local_cell_key_set_to_voxels(boundaryKeys)) {
+      const world = project_local_to_world(local);
+      if (!visibleWorldKeys.has(`${world.x},${world.y},${world.z}`)) continue;
+      const slot = slot_by_world_z.get(world.z);
+      if (slot !== undefined) outline_by_plane[slot]?.add(`${world.x},${world.y}`);
     }
+  }
+
+  const originSlot = slot_by_world_z.get(world_origin.z);
+  if (originSlot !== undefined) {
+    visible_by_plane[originSlot]?.add(`${world_origin.x},${world_origin.y}`);
+    if (include_boundary) outline_by_plane[originSlot]?.add(`${world_origin.x},${world_origin.y}`);
   }
 
   return { visible_by_plane, outline_by_plane, stats: { rays_cast, rays_blocked, vox_steps } };

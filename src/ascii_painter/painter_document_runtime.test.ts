@@ -34,6 +34,7 @@ import {
   erase_group_voxel,
   erase_group_voxel_at_breath,
   set_painter_document_loop_window,
+  resolve_painter_time_asset_bundle_preview_at_breath,
 } from './painter_document_runtime.js';
 
 function assert(condition: unknown, message: string): void {
@@ -71,6 +72,30 @@ document.group_order.push(topGroup.id);
 
 const runtime = normalize_painter_document_runtime(document);
 const key = make_painter_coord_key(2, 3, 1);
+
+document.metadata = {
+  created_at: new Date().toISOString(),
+  modified_at: new Date().toISOString(),
+  time_assets: {
+    schema_version: 1,
+    particle_effects: [{
+      schema_version: 1,
+      kind: 'single_play_particle_effect',
+      id: 'spark_effect',
+      name: 'Spark',
+      spawn_breath: 2,
+      window_start: 2,
+      window_end: 4,
+      processed_breaths: 0,
+      is_complete: false,
+      is_deleted: false,
+      visual: { char: '*', display_color: '#ffcc00', render_index: 3, weight_index: 1 },
+    }],
+  },
+};
+const previewAt2 = resolve_painter_time_asset_bundle_preview_at_breath(normalize_painter_document_runtime(document, { active_breath: 2 }), 2);
+assert(previewAt2?.particle_effects[0]?.state === 'active', 'time asset preview should resolve active state through runtime');
+assert(previewAt2?.active_particle_effect_ids[0] === 'spark_effect', 'time asset preview should expose active effect ids through runtime');
 
 const legacyContentStatesKey = 'content' + '_states';
 assert(!(legacyContentStatesKey in runtime.document.groups[baseGroupId]!), 'normalized groups should not keep legacy raster state arrays');

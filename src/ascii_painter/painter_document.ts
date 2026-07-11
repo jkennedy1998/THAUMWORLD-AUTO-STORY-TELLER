@@ -3,7 +3,7 @@ import type { InlineMaterialAssignments, RenderGraphicRef } from '../render_shad
 import type { AppearanceSlotAssignments } from './types.js';
 import { clone_appearance_slot_assignments } from './types.js';
 import type { CameraConfig } from './voxel_space.js';
-import type { PainterTimeAssetBundle } from './painter_time_assets.js';
+import { normalize_painter_time_asset_bundle, type PainterTimeAssetBundle } from './painter_time_assets.js';
 
 export type PainterCoordKey = string;
 
@@ -15,6 +15,8 @@ export type PainterOccupiedBounds = {
   maxY: number;
   maxZ: number;
 };
+
+export const PAINTER_DOCUMENT_VERSION = 6;
 
 export type PainterDocumentMetadata = {
   title?: string;
@@ -138,7 +140,7 @@ export type PainterGroup = {
 };
 
 export type PainterDocument = {
-  version: 6;
+  version: typeof PAINTER_DOCUMENT_VERSION;
   bounds: {
     minX: number;
     minY: number;
@@ -186,6 +188,18 @@ function normalize_document_playback(playback: any): PainterDocumentPlayback {
     frames_per_breath: Math.max(1, clamp_int(playback?.frames_per_breath, 1)),
     loop_enabled: playback?.loop_enabled !== false,
   };
+}
+
+function normalize_document_metadata(metadata: any): PainterDocumentMetadata | undefined {
+  if (!metadata || typeof metadata !== 'object') return undefined;
+  const normalized: PainterDocumentMetadata = {
+    created_at: String(metadata.created_at ?? '').trim() || new Date().toISOString(),
+    modified_at: String(metadata.modified_at ?? '').trim() || new Date().toISOString(),
+  };
+  if (typeof metadata.title === 'string' && metadata.title.trim().length > 0) normalized.title = metadata.title.trim();
+  if (typeof metadata.description === 'string' && metadata.description.trim().length > 0) normalized.description = metadata.description.trim();
+  if (metadata.time_assets) normalized.time_assets = normalize_painter_time_asset_bundle(metadata.time_assets);
+  return normalized;
 }
 
 function sort_voxels(voxels: PainterVoxelRecord[]): PainterVoxelRecord[] {
@@ -553,7 +567,7 @@ export function create_painter_document(width: number, height: number, options?:
   });
   const now = new Date().toISOString();
   return {
-    version: 6,
+    version: PAINTER_DOCUMENT_VERSION,
     bounds: {
       minX,
       minY,
@@ -588,7 +602,7 @@ export function clone_painter_document(document: PainterDocument): PainterDocume
     maxZ: Math.floor(document.bounds.maxZ ?? 0),
   };
   return {
-    version: 6,
+    version: PAINTER_DOCUMENT_VERSION,
     bounds,
     occupied_bounds: document.occupied_bounds ? { ...document.occupied_bounds } : null,
     groups: Object.fromEntries(
@@ -598,7 +612,7 @@ export function clone_painter_document(document: PainterDocument): PainterDocume
     breath: normalize_document_breath((document as any).breath),
     playback: normalize_document_playback((document as any).playback),
     camera: document.camera ? structuredClone(document.camera) : undefined,
-    metadata: document.metadata ? structuredClone(document.metadata) : undefined,
+    metadata: normalize_document_metadata((document as any).metadata),
   };
 }
 

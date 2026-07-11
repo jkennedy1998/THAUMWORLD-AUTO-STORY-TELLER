@@ -6,6 +6,15 @@ import { create_raster3, raster3_in_bounds, raster3_set } from './raster3.js';
 import { draw_box_outline_3d, draw_box_volume_3d, draw_line_3d, raster3_active_voxels } from './raster_ops3.js';
 import type { AxisVector3, Box3SessionSpec, Box3Spec, Cone3SessionSpec, Cylinder3SessionSpec, Line3Spec, OrthoBasis3, ShapeRenderMode3, Sphere3SessionSpec } from './shape_specs.js';
 
+type ShapeSessionFrame3 = ReturnType<typeof normalize_box3_session_spec>;
+
+export type EvaluatedShape3CellSets = {
+  frame: ShapeSessionFrame3;
+  bodyCellKeys: Set<string>;
+  shellCellKeys: Set<string>;
+  wireframeCellKeys: Set<string>;
+};
+
 function normalize_line3_spec(spec: Line3Spec): {
   min_x: number;
   max_x: number;
@@ -195,25 +204,7 @@ export function rasterize_box3_to_voxels(spec: Box3Spec, mode: ShapeRenderMode3)
   return raster3_active_voxels(raster, Boolean);
 }
 
-function is_local_sphere_voxel_occupied(size_x: number, size_y: number, size_z: number, ix: number, iy: number, iz: number): boolean {
-  const radius_x = Math.max(0.5, size_x / 2);
-  const radius_y = Math.max(0.5, size_y / 2);
-  const radius_z = Math.max(0.5, size_z / 2);
-  const local_x = ((ix + 0.5) - radius_x) / radius_x;
-  const local_y = ((iy + 0.5) - radius_y) / radius_y;
-  const local_z = ((iz + 0.5) - radius_z) / radius_z;
-  return (local_x * local_x) + (local_y * local_y) + (local_z * local_z) <= 1;
-}
-
-function normalize_sphere3_session_spec(spec: Sphere3SessionSpec): ReturnType<typeof normalize_box3_session_spec> {
-  return normalize_box3_session_spec(spec);
-}
-
-function normalize_cylinder3_session_spec(spec: Cylinder3SessionSpec): ReturnType<typeof normalize_box3_session_spec> {
-  return normalize_box3_session_spec(spec);
-}
-
-function normalize_cone3_session_spec(spec: Cone3SessionSpec): ReturnType<typeof normalize_box3_session_spec> {
+function get_local_shape_session_frame(spec: Box3SessionSpec): ShapeSessionFrame3 {
   return normalize_box3_session_spec(spec);
 }
 
@@ -225,8 +216,8 @@ function get_active_local_axes(size_x: number, size_y: number, size_z: number): 
   return axes;
 }
 
-function is_local_surface_voxel(
-  occupied: Set<string>,
+function is_local_shell_cell(
+  bodyCells: Set<string>,
   size_x: number,
   size_y: number,
   size_z: number,
@@ -246,10 +237,10 @@ function is_local_surface_voxel(
   if (axes.includes('z')) {
     neighbors.push([ix, iy, iz - 1], [ix, iy, iz + 1]);
   }
-  return neighbors.some(([nx, ny, nz]) => !occupied.has(`${nx},${ny},${nz}`));
+  return neighbors.some(([nx, ny, nz]) => !bodyCells.has(`${nx},${ny},${nz}`));
 }
 
-function is_local_box_surface_voxel(size_x: number, size_y: number, size_z: number, ix: number, iy: number, iz: number): boolean {
+function is_local_box_shell_cell(size_x: number, size_y: number, size_z: number, ix: number, iy: number, iz: number): boolean {
   const axes = get_active_local_axes(size_x, size_y, size_z);
   if (axes.length < 1) return true;
   if (axes.includes('x') && (ix === 0 || ix === size_x - 1)) return true;
@@ -258,10 +249,10 @@ function is_local_box_surface_voxel(size_x: number, size_y: number, size_z: numb
   return false;
 }
 
-function is_local_box_wireframe_voxel(size_x: number, size_y: number, size_z: number, ix: number, iy: number, iz: number): boolean {
+function is_local_box_wireframe_cell(size_x: number, size_y: number, size_z: number, ix: number, iy: number, iz: number): boolean {
   const axes = get_active_local_axes(size_x, size_y, size_z);
   if (axes.length <= 2) {
-    return is_local_box_surface_voxel(size_x, size_y, size_z, ix, iy, iz);
+    return is_local_box_shell_cell(size_x, size_y, size_z, ix, iy, iz);
   }
   let boundary_axes = 0;
   if (ix === 0 || ix === size_x - 1) boundary_axes += 1;
@@ -283,12 +274,6 @@ function local_point3_to_world(anchor: Voxel3, basis: OrthoBasis3, x: number, y:
   };
 }
 
-function write_line_voxels<T>(raster: Raster3<T>, from: Voxel3, to: Voxel3, value: T): void {
-  for (const voxel of rasterize_line3_to_voxels({ x0: from.x, y0: from.y, z0: from.z, x1: to.x, y1: to.y, z1: to.z })) {
-    if (raster3_in_bounds(raster, voxel.x, voxel.y, voxel.z)) raster3_set(raster, voxel.x, voxel.y, voxel.z, value);
-  }
-}
-
 function get_regular_ring_points(size_x: number, size_y: number, segments: number, scale: number = 1): Array<{ x: number; y: number }> {
   const center_x = (size_x - 1) / 2;
   const center_y = (size_y - 1) / 2;
@@ -305,63 +290,6 @@ function get_regular_ring_points(size_x: number, size_y: number, segments: numbe
   return points;
 }
 
-function rasterize_cylinder_wireframe_into_raster<T>(raster: Raster3<T>, normalized: ReturnType<typeof normalize_cylinder3_session_spec>, radial_segments: number, value: T): void {
-  const ring0 = get_regular_ring_points(normalized.size_x, normalized.size_y, radial_segments, 1);
-  const z0 = 0;
-  const z1 = normalized.size_z - 1;
-  for (let i = 0; i < ring0.length; i += 1) {
-    const next = (i + 1) % ring0.length;
-    const baseA = local_point3_to_world(normalized.anchor, normalized.basis, ring0[i]!.x, ring0[i]!.y, z0);
-    const baseB = local_point3_to_world(normalized.anchor, normalized.basis, ring0[next]!.x, ring0[next]!.y, z0);
-    write_line_voxels(raster, baseA, baseB, value);
-    if (z1 !== z0) {
-      const topA = local_point3_to_world(normalized.anchor, normalized.basis, ring0[i]!.x, ring0[i]!.y, z1);
-      const topB = local_point3_to_world(normalized.anchor, normalized.basis, ring0[next]!.x, ring0[next]!.y, z1);
-      write_line_voxels(raster, topA, topB, value);
-      write_line_voxels(raster, baseA, topA, value);
-    }
-  }
-}
-
-function rasterize_cone_wireframe_into_raster<T>(raster: Raster3<T>, normalized: ReturnType<typeof normalize_cone3_session_spec>, radial_segments: number, value: T): void {
-  const baseRing = get_regular_ring_points(normalized.size_x, normalized.size_y, radial_segments, 1);
-  const tip = local_point3_to_world(normalized.anchor, normalized.basis, (normalized.size_x - 1) / 2, (normalized.size_y - 1) / 2, normalized.size_z - 1);
-  for (let i = 0; i < baseRing.length; i += 1) {
-    const next = (i + 1) % baseRing.length;
-    const baseA = local_point3_to_world(normalized.anchor, normalized.basis, baseRing[i]!.x, baseRing[i]!.y, 0);
-    const baseB = local_point3_to_world(normalized.anchor, normalized.basis, baseRing[next]!.x, baseRing[next]!.y, 0);
-    write_line_voxels(raster, baseA, baseB, value);
-    write_line_voxels(raster, baseA, tip, value);
-  }
-}
-
-function rasterize_sphere_wireframe_into_raster<T>(raster: Raster3<T>, normalized: ReturnType<typeof normalize_sphere3_session_spec>, u_segments: number, v_segments: number, value: T): void {
-  const cx = (normalized.size_x - 1) / 2;
-  const cy = (normalized.size_y - 1) / 2;
-  const cz = (normalized.size_z - 1) / 2;
-  const rx = Math.max(0.5, cx);
-  const ry = Math.max(0.5, cy);
-  const rz = Math.max(0.5, cz);
-  const pointAt = (uIndex: number, vIndex: number): Voxel3 => {
-    const phi = ((uIndex % u_segments) / u_segments) * Math.PI * 2;
-    const theta = (vIndex / v_segments) * Math.PI - (Math.PI / 2);
-    const x = cx + (Math.cos(theta) * Math.cos(phi) * rx);
-    const y = cy + (Math.cos(theta) * Math.sin(phi) * ry);
-    const z = cz + (Math.sin(theta) * rz);
-    return local_point3_to_world(normalized.anchor, normalized.basis, x, y, z);
-  };
-  for (let v = 1; v < v_segments; v += 1) {
-    for (let u = 0; u < u_segments; u += 1) {
-      write_line_voxels(raster, pointAt(u, v), pointAt(u + 1, v), value);
-    }
-  }
-  for (let u = 0; u < u_segments; u += 1) {
-    for (let v = 0; v < v_segments; v += 1) {
-      write_line_voxels(raster, pointAt(u, v), pointAt(u, v + 1), value);
-    }
-  }
-}
-
 function get_local_polygon_slice_points(
   points: Array<{ x: number; y: number }>,
   local_z: number,
@@ -374,104 +302,316 @@ function get_local_polygon_slice_points(
   return rasterize_polygon2_to_points({ points }, mode).map((point) => ({ x: point.x, y: point.y, z: Math.round(local_z) }));
 }
 
-function get_local_polygon_slice_occupied_points(
+function get_local_polygon_slice_body_cells(
   points: Array<{ x: number; y: number }>,
   local_z: number,
 ): Voxel3[] {
-  const occupied = new Map<string, Voxel3>();
-  for (const point of get_local_polygon_slice_points(points, local_z, 'fill')) occupied.set(`${point.x},${point.y},${point.z}`, point);
+  const bodyCells = new Map<string, Voxel3>();
+  for (const point of get_local_polygon_slice_points(points, local_z, 'fill')) bodyCells.set(`${point.x},${point.y},${point.z}`, point);
   const roundedVertices = points.map((point) => ({ x: Math.round(point.x), y: Math.round(point.y), z: Math.round(local_z) }));
-  if (roundedVertices.length === 1) occupied.set(`${roundedVertices[0]!.x},${roundedVertices[0]!.y},${roundedVertices[0]!.z}`, roundedVertices[0]!);
+  if (roundedVertices.length === 1) bodyCells.set(`${roundedVertices[0]!.x},${roundedVertices[0]!.y},${roundedVertices[0]!.z}`, roundedVertices[0]!);
   for (let i = 0; i < roundedVertices.length; i += 1) {
     const from = roundedVertices[i]!;
     const to = roundedVertices[(i + 1) % roundedVertices.length]!;
     for (const voxel of rasterize_line3_to_voxels({ x0: from.x, y0: from.y, z0: from.z, x1: to.x, y1: to.y, z1: to.z })) {
-      occupied.set(`${voxel.x},${voxel.y},${voxel.z}`, voxel);
+      bodyCells.set(`${voxel.x},${voxel.y},${voxel.z}`, voxel);
     }
   }
-  return Array.from(occupied.values());
+  return Array.from(bodyCells.values());
 }
 
-function write_local_polygon_slice<T>(
+function local_key(ix: number, iy: number, iz: number): string {
+  return `${ix},${iy},${iz}`;
+}
+
+function parse_local_key(key: string): Voxel3 {
+  const [x = 0, y = 0, z = 0] = key.split(',').map((value) => Number.parseInt(value, 10));
+  return { x, y, z };
+}
+
+export function local_cell_key_set_to_voxels(keys: Set<string>): Voxel3[] {
+  return Array.from(keys, parse_local_key);
+}
+
+export function map_local_voxels_to_world(frame: ShapeSessionFrame3, localVoxels: Voxel3[]): Voxel3[] {
+  return localVoxels.map((voxel) => local_point3_to_world(frame.anchor, frame.basis, voxel.x, voxel.y, voxel.z));
+}
+
+export function map_local_cell_key_set_to_world_voxels(frame: ShapeSessionFrame3, keys: Set<string>): Voxel3[] {
+  return map_local_voxels_to_world(frame, local_cell_key_set_to_voxels(keys));
+}
+
+function get_sphere_slice_scale(size_z: number, iz: number, v_segments: number): number {
+  if (size_z <= 1) return 1;
+  const normalized = iz / (size_z - 1);
+  const quantized = Math.round(normalized * v_segments) / v_segments;
+  const theta = (quantized * Math.PI) - (Math.PI / 2);
+  return Math.max(0, Math.cos(theta));
+}
+
+function collect_local_box_body_cells(size_x: number, size_y: number, size_z: number): Set<string> {
+  const bodyCells = new Set<string>();
+  for (let ix = 0; ix < size_x; ix += 1) {
+    for (let iy = 0; iy < size_y; iy += 1) {
+      for (let iz = 0; iz < size_z; iz += 1) {
+        bodyCells.add(local_key(ix, iy, iz));
+      }
+    }
+  }
+  return bodyCells;
+}
+
+function collect_local_segmented_cylinder_body_cells(normalized: ReturnType<typeof get_local_shape_session_frame>, radial_segments: number): Set<string> {
+  const bodyCells = new Set<string>();
+  const ring = get_regular_ring_points(normalized.size_x, normalized.size_y, radial_segments, 1);
+  for (let iz = 0; iz < normalized.size_z; iz += 1) {
+    for (const point of get_local_polygon_slice_body_cells(ring, iz)) {
+      bodyCells.add(local_key(point.x, point.y, point.z));
+    }
+  }
+  return bodyCells;
+}
+
+function collect_local_segmented_cone_body_cells(normalized: ReturnType<typeof get_local_shape_session_frame>, radial_segments: number): Set<string> {
+  const bodyCells = new Set<string>();
+  for (let iz = 0; iz < normalized.size_z; iz += 1) {
+    const scale = normalized.size_z <= 1 ? 1 : Math.max(0, 1 - (iz / (normalized.size_z - 1)));
+    const ring = get_regular_ring_points(normalized.size_x, normalized.size_y, radial_segments, scale);
+    for (const point of get_local_polygon_slice_body_cells(ring, iz)) {
+      bodyCells.add(local_key(point.x, point.y, point.z));
+    }
+  }
+  return bodyCells;
+}
+
+function collect_local_segmented_sphere_body_cells(normalized: ReturnType<typeof get_local_shape_session_frame>, u_segments: number, v_segments: number): Set<string> {
+  const bodyCells = new Set<string>();
+  for (let iz = 0; iz < normalized.size_z; iz += 1) {
+    const scale = get_sphere_slice_scale(normalized.size_z, iz, v_segments);
+    const ring = get_regular_ring_points(normalized.size_x, normalized.size_y, u_segments, scale);
+    for (const point of get_local_polygon_slice_body_cells(ring, iz)) {
+      bodyCells.add(local_key(point.x, point.y, point.z));
+    }
+  }
+  return bodyCells;
+}
+
+function collect_local_sphere_body_cells(normalized: ReturnType<typeof get_local_shape_session_frame>, u_segments: number, v_segments: number): Set<string> {
+  return collect_local_segmented_sphere_body_cells(normalized, u_segments, v_segments);
+}
+
+function collect_local_cylinder_body_cells(normalized: ReturnType<typeof get_local_shape_session_frame>, radial_segments: number): Set<string> {
+  return collect_local_segmented_cylinder_body_cells(normalized, radial_segments);
+}
+
+function collect_local_cone_body_cells(normalized: ReturnType<typeof get_local_shape_session_frame>, radial_segments: number): Set<string> {
+  return collect_local_segmented_cone_body_cells(normalized, radial_segments);
+}
+
+function collect_local_shell_cell_keys(bodyCells: Set<string>, size_x: number, size_y: number, size_z: number): Set<string> {
+  const shellCells = new Set<string>();
+  for (const key of bodyCells) {
+    const { x, y, z } = parse_local_key(key);
+    if (is_local_shell_cell(bodyCells, size_x, size_y, size_z, x, y, z)) shellCells.add(key);
+  }
+  return shellCells;
+}
+
+function collect_local_box_wireframe_cell_keys(size_x: number, size_y: number, size_z: number): Set<string> {
+  const wireframe = new Set<string>();
+  for (let ix = 0; ix < size_x; ix += 1) {
+    for (let iy = 0; iy < size_y; iy += 1) {
+      for (let iz = 0; iz < size_z; iz += 1) {
+        if (is_local_box_wireframe_cell(size_x, size_y, size_z, ix, iy, iz)) wireframe.add(local_key(ix, iy, iz));
+      }
+    }
+  }
+  return wireframe;
+}
+
+function collect_local_line_hint_keys(points: Voxel3[], closed: boolean): Set<string> {
+  const hint = new Set<string>();
+  if (points.length === 1) {
+    hint.add(local_key(points[0]!.x, points[0]!.y, points[0]!.z));
+    return hint;
+  }
+  const last = closed ? points.length : points.length - 1;
+  for (let i = 0; i < last; i += 1) {
+    const from = points[i]!;
+    const to = points[(i + 1) % points.length]!;
+    for (const voxel of rasterize_line3_to_voxels({ x0: from.x, y0: from.y, z0: from.z, x1: to.x, y1: to.y, z1: to.z })) {
+      hint.add(local_key(voxel.x, voxel.y, voxel.z));
+    }
+  }
+  return hint;
+}
+
+function union_local_key_sets(...sets: Set<string>[]): Set<string> {
+  const result = new Set<string>();
+  for (const set of sets) {
+    for (const key of set) result.add(key);
+  }
+  return result;
+}
+
+function intersect_local_key_sets(a: Set<string>, b: Set<string>): Set<string> {
+  const result = new Set<string>();
+  for (const key of a) {
+    if (b.has(key)) result.add(key);
+  }
+  return result;
+}
+
+function collect_local_cylinder_wireframe_hint_keys(normalized: ReturnType<typeof get_local_shape_session_frame>, radial_segments: number): Set<string> {
+  const ring = get_regular_ring_points(normalized.size_x, normalized.size_y, radial_segments, 1)
+    .map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) }));
+  const baseHint = collect_local_line_hint_keys(ring.map((point) => ({ x: point.x, y: point.y, z: 0 })), true);
+  const topHint = collect_local_line_hint_keys(ring.map((point) => ({ x: point.x, y: point.y, z: normalized.size_z - 1 })), true);
+  const railHint = union_local_key_sets(...ring.map((point) => collect_local_line_hint_keys([
+    { x: point.x, y: point.y, z: 0 },
+    { x: point.x, y: point.y, z: normalized.size_z - 1 },
+  ], false)));
+  return union_local_key_sets(baseHint, topHint, railHint);
+}
+
+function collect_local_cone_wireframe_hint_keys(normalized: ReturnType<typeof get_local_shape_session_frame>, radial_segments: number): Set<string> {
+  const ring = get_regular_ring_points(normalized.size_x, normalized.size_y, radial_segments, 1)
+    .map((point) => ({ x: Math.round(point.x), y: Math.round(point.y) }));
+  const tip = { x: Math.round((normalized.size_x - 1) / 2), y: Math.round((normalized.size_y - 1) / 2), z: normalized.size_z - 1 };
+  const baseHint = collect_local_line_hint_keys(ring.map((point) => ({ x: point.x, y: point.y, z: 0 })), true);
+  const railHint = union_local_key_sets(...ring.map((point) => collect_local_line_hint_keys([
+    { x: point.x, y: point.y, z: 0 },
+    tip,
+  ], false)));
+  return union_local_key_sets(baseHint, railHint);
+}
+
+function collect_local_sphere_wireframe_hint_keys(normalized: ReturnType<typeof get_local_shape_session_frame>, u_segments: number, v_segments: number): Set<string> {
+  const cx = (normalized.size_x - 1) / 2;
+  const cy = (normalized.size_y - 1) / 2;
+  const cz = (normalized.size_z - 1) / 2;
+  const rx = Math.max(0.5, cx);
+  const ry = Math.max(0.5, cy);
+  const rz = Math.max(0.5, cz);
+  const pointAt = (uIndex: number, vIndex: number): Voxel3 => {
+    const phi = ((uIndex % u_segments) / u_segments) * Math.PI * 2;
+    const theta = (vIndex / v_segments) * Math.PI - (Math.PI / 2);
+    const x = Math.round(cx + (Math.cos(theta) * Math.cos(phi) * rx));
+    const y = Math.round(cy + (Math.cos(theta) * Math.sin(phi) * ry));
+    const z = Math.round(cz + (Math.sin(theta) * rz));
+    return { x, y, z };
+  };
+  const hints: Set<string>[] = [];
+  for (let v = 1; v < v_segments; v += 1) {
+    const ring: Voxel3[] = [];
+    for (let u = 0; u < u_segments; u += 1) ring.push(pointAt(u, v));
+    hints.push(collect_local_line_hint_keys(ring, true));
+  }
+  for (let u = 0; u < u_segments; u += 1) {
+    const rail: Voxel3[] = [];
+    for (let v = 0; v <= v_segments; v += 1) rail.push(pointAt(u, v));
+    hints.push(collect_local_line_hint_keys(rail, false));
+  }
+  return union_local_key_sets(...hints);
+}
+
+export function select_evaluated_shape_mode_cell_keys(result: EvaluatedShape3CellSets, mode: ShapeRenderMode3): Set<string> {
+  if (mode === 'filled') return result.bodyCellKeys;
+  if (mode === 'surfaces') return result.shellCellKeys;
+  if (result.wireframeCellKeys.size > 0) return result.wireframeCellKeys;
+  return result.shellCellKeys;
+}
+
+function write_local_cell_key_set_to_raster<T>(
   raster: Raster3<T>,
   anchor: Voxel3,
   basis: OrthoBasis3,
-  points: Array<{ x: number; y: number }>,
-  local_z: number,
-  mode: 'edge' | 'fill',
+  keys: Set<string>,
   value: T,
 ): void {
-  for (const point of get_local_polygon_slice_points(points, local_z, mode)) {
-    const voxel = local_point3_to_world(anchor, basis, point.x, point.y, point.z);
+  for (const key of keys) {
+    const { x, y, z } = parse_local_key(key);
+    const voxel = local_point3_to_world(anchor, basis, x, y, z);
     if (raster3_in_bounds(raster, voxel.x, voxel.y, voxel.z)) raster3_set(raster, voxel.x, voxel.y, voxel.z, value);
   }
 }
 
-function get_sphere_slice_scale(size_z: number, iz: number): number {
-  if (size_z <= 1) return 1;
-  const center_z = (size_z - 1) / 2;
-  const radius_z = Math.max(0.5, center_z);
-  const local_z = (iz - center_z) / radius_z;
-  return Math.max(0, Math.sqrt(Math.max(0, 1 - (local_z * local_z))));
+function create_shape_session_voxel_raster(normalized: ShapeSessionFrame3): Raster3<boolean> {
+  return create_raster3<boolean>({
+    origin: { x: normalized.min_x, y: normalized.min_y, z: normalized.min_z },
+    width: normalized.max_x - normalized.min_x + 1,
+    height: normalized.max_y - normalized.min_y + 1,
+    depth: normalized.max_z - normalized.min_z + 1,
+    fill: false,
+  });
 }
 
-function collect_local_segmented_cylinder_occupied(normalized: ReturnType<typeof normalize_cylinder3_session_spec>, radial_segments: number): Set<string> {
-  const occupied = new Set<string>();
-  const ring = get_regular_ring_points(normalized.size_x, normalized.size_y, radial_segments, 1);
-  for (let iz = 0; iz < normalized.size_z; iz += 1) {
-    for (const point of get_local_polygon_slice_occupied_points(ring, iz)) {
-      occupied.add(`${point.x},${point.y},${point.z}`);
-    }
-  }
-  return occupied;
+function create_evaluated_shape3_cell_sets(
+  frame: ShapeSessionFrame3,
+  bodyCellKeys: Set<string>,
+  wireframeHintKeys?: Set<string>,
+  explicitWireframeCellKeys?: Set<string>,
+): EvaluatedShape3CellSets {
+  const shellCellKeys = collect_local_shell_cell_keys(bodyCellKeys, frame.size_x, frame.size_y, frame.size_z);
+  const wireframeCellKeys = explicitWireframeCellKeys
+    ? intersect_local_key_sets(explicitWireframeCellKeys, shellCellKeys)
+    : (wireframeHintKeys ? intersect_local_key_sets(wireframeHintKeys, shellCellKeys) : shellCellKeys);
+  return {
+    frame,
+    bodyCellKeys,
+    shellCellKeys,
+    wireframeCellKeys,
+  };
 }
 
-function collect_local_segmented_cone_occupied(normalized: ReturnType<typeof normalize_cone3_session_spec>, radial_segments: number): Set<string> {
-  const occupied = new Set<string>();
-  for (let iz = 0; iz < normalized.size_z; iz += 1) {
-    const scale = normalized.size_z <= 1 ? 1 : Math.max(0, 1 - (iz / (normalized.size_z - 1)));
-    const ring = get_regular_ring_points(normalized.size_x, normalized.size_y, radial_segments, scale);
-    for (const point of get_local_polygon_slice_occupied_points(ring, iz)) {
-      occupied.add(`${point.x},${point.y},${point.z}`);
-    }
-  }
-  return occupied;
-}
-
-function collect_local_segmented_sphere_occupied(normalized: ReturnType<typeof normalize_sphere3_session_spec>, u_segments: number, _v_segments: number): Set<string> {
-  const occupied = new Set<string>();
-  for (let iz = 0; iz < normalized.size_z; iz += 1) {
-    const scale = get_sphere_slice_scale(normalized.size_z, iz);
-    const ring = get_regular_ring_points(normalized.size_x, normalized.size_y, u_segments, scale);
-    for (const point of get_local_polygon_slice_occupied_points(ring, iz)) {
-      occupied.add(`${point.x},${point.y},${point.z}`);
-    }
-  }
-  return occupied;
-}
-
-function write_local_occupied_set_to_raster<T>(
+export function write_evaluated_shape_mode_to_raster<T>(
   raster: Raster3<T>,
-  anchor: Voxel3,
-  basis: OrthoBasis3,
-  occupied: Set<string>,
-  size_x: number,
-  size_y: number,
-  size_z: number,
-  mode: 'filled' | 'surfaces',
+  result: EvaluatedShape3CellSets,
+  mode: ShapeRenderMode3,
   value: T,
 ): void {
-  for (let ix = 0; ix < size_x; ix += 1) {
-    for (let iy = 0; iy < size_y; iy += 1) {
-      for (let iz = 0; iz < size_z; iz += 1) {
-        const key = `${ix},${iy},${iz}`;
-        if (!occupied.has(key)) continue;
-        if (mode === 'surfaces' && !is_local_surface_voxel(occupied, size_x, size_y, size_z, ix, iy, iz)) continue;
-        const voxel = local_point3_to_world(anchor, basis, ix, iy, iz);
-        if (raster3_in_bounds(raster, voxel.x, voxel.y, voxel.z)) raster3_set(raster, voxel.x, voxel.y, voxel.z, value);
-      }
-    }
-  }
+  const keys = select_evaluated_shape_mode_cell_keys(result, mode);
+  write_local_cell_key_set_to_raster(raster, result.frame.anchor, result.frame.basis, keys, value);
+}
+
+export function evaluated_shape_mode_to_world_voxels(result: EvaluatedShape3CellSets, mode: ShapeRenderMode3): Voxel3[] {
+  return map_local_cell_key_set_to_world_voxels(result.frame, select_evaluated_shape_mode_cell_keys(result, mode))
+    .sort((a, b) => (a.z - b.z) || (a.y - b.y) || (a.x - b.x));
+}
+
+export function evaluate_box3_session_cell_sets(spec: Box3SessionSpec): EvaluatedShape3CellSets {
+  const frame = get_local_shape_session_frame(spec);
+  const bodyCellKeys = collect_local_box_body_cells(frame.size_x, frame.size_y, frame.size_z);
+  const explicitWireframeCellKeys = collect_local_box_wireframe_cell_keys(frame.size_x, frame.size_y, frame.size_z);
+  return create_evaluated_shape3_cell_sets(frame, bodyCellKeys, undefined, explicitWireframeCellKeys);
+}
+
+export function evaluate_sphere3_session_cell_sets(spec: Sphere3SessionSpec): EvaluatedShape3CellSets {
+  const frame = get_local_shape_session_frame(spec);
+  const activeAxes = get_active_local_axes(frame.size_x, frame.size_y, frame.size_z);
+  const u_segments = clamp_segment_count(spec.u_segments, 5);
+  const v_segments = clamp_segment_count(spec.v_segments, 5);
+  const bodyCellKeys = collect_local_sphere_body_cells(frame, u_segments, v_segments);
+  const wireframeHintKeys = activeAxes.length >= 3 ? collect_local_sphere_wireframe_hint_keys(frame, u_segments, v_segments) : undefined;
+  return create_evaluated_shape3_cell_sets(frame, bodyCellKeys, wireframeHintKeys);
+}
+
+export function evaluate_cylinder3_session_cell_sets(spec: Cylinder3SessionSpec): EvaluatedShape3CellSets {
+  const frame = get_local_shape_session_frame(spec);
+  const activeAxes = get_active_local_axes(frame.size_x, frame.size_y, frame.size_z);
+  const radial_segments = clamp_segment_count(spec.radial_segments, 5);
+  const bodyCellKeys = collect_local_cylinder_body_cells(frame, radial_segments);
+  const wireframeHintKeys = activeAxes.length >= 3 ? collect_local_cylinder_wireframe_hint_keys(frame, radial_segments) : undefined;
+  return create_evaluated_shape3_cell_sets(frame, bodyCellKeys, wireframeHintKeys);
+}
+
+export function evaluate_cone3_session_cell_sets(spec: Cone3SessionSpec): EvaluatedShape3CellSets {
+  const frame = get_local_shape_session_frame(spec);
+  const activeAxes = get_active_local_axes(frame.size_x, frame.size_y, frame.size_z);
+  const radial_segments = clamp_segment_count(spec.radial_segments, 5);
+  const bodyCellKeys = collect_local_cone_body_cells(frame, radial_segments);
+  const wireframeHintKeys = activeAxes.length >= 3 ? collect_local_cone_wireframe_hint_keys(frame, radial_segments) : undefined;
+  return create_evaluated_shape3_cell_sets(frame, bodyCellKeys, wireframeHintKeys);
 }
 
 export function rasterize_box3_session_into_raster<T>(
@@ -480,61 +620,11 @@ export function rasterize_box3_session_into_raster<T>(
   mode: ShapeRenderMode3,
   value: T,
 ): void {
-  const normalized = normalize_box3_session_spec(spec);
-  for (let ix = 0; ix < normalized.size_x; ix += 1) {
-    for (let iy = 0; iy < normalized.size_y; iy += 1) {
-      for (let iz = 0; iz < normalized.size_z; iz += 1) {
-        const voxel = add_voxel3(
-          add_voxel3(
-            add_voxel3(normalized.anchor, scale_axis(normalized.basis.right, ix)),
-            scale_axis(normalized.basis.up, iy),
-          ),
-          scale_axis(normalized.basis.forward, iz),
-        );
-        if (mode === 'surfaces' && !is_local_box_surface_voxel(normalized.size_x, normalized.size_y, normalized.size_z, ix, iy, iz)) {
-          continue;
-        }
-        if (mode === 'wireframe' && !is_local_box_wireframe_voxel(normalized.size_x, normalized.size_y, normalized.size_z, ix, iy, iz)) {
-          continue;
-        }
-        if (raster3_in_bounds(raster, voxel.x, voxel.y, voxel.z)) {
-          raster3_set(raster, voxel.x, voxel.y, voxel.z, value);
-        }
-      }
-    }
-  }
+  write_evaluated_shape_mode_to_raster(raster, evaluate_box3_session_cell_sets(spec), mode, value);
 }
 
 export function rasterize_box3_session_to_voxels(spec: Box3SessionSpec, mode: ShapeRenderMode3): Voxel3[] {
-  const normalized = normalize_box3_session_spec(spec);
-  const raster = create_raster3<boolean>({
-    origin: { x: normalized.min_x, y: normalized.min_y, z: normalized.min_z },
-    width: normalized.max_x - normalized.min_x + 1,
-    height: normalized.max_y - normalized.min_y + 1,
-    depth: normalized.max_z - normalized.min_z + 1,
-    fill: false,
-  });
-  rasterize_box3_session_into_raster(raster, spec, mode, true);
-  return raster3_active_voxels(raster, Boolean);
-}
-
-function is_local_cylinder_voxel_occupied(size_x: number, size_y: number, ix: number, iy: number): boolean {
-  const radius_x = Math.max(0.5, size_x / 2);
-  const radius_y = Math.max(0.5, size_y / 2);
-  const local_x = ((ix + 0.5) - radius_x) / radius_x;
-  const local_y = ((iy + 0.5) - radius_y) / radius_y;
-  return (local_x * local_x) + (local_y * local_y) <= 1;
-}
-
-function is_local_cone_voxel_occupied(size_x: number, size_y: number, size_z: number, ix: number, iy: number, iz: number): boolean {
-  const t = size_z <= 1 ? 1 : 1 - (iz / (size_z - 1));
-  const radius_x = Math.max(0.5, (size_x / 2) * t);
-  const radius_y = Math.max(0.5, (size_y / 2) * t);
-  const center_x = size_x / 2;
-  const center_y = size_y / 2;
-  const local_x = ((ix + 0.5) - center_x) / radius_x;
-  const local_y = ((iy + 0.5) - center_y) / radius_y;
-  return (local_x * local_x) + (local_y * local_y) <= 1;
+  return evaluated_shape_mode_to_world_voxels(evaluate_box3_session_cell_sets(spec), mode);
 }
 
 export function rasterize_sphere3_session_into_raster<T>(
@@ -543,60 +633,11 @@ export function rasterize_sphere3_session_into_raster<T>(
   mode: ShapeRenderMode3,
   value: T,
 ): void {
-  const normalized = normalize_sphere3_session_spec(spec);
-  const activeAxes = get_active_local_axes(normalized.size_x, normalized.size_y, normalized.size_z);
-  if (mode === 'wireframe' && activeAxes.length >= 3) {
-    rasterize_sphere_wireframe_into_raster(raster, normalized, clamp_segment_count(spec.u_segments, 5), clamp_segment_count(spec.v_segments, 5), value);
-    return;
-  }
-  if (activeAxes.length >= 3 && normalized.size_x >= 5 && normalized.size_y >= 5 && normalized.size_z >= 5) {
-    const occupied = collect_local_segmented_sphere_occupied(normalized, clamp_segment_count(spec.u_segments, 5), clamp_segment_count(spec.v_segments, 5));
-    write_local_occupied_set_to_raster(raster, normalized.anchor, normalized.basis, occupied, normalized.size_x, normalized.size_y, normalized.size_z, mode === 'filled' ? 'filled' : 'surfaces', value);
-    return;
-  }
-  const occupied = new Set<string>();
-  for (let ix = 0; ix < normalized.size_x; ix += 1) {
-    for (let iy = 0; iy < normalized.size_y; iy += 1) {
-      for (let iz = 0; iz < normalized.size_z; iz += 1) {
-        if (!is_local_sphere_voxel_occupied(normalized.size_x, normalized.size_y, normalized.size_z, ix, iy, iz)) continue;
-        occupied.add(`${ix},${iy},${iz}`);
-      }
-    }
-  }
-  for (let ix = 0; ix < normalized.size_x; ix += 1) {
-    for (let iy = 0; iy < normalized.size_y; iy += 1) {
-      for (let iz = 0; iz < normalized.size_z; iz += 1) {
-        const key = `${ix},${iy},${iz}`;
-        if (!occupied.has(key)) continue;
-        if (mode !== 'filled' && !is_local_surface_voxel(occupied, normalized.size_x, normalized.size_y, normalized.size_z, ix, iy, iz)) {
-          continue;
-        }
-        const voxel = add_voxel3(
-          add_voxel3(
-            add_voxel3(normalized.anchor, scale_axis(normalized.basis.right, ix)),
-            scale_axis(normalized.basis.up, iy),
-          ),
-          scale_axis(normalized.basis.forward, iz),
-        );
-        if (raster3_in_bounds(raster, voxel.x, voxel.y, voxel.z)) {
-          raster3_set(raster, voxel.x, voxel.y, voxel.z, value);
-        }
-      }
-    }
-  }
+  write_evaluated_shape_mode_to_raster(raster, evaluate_sphere3_session_cell_sets(spec), mode, value);
 }
 
 export function rasterize_sphere3_session_to_voxels(spec: Sphere3SessionSpec, mode: ShapeRenderMode3): Voxel3[] {
-  const normalized = normalize_sphere3_session_spec(spec);
-  const raster = create_raster3<boolean>({
-    origin: { x: normalized.min_x, y: normalized.min_y, z: normalized.min_z },
-    width: normalized.max_x - normalized.min_x + 1,
-    height: normalized.max_y - normalized.min_y + 1,
-    depth: normalized.max_z - normalized.min_z + 1,
-    fill: false,
-  });
-  rasterize_sphere3_session_into_raster(raster, spec, mode, true);
-  return raster3_active_voxels(raster, Boolean);
+  return evaluated_shape_mode_to_world_voxels(evaluate_sphere3_session_cell_sets(spec), mode);
 }
 
 export function rasterize_cylinder3_session_into_raster<T>(
@@ -605,60 +646,11 @@ export function rasterize_cylinder3_session_into_raster<T>(
   mode: ShapeRenderMode3,
   value: T,
 ): void {
-  const normalized = normalize_cylinder3_session_spec(spec);
-  const activeAxes = get_active_local_axes(normalized.size_x, normalized.size_y, normalized.size_z);
-  if (mode === 'wireframe' && activeAxes.length >= 3) {
-    rasterize_cylinder_wireframe_into_raster(raster, normalized, clamp_segment_count(spec.radial_segments, 5), value);
-    return;
-  }
-  const occupied = activeAxes.length >= 3
-    ? collect_local_segmented_cylinder_occupied(normalized, clamp_segment_count(spec.radial_segments, 5))
-    : (() => {
-      const legacyOccupied = new Set<string>();
-      for (let ix = 0; ix < normalized.size_x; ix += 1) {
-        for (let iy = 0; iy < normalized.size_y; iy += 1) {
-          if (!is_local_cylinder_voxel_occupied(normalized.size_x, normalized.size_y, ix, iy)) continue;
-          for (let iz = 0; iz < normalized.size_z; iz += 1) {
-            legacyOccupied.add(`${ix},${iy},${iz}`);
-          }
-        }
-      }
-      return legacyOccupied;
-    })();
-  for (let ix = 0; ix < normalized.size_x; ix += 1) {
-    for (let iy = 0; iy < normalized.size_y; iy += 1) {
-      for (let iz = 0; iz < normalized.size_z; iz += 1) {
-        const key = `${ix},${iy},${iz}`;
-        if (!occupied.has(key)) continue;
-        if (mode !== 'filled' && !is_local_surface_voxel(occupied, normalized.size_x, normalized.size_y, normalized.size_z, ix, iy, iz)) {
-          continue;
-        }
-        const voxel = add_voxel3(
-          add_voxel3(
-            add_voxel3(normalized.anchor, scale_axis(normalized.basis.right, ix)),
-            scale_axis(normalized.basis.up, iy),
-          ),
-          scale_axis(normalized.basis.forward, iz),
-        );
-        if (raster3_in_bounds(raster, voxel.x, voxel.y, voxel.z)) {
-          raster3_set(raster, voxel.x, voxel.y, voxel.z, value);
-        }
-      }
-    }
-  }
+  write_evaluated_shape_mode_to_raster(raster, evaluate_cylinder3_session_cell_sets(spec), mode, value);
 }
 
 export function rasterize_cylinder3_session_to_voxels(spec: Cylinder3SessionSpec, mode: ShapeRenderMode3): Voxel3[] {
-  const normalized = normalize_cylinder3_session_spec(spec);
-  const raster = create_raster3<boolean>({
-    origin: { x: normalized.min_x, y: normalized.min_y, z: normalized.min_z },
-    width: normalized.max_x - normalized.min_x + 1,
-    height: normalized.max_y - normalized.min_y + 1,
-    depth: normalized.max_z - normalized.min_z + 1,
-    fill: false,
-  });
-  rasterize_cylinder3_session_into_raster(raster, spec, mode, true);
-  return raster3_active_voxels(raster, Boolean);
+  return evaluated_shape_mode_to_world_voxels(evaluate_cylinder3_session_cell_sets(spec), mode);
 }
 
 export function rasterize_cone3_session_into_raster<T>(
@@ -667,67 +659,18 @@ export function rasterize_cone3_session_into_raster<T>(
   mode: ShapeRenderMode3,
   value: T,
 ): void {
-  const normalized = normalize_cone3_session_spec(spec);
-  const activeAxes = get_active_local_axes(normalized.size_x, normalized.size_y, normalized.size_z);
-  if (mode === 'wireframe' && activeAxes.length >= 3) {
-    rasterize_cone_wireframe_into_raster(raster, normalized, clamp_segment_count(spec.radial_segments, 5), value);
-    return;
-  }
-  const occupied = activeAxes.length >= 3
-    ? collect_local_segmented_cone_occupied(normalized, clamp_segment_count(spec.radial_segments, 5))
-    : (() => {
-      const legacyOccupied = new Set<string>();
-      for (let ix = 0; ix < normalized.size_x; ix += 1) {
-        for (let iy = 0; iy < normalized.size_y; iy += 1) {
-          for (let iz = 0; iz < normalized.size_z; iz += 1) {
-            if (!is_local_cone_voxel_occupied(normalized.size_x, normalized.size_y, normalized.size_z, ix, iy, iz)) continue;
-            legacyOccupied.add(`${ix},${iy},${iz}`);
-          }
-        }
-      }
-      return legacyOccupied;
-    })();
-  for (let ix = 0; ix < normalized.size_x; ix += 1) {
-    for (let iy = 0; iy < normalized.size_y; iy += 1) {
-      for (let iz = 0; iz < normalized.size_z; iz += 1) {
-        const key = `${ix},${iy},${iz}`;
-        if (!occupied.has(key)) continue;
-        if (mode !== 'filled' && !is_local_surface_voxel(occupied, normalized.size_x, normalized.size_y, normalized.size_z, ix, iy, iz)) {
-          continue;
-        }
-        const voxel = add_voxel3(
-          add_voxel3(
-            add_voxel3(normalized.anchor, scale_axis(normalized.basis.right, ix)),
-            scale_axis(normalized.basis.up, iy),
-          ),
-          scale_axis(normalized.basis.forward, iz),
-        );
-        if (raster3_in_bounds(raster, voxel.x, voxel.y, voxel.z)) {
-          raster3_set(raster, voxel.x, voxel.y, voxel.z, value);
-        }
-      }
-    }
-  }
+  write_evaluated_shape_mode_to_raster(raster, evaluate_cone3_session_cell_sets(spec), mode, value);
 }
 
 export function rasterize_cone3_session_to_voxels(spec: Cone3SessionSpec, mode: ShapeRenderMode3): Voxel3[] {
-  const normalized = normalize_cone3_session_spec(spec);
-  const raster = create_raster3<boolean>({
-    origin: { x: normalized.min_x, y: normalized.min_y, z: normalized.min_z },
-    width: normalized.max_x - normalized.min_x + 1,
-    height: normalized.max_y - normalized.min_y + 1,
-    depth: normalized.max_z - normalized.min_z + 1,
-    fill: false,
-  });
-  rasterize_cone3_session_into_raster(raster, spec, mode, true);
-  return raster3_active_voxels(raster, Boolean);
+  return evaluated_shape_mode_to_world_voxels(evaluate_cone3_session_cell_sets(spec), mode);
 }
 
 export function box3_session_to_box3_spec(spec: Box3SessionSpec): Box3Spec | null {
   const basis = get_box3_session_basis(spec);
   const is_identity = key_voxel3(basis.right) === '1,0,0' && key_voxel3(basis.up) === '0,1,0' && key_voxel3(basis.forward) === '0,0,1';
   if (!is_identity) return null;
-  const normalized = normalize_box3_session_spec(spec);
+  const normalized = get_local_shape_session_frame(spec);
   return {
     x0: normalized.anchor.x,
     y0: normalized.anchor.y,

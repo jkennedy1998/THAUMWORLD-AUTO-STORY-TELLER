@@ -15,6 +15,7 @@ import { save_npc } from "../npc_storage/store.js";
 import { get_awareness_entry } from "../shared/awareness.js";
 import { reconcile_awareness_for_pair, update_awareness_from_perception } from "../shared/awareness_runtime.js";
 import { evaluate_sense_detection } from "../shared/sense_mag.js";
+import { calculateDistance } from "../action_system/target_resolution.js";
 import { get_configured_data_slot } from "../shared/boot_env.js";
 
 const slot = get_configured_data_slot();
@@ -40,7 +41,7 @@ function cleanup_target(target: CleanupTarget): void {
   } catch {}
 }
 
-function make_actor(actor_id: string, location: { x: number; y: number; z?: number }, sense_mags: { light?: number; pressure?: number } = {}): Record<string, unknown> {
+function make_actor(actor_id: string, location: { x: number; y: number; z?: number }, sense_mags: { light?: number; pressure?: number } = {}, place_id = "test_place"): Record<string, unknown> {
   return {
     id: actor_id,
     ref: `actor.${actor_id}`,
@@ -51,7 +52,7 @@ function make_actor(actor_id: string, location: { x: number; y: number; z?: numb
       { name: "PRESSURE", mag: sense_mags.pressure ?? 2, meta: [] },
     ],
     location: {
-      place_id: "test_place",
+      place_id,
       world_tile: { x: 0, y: 0 },
       region_tile: { x: 0, y: 0 },
       tile: { x: location.x, y: location.y, z: location.z ?? 0 },
@@ -59,7 +60,7 @@ function make_actor(actor_id: string, location: { x: number; y: number; z?: numb
   };
 }
 
-function make_npc(npc_id: string, location: { x: number; y: number; z?: number }): Record<string, unknown> {
+function make_npc(npc_id: string, location: { x: number; y: number; z?: number }, place_id = "test_place"): Record<string, unknown> {
   return {
     id: npc_id,
     ref: `npc.${npc_id}`,
@@ -67,12 +68,16 @@ function make_npc(npc_id: string, location: { x: number; y: number; z?: number }
     body_slots: {},
     tags: [],
     location: {
-      place_id: "test_place",
+      place_id,
       world_tile: { x: 0, y: 0 },
       region_tile: { x: 0, y: 0 },
       tile: { x: location.x, y: location.y, z: location.z ?? 0 },
     },
   };
+}
+
+function make_event_location(place_id: string, x: number, y: number, z = 0) {
+  return { world_x: x, world_y: y, region_x: x, region_y: y, x, y, z, place_id };
 }
 
 async function testPressureOnlyPerception(): Promise<boolean> {
@@ -258,6 +263,122 @@ async function testMovementDetectionsPreserveAwareness(): Promise<boolean> {
   }
 }
 
+async function testAwarenessKeeps3DPositionsAndSeparatesSpaces(): Promise<boolean> {
+  printTestScenario(debugLogger, "Awareness Keeps 3D Positions And Separates Spaces", [
+    "Awareness should preserve z and place_id in last-known position",
+    "Same x/y with different z should fall out of awareness when too far",
+    "Different place_id should also prevent awareness retention",
+  ]);
+
+  const original_now = Date.now;
+
+  const floor_cleanup = { actor_id: "awareness_obs_floor3d", npc_id: "awareness_target_floor3d" };
+  cleanup_target(floor_cleanup);
+  try {
+    const place_id = "test_place_a";
+    save_actor(slot, floor_cleanup.actor_id!, make_actor(floor_cleanup.actor_id!, { x: 0, y: 0, z: 0 }, { pressure: 4 }, place_id));
+    save_npc(slot, floor_cleanup.npc_id!, make_npc(floor_cleanup.npc_id!, { x: 2, y: 2, z: 0 }, place_id));
+
+    update_awareness_from_perception(slot, {
+      id: "perc_awareness_floor3d",
+      timestamp: original_now(),
+      observerRef: `actor.${floor_cleanup.actor_id}`,
+      type: "action_completed",
+      actionId: "action_awareness_floor3d",
+      actorRef: `npc.${floor_cleanup.npc_id}`,
+      actorType: "npc",
+      actorVisibility: "clear",
+      actorIdentity: `npc.${floor_cleanup.npc_id}`,
+      identityKnown: true,
+      locationKnown: true,
+      verb: "MOVE",
+      subtype: "WALK",
+      verbClarity: "clear",
+      location: make_event_location(place_id, 2, 2, 0),
+      distance: Math.sqrt(8),
+      senses: ["light", "pressure"],
+      detectable: true,
+      bestSense: "light",
+      detections: [],
+      observerPositionWorld: make_event_location(place_id, 0, 0, 0),
+      actorPositionWorld: make_event_location(place_id, 2, 2, 0),
+      details: { success: true },
+      threatLevel: 0,
+      interestLevel: 0,
+      urgency: 0,
+    });
+
+    const seeded = load_actor(slot, floor_cleanup.actor_id!);
+    if (!seeded.ok || !seeded.actor) throw new Error("expected floor observer to load after awareness seed");
+    const seeded_entry = get_awareness_entry(seeded.actor as Record<string, unknown>, `npc.${floor_cleanup.npc_id}`);
+    assert(seeded_entry?.last_known_position?.z === 0, "expected z to be stored in last-known position");
+    assert(seeded_entry?.last_known_position?.place_id === place_id, "expected place_id to be stored in last-known position");
+    assert(calculateDistance(make_event_location(place_id, 0, 0, 0), make_event_location(place_id, 0, 0, 20)) === 20, "expected z to contribute to distance");
+
+    save_npc(slot, floor_cleanup.npc_id!, make_npc(floor_cleanup.npc_id!, { x: 2, y: 2, z: 20 }, place_id));
+    Date.now = () => original_now() + 7000;
+    reconcile_awareness_for_pair(slot, `actor.${floor_cleanup.actor_id}`, `npc.${floor_cleanup.npc_id}`);
+
+    const after_floor = load_actor(slot, floor_cleanup.actor_id!);
+    if (!after_floor.ok || !after_floor.actor) throw new Error("expected floor observer to reload after reconciliation");
+    assert(!get_awareness_entry(after_floor.actor as Record<string, unknown>, `npc.${floor_cleanup.npc_id}`), "expected awareness to drop when target moves too far across floors");
+  } finally {
+    Date.now = original_now;
+    cleanup_target(floor_cleanup);
+  }
+
+  const place_cleanup = { actor_id: "awareness_obs_place", npc_id: "awareness_target_place" };
+  cleanup_target(place_cleanup);
+  try {
+    const place_a = "test_place_a";
+    const place_b = "test_place_b";
+    save_actor(slot, place_cleanup.actor_id!, make_actor(place_cleanup.actor_id!, { x: 0, y: 0, z: 0 }, { pressure: 4 }, place_a));
+    save_npc(slot, place_cleanup.npc_id!, make_npc(place_cleanup.npc_id!, { x: 1, y: 1, z: 0 }, place_a));
+
+    update_awareness_from_perception(slot, {
+      id: "perc_awareness_place",
+      timestamp: original_now(),
+      observerRef: `actor.${place_cleanup.actor_id}`,
+      type: "action_completed",
+      actionId: "action_awareness_place",
+      actorRef: `npc.${place_cleanup.npc_id}`,
+      actorType: "npc",
+      actorVisibility: "clear",
+      actorIdentity: `npc.${place_cleanup.npc_id}`,
+      identityKnown: true,
+      locationKnown: true,
+      verb: "MOVE",
+      subtype: "WALK",
+      verbClarity: "clear",
+      location: make_event_location(place_a, 1, 1, 0),
+      distance: Math.sqrt(2),
+      senses: ["light", "pressure"],
+      detectable: true,
+      bestSense: "light",
+      detections: [],
+      observerPositionWorld: make_event_location(place_a, 0, 0, 0),
+      actorPositionWorld: make_event_location(place_a, 1, 1, 0),
+      details: { success: true },
+      threatLevel: 0,
+      interestLevel: 0,
+      urgency: 0,
+    });
+
+    save_npc(slot, place_cleanup.npc_id!, make_npc(place_cleanup.npc_id!, { x: 1, y: 1, z: 0 }, place_b));
+    Date.now = () => original_now() + 7000;
+    reconcile_awareness_for_pair(slot, `actor.${place_cleanup.actor_id}`, `npc.${place_cleanup.npc_id}`);
+
+    const after_place = load_actor(slot, place_cleanup.actor_id!);
+    if (!after_place.ok || !after_place.actor) throw new Error("expected place observer to reload after reconciliation");
+    assert(!get_awareness_entry(after_place.actor as Record<string, unknown>, `npc.${place_cleanup.npc_id}`), "expected awareness to drop when target moves to a different place");
+  } finally {
+    Date.now = original_now;
+    cleanup_target(place_cleanup);
+  }
+
+  return true;
+}
+
 async function testWitnessSkipsNonNpcObservers(): Promise<boolean> {
   printTestScenario(debugLogger, "Witness Skips Non-NPC Observers", [
     "Actor observers may still receive awareness updates",
@@ -366,6 +487,7 @@ async function runAllTests(): Promise<void> {
     { step: "Light Clear vs Obscured", run: testLightClearVsObscured },
     { step: "Awareness Decay And Last Known Position", run: testAwarenessDecayAndLastKnownPosition },
     { step: "Movement Detections Preserve Awareness", run: testMovementDetectionsPreserveAwareness },
+    { step: "Awareness Keeps 3D Positions And Separates Spaces", run: testAwarenessKeeps3DPositionsAndSeparatesSpaces },
     { step: "Witness Skips Non-NPC Observers", run: testWitnessSkipsNonNpcObservers },
     { step: "Communicate Perception Emits Detections", run: testCommunicatePerceptionEmitsDetections },
   ];
@@ -408,4 +530,4 @@ if (is_main) {
   });
 }
 
-export { runAllTests, testPressureOnlyPerception, testLightClearVsObscured, testAwarenessDecayAndLastKnownPosition };
+export { runAllTests, testPressureOnlyPerception, testLightClearVsObscured, testAwarenessDecayAndLastKnownPosition, testAwarenessKeeps3DPositionsAndSeparatesSpaces };

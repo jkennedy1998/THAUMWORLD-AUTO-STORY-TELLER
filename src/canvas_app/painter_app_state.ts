@@ -50,6 +50,9 @@ import {
   clearAutoSave,
   generateFilename,
   exportPainterDocumentToJSON,
+  exportPainterAssetToJSON,
+  getPainterAssetExportFilename,
+  getPainterAssetExportPath,
   importPainterDocumentFromJSON,
   autoSavePainterDocument,
   loadAutoSavePainterDocument,
@@ -82,8 +85,8 @@ import {
 } from '../ascii_painter/voxel_space.js';
 import { makeGroupsModule, resolve_groups_timeline_visible_span, type GroupListItem } from '../mono_ui/modules/groups_module.js';
 import { build_legacy_voxel_space_from_painter_runtime, import_legacy_voxel_space_as_painter_document } from '../ascii_painter/painter_document_legacy_adapter.js';
-import { clone_painter_voxel_record, create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, type PainterDocument, type PainterVoxelRecord } from '../ascii_painter/painter_document.js';
-import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_raster_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_move_block, resolve_nearest_painter_group_raster_state, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
+import { PAINTER_DOCUMENT_VERSION, clone_painter_voxel_record, create_painter_document, create_painter_group, create_painter_voxel_record, get_painter_group_raster_state_at_breath, type PainterDocument, type PainterVoxelRecord } from '../ascii_painter/painter_document.js';
+import { add_painter_group, duplicate_painter_group, erase_group_voxel, export_painter_document, get_exact_painter_group_raster_state, normalize_painter_document_runtime, remove_painter_group, rename_painter_group, reorder_painter_groups, resolve_nearest_painter_group_move_block, resolve_nearest_painter_group_raster_state, resolve_painter_group_location_at_breath, resolve_painter_group_preview_winner, resolve_painter_time_asset_bundle_preview_at_breath, set_group_voxel, set_painter_group_locked, set_painter_group_visibility, set_painter_runtime_active_breath, type PainterDocumentRuntime } from '../ascii_painter/painter_document_runtime.js';
 import { derive_group_breath_range, derive_group_raster_segment_ranges, derive_painter_document_authored_breath_bounds, derive_painter_document_suggested_breath_range, get_group_raster_segment_at_breath, get_painter_document_breath_range, get_painter_document_file_breath_range, get_painter_document_playback, step_painter_breath_playback, wrap_breath_in_painter_document_range } from '../ascii_painter/painter_breath.js';
 import { create_painter_session_core } from '../ascii_painter/painter_session_core.js';
 import type { PainterGroupPlaneRegistry } from '../ascii_painter/painter_session_types.js';
@@ -254,6 +257,21 @@ function summarizePainterTimelineGroup(group: PainterDocument['groups'][string])
         breath: Math.floor(block.start),
         is_blank: block.type === 'blank',
       }))),
+  };
+}
+
+function summarizePainterTimeAssetPreview(runtime: PainterDocumentRuntime, breath: number): Record<string, unknown> | null {
+  const preview = resolve_painter_time_asset_bundle_preview_at_breath(runtime, breath);
+  if (!preview) return null;
+  return {
+    breath: preview.breath,
+    total_effects: preview.particle_effects.length,
+    active_effects: preview.active_particle_effect_ids.length,
+    complete_effects: preview.complete_particle_effect_ids.length,
+    deleted_effects: preview.deleted_particle_effect_ids.length,
+    active_names: preview.particle_effects.filter((effect) => effect.state === 'active').map((effect) => effect.name),
+    complete_names: preview.particle_effects.filter((effect) => effect.state === 'complete').map((effect) => effect.name),
+    deleted_names: preview.particle_effects.filter((effect) => effect.state === 'deleted').map((effect) => effect.name),
   };
 }
 import { create_painter_tool_assisted_inputs_wiring } from './painter_tool_assisted_inputs_wiring.js';
@@ -441,6 +459,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   let pending_painter_positional_tap: PainterBufferedPositionalAction | null = null;
   let pending_painter_positional_tap_timer: number | null = null;
   let last_projection_runtime_log_signature = '';
+  let last_painter_time_asset_preview_signature = '';
   const DEFAULT_USER_SELECTION_COLOR_RGB: Rgb = { ...get_color_by_name('pumpkin').rgb };
   const saved_tool_props = loadToolProperties();
   let ui_customization_state: UiCustomizationState = get_ui_customization_state();
@@ -1497,6 +1516,14 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     ensureValidFocusPlane();
     refreshPainterProjectionFromWorld();
     painterDiag('current painter breath changed', { breath: painter_current_breath });
+    const previewSummary = summarizePainterTimeAssetPreview(painter_document_runtime, painter_current_breath);
+    if (previewSummary) {
+      const signature = JSON.stringify(previewSummary);
+      if (signature !== last_painter_time_asset_preview_signature) {
+        last_painter_time_asset_preview_signature = signature;
+        painterTimelineDiag('time asset preview resolved', previewSummary);
+      }
+    }
   }
 
   function stepCurrentPainterBreath(delta: number): void {
@@ -5537,6 +5564,7 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
   function applyPainterDocumentSnapshot(document: PainterDocument, options?: { reset_history?: boolean }): void {
     const preservedCameraState = getPainterPreservedCameraState();
     stopPainterPlayback();
+    last_painter_time_asset_preview_signature = '';
     painter_session_core.replace_document(document, {
       lineage_id: current_painter_document_lineage_id,
       authoritative_revision: authoritative_revision_applied,
@@ -5559,6 +5587,10 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     painter_display_projection = rebuildPainterDisplayProjection(getPainterDisplayViewState(), getPainterStableViewAnchor());
     syncProjectedGridFromDisplay();
     syncDOMRenderer();
+    const previewSummary = summarizePainterTimeAssetPreview(painter_document_runtime, painter_current_breath);
+    if (previewSummary) {
+      painterTimelineDiag('time asset preview resolved', previewSummary);
+    }
     if (options?.reset_history !== false) {
       resetPainterHistoryState('apply painter document snapshot');
     }
@@ -5865,6 +5897,32 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
     await writeArtworkToFileAtomic(current_file_path);
     rememberLastUsedFilePath(current_file_path);
     await publish_hosted_painter_session_metadata();
+  }
+
+  async function export_asset_file(): Promise<void> {
+    const data = exportPainterAssetToJSON(exportCurrentPainterDocument(), current_file_path ?? current_filename);
+    const export_path = getPainterAssetExportPath(current_file_path);
+    const api = window.electronAPI;
+    if (current_file_path && api?.writeFileAtomic && export_path) {
+      const result = await api.writeFileAtomic(export_path, data);
+      if (!result?.success) {
+        throw new Error(result?.error || 'Failed to write asset export');
+      }
+      painterImportant('asset export written', {
+        source_path: current_file_path,
+        export_path,
+        export_filename: getPainterAssetExportFilename(current_file_path),
+        schema_version: PAINTER_DOCUMENT_VERSION,
+      });
+      return;
+    }
+    const fallbackName = getPainterAssetExportFilename(current_filename ? `${current_filename}.json` : 'untitled.json');
+    downloadFile(data, fallbackName, 'application/json');
+    painterImportant('asset export downloaded', {
+      source_path: current_file_path,
+      export_filename: fallbackName,
+      schema_version: PAINTER_DOCUMENT_VERSION,
+    });
   }
 
   async function load_file(): Promise<void> {
@@ -8194,6 +8252,13 @@ export function create_painter_app_state(options?: PainterAppStateOptions): Pain
       void save_file().catch((e) => {
         diag_log('painter', 'important', 'PAINTER', 'save failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
         alert('Save failed: ' + (e as Error).message);
+      });
+    },
+    on_export_asset: () => {
+      if (current_session_role !== 'host') return;
+      void export_asset_file().catch((e) => {
+        diag_log('painter', 'important', 'PAINTER', 'asset export failed', { error: e instanceof Error ? e.message : String(e) }, { sink: 'error' });
+        alert('Asset export failed: ' + (e as Error).message);
       });
     },
     on_load: () => {

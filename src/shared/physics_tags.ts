@@ -32,9 +32,14 @@ export function build_physics_tag_flags(tags: any, resolved_tag_states?: Resolve
 }
 
 export function resolve_tile_physics_tags(tile: any): PhysicsTagFlags {
+  const runtime_tags = Array.isArray(tile?.tags) ? tile.tags : [];
+  const can_load_definitions = typeof process !== "undefined" && !!process?.versions?.node;
+  if (!can_load_definitions || tile?.__derived_runtime === true) {
+    return build_physics_tag_flags(runtime_tags, Array.isArray(tile?.resolved_tag_states) ? tile.resolved_tag_states : []);
+  }
   const resolved = tile ? resolve_place_tile(String(tile.kind ?? ""), tile) : null;
   return build_physics_tag_flags(
-    resolved?.effective_tags ?? (Array.isArray(tile?.tags) ? tile.tags : []),
+    resolved?.effective_tags ?? runtime_tags,
     resolved?.resolved_tag_states ?? [],
   );
 }
